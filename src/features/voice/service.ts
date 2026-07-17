@@ -1,0 +1,540 @@
+import { err, ok } from '../../domain/result.js';
+import type {
+  VoiceCasePort,
+  VoiceMember,
+  VoicePort,
+  VoiceResult,
+  VoiceSession,
+  VoiceOutcome,
+} from './contracts.js';
+
+const limit = async <T>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>,
+) => {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      if (item) await fn(item);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, worker),
+  );
+};
+class Semaphore {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  public constructor(private readonly size: number) {}
+  public async run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.active >= this.size)
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active++;
+    try {
+      return await operation();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+const caseIdentity = (
+  value: unknown,
+): { caseId?: string; caseNumber?: number } => {
+  if (!value || typeof value !== 'object') return {};
+  const record = value as {
+    id?: unknown;
+    caseId?: unknown;
+    caseNumber?: unknown;
+    value?: { id?: unknown; caseId?: unknown; caseNumber?: unknown };
+  };
+  const source =
+    record.value && typeof record.value === 'object' ? record.value : record;
+  return {
+    ...(typeof source.caseId === 'string'
+      ? { caseId: source.caseId }
+      : typeof source.id === 'string'
+        ? { caseId: source.id }
+        : {}),
+    ...(typeof source.caseNumber === 'number'
+      ? { caseNumber: source.caseNumber }
+      : {}),
+  };
+};
+
+export class VoiceService {
+  private readonly sessions = new Map<string, VoiceSession>();
+  private readonly expiryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly locks = new Map<string, Promise<void>>();
+  public constructor(
+    private readonly port: VoicePort,
+    private readonly cases?: VoiceCasePort,
+    private readonly now = () => new Date(),
+  ) {}
+  public member(guildId: string, userId: string): Promise<VoiceMember | null> {
+    return this.port.member(guildId, userId);
+  }
+  public async voiceKickTargets(
+    guildId: string,
+    actorId: string,
+    ids: readonly string[],
+  ): Promise<
+    VoiceResult<{
+      success: string[];
+      failed: string[];
+      outcomes: readonly VoiceOutcome[];
+    }>
+  > {
+    const uniqueIds = [...new Set(ids)];
+    const resolved = await Promise.all(
+      uniqueIds.map(async (id) => ({
+        id,
+        member: await this.port.member(guildId, id),
+      })),
+    );
+    const missing = resolved
+      .filter((item) => item.member == null)
+      .map((item) => item.id);
+    const result = await this.voiceKick(
+      guildId,
+      actorId,
+      resolved.flatMap((item) => (item.member ? [item.member] : [])),
+    );
+    if (!result.ok) return result;
+    const missingOutcomes: VoiceOutcome[] = missing.map((userId) => ({
+      userId,
+      ok: false,
+      code: 'MEMBER_NOT_FOUND',
+    }));
+    await Promise.all(
+      missing.map(async (targetUserId) => {
+        const created = await Promise.resolve(
+          this.cases?.create({
+            guildId,
+            action: 'VOICEKICK',
+            targetUserId,
+            moderatorUserId: actorId,
+            status: 'FAILED',
+            errorCode: 'MEMBER_NOT_FOUND',
+          }),
+        ).catch(() => undefined);
+        const outcome = missingOutcomes.find(
+          (item) => item.userId === targetUserId,
+        );
+        if (outcome) Object.assign(outcome, caseIdentity(created));
+      }),
+    );
+    const allOutcomes = [...result.value.outcomes, ...missingOutcomes];
+    await Promise.all(
+      missingOutcomes.map((outcome) =>
+        Promise.resolve(
+          this.port.modlog?.(
+            guildId,
+            {
+              action: 'VOICEKICK_TARGET',
+              moderatorUserId: actorId,
+              ...outcome,
+            },
+            outcome.caseId,
+          ),
+        ).catch(() => undefined),
+      ),
+    );
+    return ok({
+      success: result.value.success,
+      failed: [...missing, ...result.value.failed],
+      outcomes: allOutcomes,
+    });
+  }
+  private async locked<T>(
+    guildId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.locks.get(guildId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.locks.set(guildId, current);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.locks.get(guildId) === current) this.locks.delete(guildId);
+    }
+  }
+  public async voiceKick(
+    guildId: string,
+    actorId: string,
+    members: readonly VoiceMember[],
+  ): Promise<
+    VoiceResult<{
+      success: string[];
+      failed: string[];
+      outcomes: readonly VoiceOutcome[];
+    }>
+  > {
+    return this.locked(guildId, async () => {
+      const success: string[] = [],
+        failed: string[] = [];
+      const outcomes: VoiceOutcome[] = [];
+      const mover = new Semaphore(5);
+      const groups = new Map<string, VoiceMember[]>();
+      for (const member of members) {
+        if (!member.channelId) {
+          failed.push(member.id);
+          outcomes.push({
+            userId: member.id,
+            ok: false,
+            code: 'VOICE_NOT_CONNECTED',
+          });
+          continue;
+        }
+        const group = groups.get(member.channelId) ?? [];
+        group.push(member);
+        groups.set(member.channelId, group);
+      }
+      await limit([...groups.values()], 5, async (group) => {
+        const sourceChannel = group[0]?.channelId;
+        if (
+          sourceChannel &&
+          this.port.canKickFromChannel &&
+          !(await this.port.canKickFromChannel(guildId, sourceChannel, actorId))
+        ) {
+          for (const member of group) {
+            failed.push(member.id);
+            outcomes.push({
+              userId: member.id,
+              ok: false,
+              code: 'BOT_PERMISSION_MISSING',
+            });
+          }
+          return;
+        }
+        const categoryId = group[0]?.categoryId ?? null;
+        if (
+          this.port.canCreateTemporaryChannel &&
+          !(await this.port.canCreateTemporaryChannel(
+            guildId,
+            categoryId,
+            actorId,
+          ))
+        ) {
+          for (const member of group) {
+            failed.push(member.id);
+            outcomes.push({
+              userId: member.id,
+              ok: false,
+              code: 'BOT_PERMISSION_MISSING',
+            });
+          }
+          return;
+        }
+        let temporary: string | undefined;
+        try {
+          temporary = await this.port.createTemporaryChannel(
+            guildId,
+            group[0]?.categoryId ?? null,
+          );
+          const targetChannel = temporary;
+          await limit(group, 5, async (member) => {
+            try {
+              await mover.run(() =>
+                this.port.move(guildId, member.id, targetChannel),
+              );
+              success.push(member.id);
+              outcomes.push({ userId: member.id, ok: true });
+            } catch {
+              failed.push(member.id);
+              outcomes.push({
+                userId: member.id,
+                ok: false,
+                code: 'DISCORD_API_ERROR',
+              });
+            }
+          });
+        } catch {
+          failed.push(
+            ...group.filter((m) => !success.includes(m.id)).map((m) => m.id),
+          );
+          for (const member of group)
+            if (
+              !success.includes(member.id) &&
+              !outcomes.some((outcome) => outcome.userId === member.id)
+            )
+              outcomes.push({
+                userId: member.id,
+                ok: false,
+                code: 'DISCORD_API_ERROR',
+              });
+        } finally {
+          if (temporary) {
+            try {
+              await this.port.deleteChannel(temporary);
+            } catch {
+              try {
+                await this.port.deleteChannel(temporary);
+              } catch {
+                /* best effort */
+              }
+            }
+          }
+        }
+      });
+      await Promise.all(
+        [
+          ...success.map((targetUserId) => ({
+            targetUserId,
+            status: 'COMPLETED' as const,
+          })),
+          ...failed.map((targetUserId) => ({
+            targetUserId,
+            status: 'FAILED' as const,
+          })),
+        ].map(async ({ targetUserId, status }) => {
+          try {
+            const created = await this.cases?.create({
+              guildId,
+              action: 'VOICEKICK',
+              targetUserId,
+              moderatorUserId: actorId,
+              status,
+            });
+            const outcome = outcomes.find(
+              (item) => item.userId === targetUserId,
+            );
+            if (outcome) Object.assign(outcome, caseIdentity(created));
+          } catch {
+            /* operation remains successful */
+          }
+        }),
+      );
+      await Promise.resolve(
+        this.port.log?.(guildId, {
+          action: 'VOICEKICK',
+          moderatorUserId: actorId,
+          success,
+          failed,
+        }),
+      ).catch(() => undefined);
+      await Promise.all(
+        outcomes.map((outcome) =>
+          Promise.resolve(
+            this.port.modlog?.(
+              guildId,
+              {
+                action: 'VOICEKICK_TARGET',
+                moderatorUserId: actorId,
+                ...outcome,
+              },
+              outcome.caseId,
+            ),
+          ).catch(() => undefined),
+        ),
+      );
+      return ok({ success, failed, outcomes });
+    });
+  }
+  public async start(
+    guildId: string,
+    actorId: string,
+    channelId?: string,
+  ): Promise<VoiceResult<VoiceSession>> {
+    return this.locked(guildId, async () => {
+      const resolvedChannel =
+        channelId ?? (await this.port.actorChannel?.(guildId, actorId))?.id;
+      if (!resolvedChannel)
+        return err(
+          'INVALID_INPUT',
+          '接続先VCを指定するか、実行者がVCに接続してください',
+        );
+      if (
+        this.port.validateTargetChannel &&
+        !(await this.port.validateTargetChannel(guildId, resolvedChannel))
+      )
+        return err(
+          'INVALID_INPUT',
+          '接続先は同じギルドのVoiceチャンネルでなければなりません',
+        );
+      if (
+        this.port.canViewChannel &&
+        !(await this.port.canViewChannel(guildId, resolvedChannel, actorId))
+      )
+        return err('BOT_PERMISSION_MISSING', '接続先VCを閲覧できません');
+      if (
+        this.port.canMoveToChannel &&
+        !(await this.port.canMoveToChannel(guildId, resolvedChannel, actorId))
+      )
+        return err(
+          'BOT_PERMISSION_MISSING',
+          '接続先VCでConnect/Move Members権限がありません',
+        );
+      if (this.sessions.has(guildId))
+        return err(
+          'ALREADY_APPLIED',
+          '既存のVoiceMoveセッションを先に停止してください',
+        );
+      await this.port.connect(guildId, resolvedChannel);
+      const startedAt = this.now();
+      const session = {
+        controllerUserId: actorId,
+        botCurrentChannelId: resolvedChannel,
+        startedAt,
+        expiresAt: new Date(startedAt.getTime() + 21600000),
+      };
+      this.sessions.set(guildId, session);
+      this.expiryTimers.set(
+        guildId,
+        setTimeout(() => {
+          void this.expire();
+        }, 21600000),
+      );
+      return ok(session);
+    });
+  }
+  public async stop(
+    guildId: string,
+    actorId: string,
+    moderator?: boolean,
+  ): Promise<VoiceResult<boolean>> {
+    const session = this.sessions.get(guildId);
+    if (!session) return err('NOT_APPLIED', 'VoiceMoveセッションはありません');
+    const allowedModerator =
+      moderator ??
+      (this.port.isModerator
+        ? await this.port.isModerator(guildId, actorId)
+        : false);
+    if (session.controllerUserId !== actorId && !allowedModerator)
+      return err('NOT_AUTHORIZED', 'セッション開始者またはModeratorのみ');
+    return this.locked(guildId, async () => {
+      await this.port.disconnect(guildId);
+      this.sessions.delete(guildId);
+      const timer = this.expiryTimers.get(guildId);
+      if (timer) clearTimeout(timer);
+      this.expiryTimers.delete(guildId);
+      return ok(true);
+    });
+  }
+  public status(guildId: string): VoiceResult<VoiceSession | null> {
+    const session = this.sessions.get(guildId);
+    if (session && session.expiresAt.getTime() <= this.now().getTime()) {
+      this.sessions.delete(guildId);
+      const timer = this.expiryTimers.get(guildId);
+      if (timer) clearTimeout(timer);
+      this.expiryTimers.delete(guildId);
+      void Promise.resolve(this.port.disconnect(guildId)).catch(
+        () => undefined,
+      );
+      return ok(null);
+    }
+    return ok(session ?? null);
+  }
+  public async onBotMoved(
+    guildId: string,
+    oldChannelId: string,
+    newChannelId: string,
+  ): Promise<VoiceResult<{ success: number; failed: number }>> {
+    return this.locked(guildId, async () => {
+      const session = this.sessions.get(guildId);
+      if (session && session.expiresAt <= this.now()) {
+        this.sessions.delete(guildId);
+        const timer = this.expiryTimers.get(guildId);
+        if (timer) clearTimeout(timer);
+        this.expiryTimers.delete(guildId);
+        await Promise.resolve(this.port.disconnect(guildId)).catch(
+          () => undefined,
+        );
+        return ok({ success: 0, failed: 0 });
+      }
+      if (!session || session.botCurrentChannelId !== oldChannelId)
+        return ok({ success: 0, failed: 0 });
+      const members = (await this.port.members(oldChannelId)).filter(
+        (m) => !m.bot,
+      );
+      let success = 0;
+      let failed = 0;
+      const mover = new Semaphore(5);
+      await limit(members, 5, async (m) => {
+        try {
+          await mover.run(() => this.port.move(guildId, m.id, newChannelId));
+          success++;
+        } catch {
+          failed++;
+        }
+      });
+      this.sessions.set(guildId, {
+        ...session,
+        botCurrentChannelId: newChannelId,
+      });
+      let dmDelivered = true;
+      try {
+        await this.port.dm(
+          session.controllerUserId,
+          `VoiceMove完了: 成功 ${String(success)} / 失敗 ${String(failed)}`,
+        );
+      } catch {
+        dmDelivered = false;
+      }
+      await Promise.resolve(
+        this.port.log?.(guildId, {
+          action: 'VOICEMOVE',
+          controllerUserId: session.controllerUserId,
+          oldChannelId,
+          newChannelId,
+          success,
+          failed,
+          dmDelivered,
+        }),
+      ).catch(() => undefined);
+      return ok({ success, failed });
+    });
+  }
+  public onBotDisconnected(guildId: string): void {
+    this.sessions.delete(guildId);
+    const timer = this.expiryTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    this.expiryTimers.delete(guildId);
+  }
+  public async expire(now = this.now()): Promise<void> {
+    for (const [guildId, session] of this.sessions)
+      if (session.expiresAt <= now) {
+        this.sessions.delete(guildId);
+        const timer = this.expiryTimers.get(guildId);
+        if (timer) clearTimeout(timer);
+        this.expiryTimers.delete(guildId);
+        await Promise.resolve(this.port.disconnect(guildId)).catch(
+          () => undefined,
+        );
+      }
+  }
+  public async shutdown(): Promise<void> {
+    for (const guildId of [...this.sessions.keys()])
+      await Promise.resolve(this.port.disconnect(guildId)).catch(
+        () => undefined,
+      );
+    for (const timer of this.expiryTimers.values()) clearTimeout(timer);
+    this.expiryTimers.clear();
+    this.sessions.clear();
+  }
+  public async onVoiceState(
+    guildId: string,
+    userId: string,
+    botUserId: string,
+    oldChannelId: string | null,
+    newChannelId: string | null,
+  ): Promise<VoiceResult<{ success: number; failed: number }>> {
+    if (userId !== botUserId) return ok({ success: 0, failed: 0 });
+    if (!newChannelId) {
+      this.onBotDisconnected(guildId);
+      return ok({ success: 0, failed: 0 });
+    }
+    if (!oldChannelId) return ok({ success: 0, failed: 0 });
+    return this.onBotMoved(guildId, oldChannelId, newChannelId);
+  }
+}
