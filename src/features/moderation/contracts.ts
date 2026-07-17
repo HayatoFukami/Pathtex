@@ -1,0 +1,150 @@
+import type { CaseDto, JsonValue } from '../../repositories/contracts.js';
+import type { Result } from '../../domain/result.js';
+import type { SettingsService } from '../../services/settings-service.js';
+
+export type ModerationAction =
+  | 'KICK'
+  | 'BAN'
+  | 'SILENTBAN'
+  | 'SOFTBAN'
+  | 'UNBAN'
+  | 'MUTE'
+  | 'UNMUTE'
+  | 'SLOWMODE';
+/** Actions currently owned by ModerationService. Other feature actions use
+ * their own public service contracts and must not be smuggled through here. */
+export type ModerationExecutionAction = ModerationAction;
+
+export interface ModerationTarget {
+  readonly id: string;
+  readonly display?: string;
+}
+
+export interface MemberSnapshot {
+  readonly id: string;
+  readonly displayName: string;
+  readonly isOwner: boolean;
+  readonly isBot: boolean;
+  readonly rolePosition: number;
+  readonly isMember?: boolean;
+}
+
+export interface ModerationDiscordPort {
+  getUser(guildId: string, userId: string): Promise<ModerationTarget | null>;
+  getMember(guildId: string, userId: string): Promise<MemberSnapshot | null>;
+  getBotRolePosition(guildId: string): Promise<number>;
+  getBotUserId(guildId: string): Promise<string>;
+  getActorRolePosition?(guildId: string, userId: string): Promise<number>;
+  getActorIsOwner?(guildId: string, userId: string): Promise<boolean>;
+  kick(guildId: string, userId: string, auditReason: string): Promise<void>;
+  ban(
+    guildId: string,
+    userId: string,
+    deleteMessageSeconds: number,
+    auditReason: string,
+  ): Promise<void>;
+  unban(guildId: string, userId: string, auditReason: string): Promise<void>;
+  isBanned(guildId: string, userId: string): Promise<boolean>;
+  addRole(
+    guildId: string,
+    userId: string,
+    roleId: string,
+    auditReason: string,
+  ): Promise<void>;
+  removeRole(
+    guildId: string,
+    userId: string,
+    roleId: string,
+    auditReason: string,
+  ): Promise<void>;
+  sendDm(userId: string, content: string): Promise<void>;
+  setSlowmode(
+    channelId: string,
+    interval: number,
+    auditReason: string,
+  ): Promise<void>;
+  getSlowmode(channelId: string): Promise<number>;
+  fetchMessages(
+    channelId: string,
+    before?: string,
+    limit?: number,
+  ): Promise<ReadonlyArray<ModerationMessage>>;
+  deleteMessages(
+    channelId: string,
+    messageIds: readonly string[],
+  ): Promise<void>;
+  deleteMessage(channelId: string, messageId: string): Promise<void>;
+}
+
+export interface ModerationMessage {
+  readonly id: string;
+  readonly authorId: string;
+  readonly authorIsBot: boolean;
+  readonly webhook: boolean;
+  readonly content: string;
+  readonly embeds: number;
+  readonly embedMedia?: boolean;
+  readonly attachments: ReadonlyArray<{ readonly contentType?: string | null }>;
+  readonly createdAt: Date;
+}
+
+export interface ModerationOperationOptions {
+  readonly guildId: string;
+  readonly actorId: string;
+  readonly targets: readonly ModerationTarget[];
+  readonly reason?: string;
+  readonly durationSeconds?: number;
+  readonly deleteMessages?: number;
+  readonly execution?: ModerationExecutionContext;
+}
+
+export interface ModerationExecutionContext {
+  readonly source: 'COMMAND' | 'AUTO_PUNISHMENT' | 'RAIDMODE';
+  readonly action?: ModerationExecutionAction;
+  readonly reason?: string;
+  readonly sendDm?: boolean;
+  readonly waitForDm?: boolean;
+}
+
+export interface TargetOutcome {
+  readonly targetId: string;
+  readonly ok: boolean;
+  readonly code?: string;
+  readonly case?: CaseDto;
+}
+
+export interface ModerationBatchResult {
+  readonly action: ModerationExecutionAction;
+  readonly outcomes: readonly TargetOutcome[];
+}
+
+export interface ModerationServiceDependencies {
+  readonly discord: ModerationDiscordPort;
+  readonly cases: import('../../services/case-service.js').CaseService;
+  readonly scheduler: import('../../services/scheduler-service.js').SchedulerService;
+  readonly activeMutes: import('../../repositories/contracts.js').ActiveMuteRepository;
+  readonly settings: SettingsService;
+  readonly modlog?: {
+    write(guildId: string, event: unknown, caseId?: string): Promise<unknown>;
+    editReason?(guildId: string, caseId: string, reason: string): Promise<void>;
+  };
+  readonly clock?: () => Date;
+  readonly correlation?: {
+    add?(key: string, value: unknown): void;
+    put?(kind: 'moderation', key: string, value: { caseId: string }): unknown;
+    putSlowmode?(
+      key: string,
+      value: { previousInterval: number; newInterval: number },
+    ): unknown;
+  };
+  readonly roleMutationLock?: <T>(
+    guildId: string,
+    userId: string,
+    operation: () => Promise<T>,
+  ) => Promise<T>;
+  readonly addRoleUnlocked?: ModerationDiscordPort['addRole'];
+  readonly removeRoleUnlocked?: ModerationDiscordPort['removeRole'];
+}
+
+export type ModerationResult = Result<ModerationBatchResult>;
+export type Metadata = JsonValue;
