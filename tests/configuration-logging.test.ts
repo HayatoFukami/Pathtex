@@ -4,6 +4,7 @@ import {
   ConfigurationService,
   formatGuildTime,
 } from '../src/features/configuration/service.js';
+import { serviceSettingsText } from '../src/features/configuration/commands.js';
 import {
   classifyVoice,
   messageEditEmbed,
@@ -34,6 +35,10 @@ describe('configuration and logging slice', () => {
   it('returns all configured overview sections on success', async () => {
     const service = new ConfigurationService({
       settings: { getOrCreate: vi.fn().mockResolvedValue(settings) } as never,
+      setup: {
+        getAutomaticIgnoredRoles: vi.fn().mockResolvedValue(['role-automatic']),
+        getBotWarnings: vi.fn().mockResolvedValue(['権限不足']),
+      } as never,
     });
 
     await expect(service.overview(guildId)).resolves.toMatchObject({
@@ -44,11 +49,27 @@ describe('configuration and logging slice', () => {
         punishments: [],
         ignoredRoles: [],
         ignoredChannels: [],
-        automaticIgnoredRoles: [],
-        botWarnings: [],
+        automaticIgnoredRoles: ['role-automatic'],
+        botWarnings: ['権限不足'],
         resourceWarnings: [],
       },
     });
+  });
+
+  it('renders automatic ignore roles and bot warnings in settings output', () => {
+    const output = serviceSettingsText({
+      settings,
+      automod: null,
+      punishments: [],
+      ignoredRoles: [],
+      ignoredChannels: [],
+      automaticIgnoredRoles: ['role-automatic'],
+      botWarnings: ['権限不足'],
+      resourceWarnings: [],
+    });
+
+    expect(output).toContain('自動Ignoreロール: role-automatic');
+    expect(output).toContain('Bot権限警告: 権限不足');
   });
 
   it('identifies a failed overview dependency and preserves its cause', async () => {

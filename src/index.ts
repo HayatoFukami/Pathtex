@@ -196,6 +196,42 @@ export function createBootstrapDependencies(
       ensureAutomodSettings: async (guildId) => {
         await automodService.getOrCreate(guildId);
       },
+      getAutomaticIgnoredRoles: async (guildId) => {
+        const guild = await client?.client.guilds.fetch(guildId);
+        if (!guild) return [];
+        const botRolePosition = guild.members.me?.roles.highest.position ?? -1;
+        const automaticallyIgnoredPermissions = [
+          'Administrator',
+          'BanMembers',
+          'ManageMessages',
+          'KickMembers',
+          'ManageGuild',
+        ] as const;
+        return [...guild.roles.cache.values()]
+          .filter(
+            (role) =>
+              role.position >= botRolePosition ||
+              role.permissions.has(automaticallyIgnoredPermissions),
+          )
+          .map((role) => role.id);
+      },
+      getBotWarnings: async (guildId) => {
+        const guild = await client?.client.guilds.fetch(guildId);
+        const member = guild?.members.me;
+        if (!member) return ['Botのメンバー情報を取得できません'];
+        const required = [
+          'ViewChannel',
+          'SendMessages',
+          'EmbedLinks',
+          'ReadMessageHistory',
+          'ManageRoles',
+          'ManageChannels',
+        ] as const;
+        const missing = member.permissions.missing(required);
+        return missing.length > 0
+          ? [`Botに必要な権限がありません: ${missing.join(', ')}`]
+          : [];
+      },
     },
   });
   const settingsService = configuration.settings;

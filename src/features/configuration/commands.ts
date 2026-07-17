@@ -220,7 +220,7 @@ function command(
     execute,
   };
 }
-function serviceSettingsText(value: Record<string, unknown>): string {
+export function serviceSettingsText(value: Record<string, unknown>): string {
   const settings = value.settings as {
     timezone?: string;
     modlogChannelId?: string | null;
@@ -237,6 +237,8 @@ function serviceSettingsText(value: Record<string, unknown>): string {
     `AutoMod: ${Array.isArray(value.automod) ? '未設定' : '設定済み'}`,
     `Punishment: ${Array.isArray(value.punishments) ? String(value.punishments.length) : '0'}件`,
     `Ignore: role ${Array.isArray(value.ignoredRoles) ? String(value.ignoredRoles.length) : '0'} / channel ${Array.isArray(value.ignoredChannels) ? String(value.ignoredChannels.length) : '0'}`,
+    `自動Ignoreロール: ${Array.isArray(value.automaticIgnoredRoles) && value.automaticIgnoredRoles.length ? value.automaticIgnoredRoles.join(', ') : 'なし'}`,
+    `Bot権限警告: ${Array.isArray(value.botWarnings) && value.botWarnings.length ? value.botWarnings.join('; ') : 'なし'}`,
     `AutoMod resource warnings: ${Array.isArray(value.resourceWarnings) && value.resourceWarnings.length ? value.resourceWarnings.join('; ') : 'なし'}`,
   ].join('\n');
 }
