@@ -81,6 +81,17 @@ export interface IgnoreServicePort {
   clearChannel(guildId: string, channelId: string): Promise<number>;
 }
 
+/** Identifies which /settings overview dependency failed while retaining its cause. */
+export class ConfigurationOverviewError extends Error {
+  public constructor(
+    readonly dependency: string,
+    cause: unknown,
+  ) {
+    super(`Settings overview dependency failed: ${dependency}`, { cause });
+    this.name = 'ConfigurationOverviewError';
+  }
+}
+
 export class ConfigurationService {
   private automodWarningsProvider?: () => readonly string[];
   public readonly settings: SettingsService;
@@ -237,33 +248,62 @@ export class ConfigurationService {
   public async overview(
     guildId: string,
   ): Promise<Result<Record<string, unknown>>> {
-    const settings = await this.settings.get(guildId);
-    if (!settings.ok) return settings;
+    const settings = await this.overviewDependency('settings', () =>
+      this.settings.get(guildId),
+    );
+    if (!settings.ok)
+      throw new ConfigurationOverviewError('settings', settings.error);
     return ok({
       settings: settings.value,
       automod: this.deps.automod
-        ? await this.deps.automod.getOrCreate(guildId)
+        ? await this.overviewDependency('automod', () =>
+            this.deps.automod!.getOrCreate(guildId),
+          )
         : null,
       punishments: this.deps.punishments
-        ? await this.deps.punishments.list(guildId)
+        ? await this.overviewDependency('punishments', () =>
+            this.deps.punishments!.list(guildId),
+          )
         : [],
       ignoredRoles: this.deps.ignores
-        ? await this.deps.ignores.listRoles(guildId)
+        ? await this.overviewDependency('ignoredRoles', () =>
+            this.deps.ignores!.listRoles(guildId),
+          )
         : [],
       ignoredChannels: this.deps.ignores
-        ? await this.deps.ignores.listChannels(guildId)
+        ? await this.overviewDependency('ignoredChannels', () =>
+            this.deps.ignores!.listChannels(guildId),
+          )
         : [],
       automaticIgnoredRoles: this.deps.setup?.getAutomaticIgnoredRoles
-        ? await this.deps.setup.getAutomaticIgnoredRoles(guildId)
+        ? await this.overviewDependency('automaticIgnoredRoles', () =>
+            this.deps.setup!.getAutomaticIgnoredRoles!(guildId),
+          )
         : [],
       botWarnings: this.deps.setup?.getBotWarnings
-        ? await this.deps.setup.getBotWarnings(guildId)
+        ? await this.overviewDependency('botWarnings', () =>
+            this.deps.setup!.getBotWarnings!(guildId),
+          )
         : [],
-      resourceWarnings:
-        this.automodWarningsProvider?.() ??
-        this.deps.automod?.resourceWarnings?.() ??
-        [],
+      resourceWarnings: await this.overviewDependency(
+        'resourceWarnings',
+        () =>
+          this.automodWarningsProvider?.() ??
+          this.deps.automod?.resourceWarnings?.() ??
+          [],
+      ),
     });
+  }
+
+  private async overviewDependency<T>(
+    dependency: string,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (cause: unknown) {
+      throw new ConfigurationOverviewError(dependency, cause);
+    }
   }
 
   public setAutomodWarningsProvider(provider: () => readonly string[]): void {
