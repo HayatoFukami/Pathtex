@@ -1,0 +1,524 @@
+# プラットフォーム・データ基盤仕様
+
+この文書は、全機能が共有する実行基盤、Gatewayイベント、予約ジョブ、キャッシュ、永続データモデルの仕様である。Repositoryはここに定めるデータモデルを唯一の正とし、機能側はService経由で利用する。
+
+## 依存関係
+
+- 先に`00-common.md`を読む。
+- 個別機能のデータ利用規則は、各機能仕様書の要求と本書を組み合わせて実装する。
+
+---
+
+# 3. アーキテクチャ設計
+
+## 3.1 ディレクトリ
+
+```text
+src/
+  index.ts
+  client.ts
+  config/
+  commands/
+    general/
+    moderation/
+    settings/
+    automod/
+    tools/
+  interactions/
+    command-router.ts
+    autocomplete-router.ts
+    component-router.ts
+  events/
+    interaction-create.ts
+    message-create.ts
+    message-update.ts
+    message-delete.ts
+    message-delete-bulk.ts
+    guild-member-add.ts
+    guild-member-remove.ts
+    guild-member-update.ts
+    user-update.ts
+    voice-state-update.ts
+    guild-ban-add.ts
+    guild-ban-remove.ts
+    channel-create.ts
+    channel-delete.ts
+    channel-update.ts
+  services/
+    moderation-service.ts
+    strike-service.ts
+    punishment-service.ts
+    automod-service.ts
+    raid-service.ts
+    scheduler-service.ts
+    message-cache-service.ts
+    modlog-service.ts
+    message-log-service.ts
+    server-log-service.ts
+    voice-log-service.ts
+    permission-service.ts
+    target-resolver.ts
+    duration-parser.ts
+    audit-service.ts
+    lookup-service.ts
+    guild-lifecycle-service.ts
+  repositories/
+  domain/
+  jobs/
+  resources/
+    copypastas.txt
+    referral_domains.txt
+  utils/
+prisma/
+  schema.prisma
+  migrations/
+tests/
+```
+
+---
+
+## 3.4 イベント処理
+
+| イベント | 処理順 |
+|---|---|
+| `interactionCreate` | 種別判定→ギルド確認→認可→Bot権限→defer→実行 |
+| `messageCreate` | スナップショット保存→AutoMod |
+| `messageUpdate` | 旧スナップショット取得→編集後メッセージ確定→AutoMod→編集ログ→保存更新 |
+| `messageDelete` | スナップショット取得→削除ログ→スナップショット削除 |
+| `messageDeleteBulk` | 対象取得→一括削除ログ→スナップショット削除 |
+| `guildMemberAdd` | スナップショット保存→参加ログ→Raid判定→Mute復元→Dehoist |
+| `guildMemberRemove` | 退出ログ→Audit照合→スナップショット削除 |
+| `guildMemberUpdate` | 名前・Nickname比較→ログ→Mute状態同期→Dehoist |
+| `userUpdate` | username/global name比較→所属ギルドごとにログ・スナップショット更新 |
+| `voiceStateUpdate` | Join/Leave/Move分類→ボイスログ→VoiceMove追従 |
+| `guildBanAdd` | 内部操作との相関→外部BANケース作成→時限状態同期 |
+| `guildBanRemove` | 内部操作との相関→外部Unbanケース作成→予約取消 |
+| `channelCreate` | Mutedロールの上書き追加 |
+| `channelDelete` | ログ設定・Ignore・Slowmode予約を無効化 |
+| `channelUpdate` | 外部Slowmode変更時に復元予約を取消 |
+| `guildCreate` | ギルド再参加マーカーをACTIVEへ更新 |
+| `guildDelete` | ギルド退出マーカーをLEFTへ更新し、保持期限を設定 |
+
+`messageUpdate`では、取得した編集前スナップショットを「旧」、Gatewayメッセージ（必要なら`fetch()`した完全なメッセージ）を「新」として扱う。AutoMod判定と編集ログ生成の両方が完了するまで旧スナップショットを保持し、両処理へ旧・新の順で渡す。処理中に新しい内容でスナップショットを上書きしてはならず、完了後にだけ新しい内容、`edited_at`、保持期限を保存する。旧スナップショットがない場合も、新しい内容でAutoModを評価し、編集ログのBeforeは取得不能として扱う。
+
+Bot自身が送信したメッセージはAutoMod対象外とする。メッセージログ用スナップショットには保存してよいが、ログチャンネル内のBotメッセージは再帰ログ防止のため保存・記録しない。
+
+## 3.5 内部操作相関
+
+Bot自身の操作で発生したGatewayイベントを外部操作として二重記録しないため、操作種別ごとに独立した、プロセス内の有界TTLキャッシュを持つ。キャッシュは相関情報を失っても永続化・再構成せず、一致しないイベントは外部操作として扱う。
+
+| キャッシュ | キー | エントリ | TTL・上限 | 消費するイベント |
+|---|---|---|---|---|
+| モデレーション操作相関 | `guildId:targetId:action` | `caseId`、`createdAt`、`expiresAt` | 15秒、最大10,000件 | `guildBanAdd`、`guildBanRemove`、`guildMemberRemove`、`guildMemberUpdate`（対象Actionのみ） |
+| メッセージ削除相関 | `guildId:messageId` | `reason`、`caseId`（任意）、`createdAt`、`expiresAt` | 15秒、最大10,000件 | `messageDelete`、`messageDeleteBulk` |
+| Slowmode操作相関 | `guildId:channelId` | `previousInterval`、`newInterval`、`createdAt`、`expiresAt` | 15秒、最大1,000件 | `channelUpdate` |
+
+各キャッシュは登録順ではなくキー単位で照合し、期限切れエントリを返却しない。上限到達時は最も古いエントリを破棄する。Discord APIを呼ぶ直前に対応キャッシュへ登録し、対応するGatewayイベントで一致したエントリだけを一度消費する。別の操作種別のキャッシュを参照してはならない。BAN、UNBAN、KICK、MUTE、UNMUTEはモデレーション操作相関へ登録し、AutoMod・`/clean`等の削除はメッセージ削除相関へ、BotによるSlowmode変更はSlowmode操作相関へ登録する。相関が一致しない場合はAudit Log等の既定照合を行い、外部操作として記録する。
+
+## 3.6 スケジューラ
+
+DBポーリング方式を採用する。
+
+- 5秒ごとに検索
+- 条件: `status=PENDING AND execute_at<=now()`
+- 1回最大50件
+- 排他取得は`FOR UPDATE SKIP LOCKED`相当
+- 取得時に`RUNNING`、`locked_at`、`locked_by`を設定
+- 成功時`COMPLETED`
+- 再試行可能エラーは最大5回
+- 再試行間隔は30、60、120、240、480秒
+- 404または既に解除済みは冪等成功
+- 403は`FAILED`
+- `RUNNING`のまま5分経過した行は起動時に`PENDING`へ戻す
+
+ジョブ種別:
+
+- `UNBAN`
+- `UNMUTE`
+- `RESTORE_SLOWMODE`
+- `DISABLE_RAIDMODE`
+
+同一ギルド・対象・種別へ新しい予約を作成する場合、既存PENDING予約は`CANCELLED`にする。
+
+予約の保守削除は終端状態だけを対象とする。`COMPLETED`は`updated_at`から30日、`CANCELLED`は`updated_at`から30日、`FAILED`は90日を経過した行を削除してよい。削除直前にトランザクション内で状態を再確認し、`PENDING`または`RUNNING`の行は理由・経過時間を問わず削除してはならない。`RUNNING`の回収は5分経過時の`PENDING`戻しだけであり、保守削除とは別処理とする。
+
+---
+
+## 3.8 キャッシュ
+
+| キャッシュ | 最大・TTL |
+|---|---|
+| ギルド設定 | 5分、更新時即時無効化 |
+| Punishment | 5分 |
+| Ignore | 5分 |
+| AutoMod編集重複防止 | 10分、最大10,000 |
+| Duplicate | 3,000ユーザーキー、30秒 |
+| モデレーション操作相関 | 15秒、最大10,000件 |
+| メッセージ削除相関 | 15秒、最大10,000件 |
+| Slowmode操作相関 | 15秒、最大1,000件 |
+| Audit照合結果 | 30秒 |
+
+キャッシュが失効または欠損した場合はDB/APIから取得し、古い値を無期限使用しない。
+
+---
+
+# 4. データモデル定義
+
+## 4.1 共通規則
+
+- Snowflakeは`VARCHAR(20)`。
+- 日時は`TIMESTAMPTZ`、UTC保存。
+- 主キーUUIDはUUIDv7推奨。
+- 全可変レコードに`created_at`、`updated_at`を持たせる。
+- ギルド退出時、設定・ストライク・ケースは即時削除しない。
+- ギルド退出・再参加は永続マーカーで管理し、退出から90日以上Botが不在であることを確認するまで設定・ストライク・ケース等を削除しない。
+- CASCADE削除はメッセージキャッシュ等の一時データに限定する。
+
+## 4.2 `guild_settings`
+
+| カラム | 型 | 制約・既定 |
+|---|---|---|
+| `guild_id` | VARCHAR(20) | PK |
+| `modlog_channel_id` | VARCHAR(20) | NULL |
+| `message_log_channel_id` | VARCHAR(20) | NULL |
+| `server_log_channel_id` | VARCHAR(20) | NULL |
+| `voice_log_channel_id` | VARCHAR(20) | NULL |
+| `mod_role_id` | VARCHAR(20) | NULL |
+| `muted_role_id` | VARCHAR(20) | NULL |
+| `timezone` | VARCHAR(64) | NOT NULL DEFAULT `UTC` |
+| `raid_mode_enabled` | BOOLEAN | DEFAULT false |
+| `raid_mode_source` | ENUM | `MANUAL`,`AUTO`,NULL |
+| `raid_mode_reason` | VARCHAR(1000) | NULL |
+| `raid_started_at` | TIMESTAMPTZ | NULL |
+| `verification_level_before_raid` | SMALLINT | NULL、0～4 |
+| `raid_verification_changed` | BOOLEAN | DEFAULT false |
+| `next_case_number` | INTEGER | DEFAULT 1、CHECK > 0 |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+インデックス:
+
+- PK `guild_id`
+- `modlog_channel_id`
+- `message_log_channel_id`
+- `server_log_channel_id`
+- `voice_log_channel_id`
+
+## 4.3 `automod_settings`
+
+| カラム | 型 | 既定・制約 |
+|---|---|---|
+| `guild_id` | VARCHAR(20) | PK/FK |
+| `anti_invite_strikes` | SMALLINT | 0、0～100 |
+| `anti_referral_strikes` | SMALLINT | 0、0～100 |
+| `anti_everyone_strikes` | SMALLINT | 0、0～100 |
+| `anti_copypasta_strikes` | SMALLINT | 0、0～100 |
+| `max_user_mentions` | SMALLINT | NULL、1～100 |
+| `max_role_mentions` | SMALLINT | NULL、1～100 |
+| `max_lines` | SMALLINT | NULL、1～500 |
+| `duplicate_enabled` | BOOLEAN | false |
+| `duplicate_delete_threshold` | SMALLINT | NULL、2～20 |
+| `duplicate_strike_threshold` | SMALLINT | NULL、2～20 |
+| `duplicate_strikes` | SMALLINT | 1、1～100 |
+| `autodehoist_character` | VARCHAR(8) | NULL、1 Unicode code point |
+| `auto_raid_enabled` | BOOLEAN | false |
+| `auto_raid_join_count` | SMALLINT | 10、3～100 |
+| `auto_raid_window_seconds` | SMALLINT | 10、2～300 |
+| `auto_raid_idle_seconds` | SMALLINT | 120固定 |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+## 4.4 `punishments`
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | UUID | PK |
+| `guild_id` | VARCHAR(20) | FK |
+| `threshold` | INTEGER | 1～1,000,000 |
+| `action` | ENUM | `MUTE`,`KICK`,`SOFTBAN`,`BAN` |
+| `duration_seconds` | INTEGER | NULLまたは1～31,536,000 |
+| `created_by` | VARCHAR(20) | NOT NULL |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+制約:
+
+- UNIQUE(`guild_id`,`threshold`)
+- durationはMUTE/BANのみ許可
+- KICK/SOFTBANではNULL
+- `None`はレコード削除として表現
+
+インデックス:
+
+- (`guild_id`,`threshold`)
+
+## 4.5 `user_strikes`
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `guild_id` | VARCHAR(20) | PKの一部 |
+| `user_id` | VARCHAR(20) | PKの一部 |
+| `count` | INTEGER | 0～1,000,000 |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+インデックス:
+
+- PK(`guild_id`,`user_id`)
+- (`guild_id`,`count` DESC)
+
+## 4.6 `strike_transactions`
+
+| カラム | 型 | 内容 |
+|---|---|---|
+| `id` | UUID | PK |
+| `guild_id` | VARCHAR(20) | NOT NULL |
+| `user_id` | VARCHAR(20) | NOT NULL |
+| `delta` | INTEGER | 0以外 |
+| `requested_delta` | INTEGER | NOT NULL |
+| `before_count` | INTEGER | NOT NULL |
+| `after_count` | INTEGER | NOT NULL |
+| `source` | ENUM | `MANUAL_STRIKE`,`PARDON`,`AUTOMOD` |
+| `actor_user_id` | VARCHAR(20) | Bot自動処理時はBot ID |
+| `reason` | VARCHAR(1000) | NOT NULL |
+| `mod_case_id` | UUID | NULL/FK |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+
+インデックス:
+
+- (`guild_id`,`user_id`,`created_at` DESC)
+- (`mod_case_id`)
+
+## 4.7 `moderation_cases`
+
+| カラム | 型 | 内容 |
+|---|---|---|
+| `id` | UUID | PK |
+| `guild_id` | VARCHAR(20) | NOT NULL |
+| `case_number` | INTEGER | NOT NULL |
+| `action` | ENUM | 下記 |
+| `target_user_id` | VARCHAR(20) | NULL |
+| `target_display` | VARCHAR(128) | NOT NULL |
+| `moderator_user_id` | VARCHAR(20) | NOT NULL |
+| `reason` | VARCHAR(1000) | NULL |
+| `duration_seconds` | INTEGER | NULL |
+| `source` | ENUM | `COMMAND`,`AUTOMOD`,`PUNISHMENT`,`RAIDMODE`,`EXTERNAL` |
+| `status` | ENUM | `PENDING`,`COMPLETED`,`FAILED`,`PARTIAL` |
+| `error_code` | VARCHAR(64) | NULL |
+| `log_message_id` | VARCHAR(20) | NULL |
+| `log_channel_id` | VARCHAR(20) | NULL |
+| `discord_audit_log_entry_id` | VARCHAR(20) | NULL |
+| `metadata` | JSONB | DEFAULT `{}` |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+Action Enum:
+
+- `KICK`
+- `BAN`
+- `SOFTBAN`
+- `SILENTBAN`
+- `UNBAN`
+- `MUTE`
+- `UNMUTE`
+- `STRIKE`
+- `PARDON`
+- `RAIDMODE_ON`
+- `RAIDMODE_OFF`
+- `VOICEKICK`
+- `SLOWMODE`
+- `AUTO_PUNISHMENT`
+
+制約・インデックス:
+
+- UNIQUE(`guild_id`,`case_number`)
+- UNIQUE(`guild_id`,`discord_audit_log_entry_id`) WHERE NOT NULL
+- (`guild_id`,`created_at` DESC)
+- (`guild_id`,`case_number` DESC)
+- (`guild_id`,`target_user_id`,`created_at` DESC)
+
+ケース番号は`guild_settings.next_case_number`をトランザクション内で取得・加算する。行が存在しない場合は、同じトランザクション内で`guild_settings`を既定値（`timezone=UTC`、`next_case_number=1`、その他NULLまたは既定値）で遅延作成してから行ロックを取得する。並行するケース作成は一意制約とトランザクション再試行により、ギルド内で番号を重複させない。modlog未設定でもケースを作成する。
+
+ケース作成のための遅延作成は`/setup`を前提としない。一方、Mutedロールの作成と各チャンネルへの権限上書きはDiscord側の資源準備であるため、Muteを利用する前に`/setup`を実行する必要がある。`/setup`は既存の`guild_settings`を初期化し直さず、未作成の`automod_settings`とMutedロールを必要に応じて作成する。
+
+## 4.8 `active_mutes`
+
+MuteのDiscordロール状態とは別に、現在有効なMuteを永続化する。対象が退出してもこの行は保持し、再参加時のロール復元に使用する。無期限Muteも同じ行で表現する。
+
+| カラム | 型 | 制約・内容 |
+|---|---|---|
+| `guild_id` | VARCHAR(20) | PKの一部、FK |
+| `user_id` | VARCHAR(20) | PKの一部 |
+| `case_id` | UUID | NOT NULL/FK |
+| `expires_at` | TIMESTAMPTZ | NULLなら無期限 |
+| `status` | ENUM | `ACTIVE`,`RELEASED`,`EXPIRED` |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+PKは(`guild_id`,`user_id`)、`ACTIVE`は対象ごとに最大1行とする。`ModerationService`がMute成功時の作成・期間更新、Unmute成功時の`RELEASED`更新を所有する。`SchedulerService`は期限到達時のDiscordロール解除と`EXPIRED`更新を所有し、`guildMemberAdd`の復元処理は`ACTIVE`行を読み取り、期限切れなら解除、期限内ならMutedロールを付与する。`guildMemberUpdate`はロールの外部変更を検知しても、永続状態を外部から`ACTIVE`へ変更しない。
+
+Mute状態の変更と、対応する`UNMUTE`予約の取消・置換は同一DBトランザクションで行い、対象行を更新ロックする。期限処理も`ACTIVE`行のロック、予約の終端化、状態更新を同一トランザクションで行う。Discord API操作はDBトランザクションの外で実行し、API成功後の永続更新失敗は復旧対象として記録する。再参加処理は同じ対象の同時処理をロックまたは冪等制御し、重複付与・期限延長を起こさない。
+
+## 4.9 `scheduled_actions`
+
+| カラム | 型 | 内容 |
+|---|---|---|
+| `id` | UUID | PK |
+| `guild_id` | VARCHAR(20) | NOT NULL |
+| `target_user_id` | VARCHAR(20) | NULL |
+| `channel_id` | VARCHAR(20) | NULL |
+| `type` | ENUM | `UNBAN`,`UNMUTE`,`RESTORE_SLOWMODE`,`DISABLE_RAIDMODE` |
+| `execute_at` | TIMESTAMPTZ | NOT NULL |
+| `status` | ENUM | `PENDING`,`RUNNING`,`COMPLETED`,`FAILED`,`CANCELLED` |
+| `payload` | JSONB | NOT NULL |
+| `attempts` | SMALLINT | DEFAULT 0 |
+| `locked_at` | TIMESTAMPTZ | NULL |
+| `locked_by` | VARCHAR(64) | NULL |
+| `last_error` | TEXT | NULL |
+| `created_by_case_id` | UUID | NULL |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+インデックス:
+
+- (`status`,`execute_at`)
+- (`guild_id`,`target_user_id`,`type`,`status`)
+- (`guild_id`,`channel_id`,`type`,`status`)
+
+## 4.10 無視設定
+
+### `ignored_roles`
+
+| カラム | 型 |
+|---|---|
+| `guild_id` | VARCHAR(20) |
+| `role_id` | VARCHAR(20) |
+| `created_by` | VARCHAR(20) |
+| `created_at` | TIMESTAMPTZ |
+
+PK: (`guild_id`,`role_id`)
+
+### `ignored_channels`
+
+| カラム | 型 |
+|---|---|
+| `guild_id` | VARCHAR(20) |
+| `channel_id` | VARCHAR(20) |
+| `created_by` | VARCHAR(20) |
+| `created_at` | TIMESTAMPTZ |
+
+PK: (`guild_id`,`channel_id`)
+
+Botより上位または強い権限を持つロールの自動無視はDBへ保存せず、実行時に計算する。
+
+## 4.11 `message_snapshots`
+
+| カラム | 型 | 内容 |
+|---|---|---|
+| `message_id` | VARCHAR(20) | PK |
+| `guild_id` | VARCHAR(20) | NOT NULL |
+| `channel_id` | VARCHAR(20) | NOT NULL |
+| `author_user_id` | VARCHAR(20) | NOT NULL |
+| `author_display` | VARCHAR(128) | NOT NULL |
+| `content` | TEXT | 最大4000 Unicode code point |
+| `attachments` | JSONB | URL、filename、contentType、size |
+| `embeds_summary` | JSONB | title、description、url、image URL |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `edited_at` | TIMESTAMPTZ | NULL |
+| `expires_at` | TIMESTAMPTZ | NOT NULL |
+
+インデックス:
+
+- (`guild_id`,`channel_id`,`created_at` DESC)
+- (`expires_at`)
+
+削除ログ出力後は削除する。未削除スナップショットも保持期限後に削除する。
+
+## 4.12 `guild_member_snapshots`
+
+| カラム | 型 |
+|---|---|
+| `guild_id` | VARCHAR(20) |
+| `user_id` | VARCHAR(20) |
+| `username` | VARCHAR(32) |
+| `global_name` | VARCHAR(32) NULL |
+| `nickname` | VARCHAR(32) NULL |
+| `joined_at` | TIMESTAMPTZ NULL |
+| `updated_at` | TIMESTAMPTZ |
+
+PK: (`guild_id`,`user_id`)
+
+退出ログ、username、global name、nickname変更比較に使用する。
+
+## 4.13 `raid_join_events`
+
+| カラム | 型 |
+|---|---|
+| `id` | UUID PK |
+| `guild_id` | VARCHAR(20) |
+| `user_id` | VARCHAR(20) |
+| `joined_at` | TIMESTAMPTZ |
+
+制約・インデックス:
+
+- UNIQUE(`guild_id`,`user_id`,`joined_at`)
+- (`guild_id`,`joined_at` DESC)
+
+5分より古い行は定期削除する。Bot参加は保存しない。
+
+## 4.14 `guild_lifecycle_markers`
+
+Botのギルド在籍状態と保持期限を永続化する。
+
+| カラム | 型 | 制約・内容 |
+|---|---|---|
+| `guild_id` | VARCHAR(20) | PK |
+| `status` | ENUM | `ACTIVE`,`LEFT` |
+| `departed_at` | TIMESTAMPTZ | NULL、最後に退出した時刻 |
+| `rejoined_at` | TIMESTAMPTZ | NULL、最後に再参加した時刻 |
+| `cleanup_eligible_at` | TIMESTAMPTZ | NULL、`departed_at + 90日` |
+| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `updated_at` | TIMESTAMPTZ | NOT NULL |
+
+`GuildLifecycleService`が`guildDelete`で行をなければ作成したうえで`LEFT`、`departed_at`、`cleanup_eligible_at`を同一トランザクションで更新し、`guildCreate`では行ロックを取得して`ACTIVE`、`rejoined_at`、`cleanup_eligible_at=NULL`へ更新する。再参加が先行した場合は削除を中止する。保守ジョブは`status=LEFT AND cleanup_eligible_at<=now()`をロックして確認し、次の順序で依存データを削除する: (1)期限切れの一時イベント・スナップショットと終端Scheduled Action、(2)無視設定・AutoMod・Punishment・Active Mute、(3)Strike、(4)Moderation Case、(5)Guild設定、(6)ライフサイクルマーカー。各段階を同一トランザクションで行い、開始後に`ACTIVE`へ戻っていた場合は全削除を中止する。失敗時はロールバックし、90日未満のデータおよび再参加ギルドのデータを削除しない。
+
+## 4.15 重複検知キャッシュ
+
+DBへは保存しない。
+
+```text
+Map<guildId:userId, {
+  normalizedContent,
+  lastMessageAt,
+  duplicateOrdinal,
+  messageIds: [{channelId, messageId, createdAt}]
+}>
+```
+
+- 最大3,000キー
+- LRU方式
+- 30秒無操作で失効
+- 最初のメッセージを1件目とする
+- 再起動時にリセット
+- message IDsは直近2分、最大20件のみ保持
+
+## 4.16 Strikeのゼロ差分
+
+`StrikeService`は対象の`user_strikes`行を更新ロックして、加算後を`min(1,000,000, before + requested_delta)`、Pardon後を`max(0, before - requested_delta)`で計算する。計算された実効差分が0の場合は、`user_strikes`、`strike_transactions`、`moderation_cases`を作成・更新せず、DM、modlog、Punishment選択・実行、予約作成を一切行わない。結果は「変更なし（現在値: X）」として返す。実効差分が0でない場合だけ、ストライク行、履歴、ケース、Punishment判定を同一トランザクションで処理する。`strike_transactions.delta`は引き続き0以外を許可しない。
+
+## 4.17 データ保持
+
+| データ | 保持期間 |
+|---|---|
+| Guild設定 | ギルド退出後90日 |
+| ストライク | ギルド退出後90日 |
+| Moderation Case | ギルド退出後90日以上。運用者が延長可 |
+| Message Snapshot | 既定7日 |
+| Raid Join Event | 5分 |
+| 完了Scheduled Action | 30日 |
+| CANCELLED Scheduled Action | 30日（`updated_at`基準） |
+| 失敗Scheduled Action | 90日 |
+| アプリログ | 30日以上を推奨 |
+
+---
+
+**第1部終了。第2部では第5章として、全スラッシュコマンドのオプション、権限、正常系・異常系、Embed、複数対象設計を定義する。**
