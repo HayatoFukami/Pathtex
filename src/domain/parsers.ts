@@ -150,7 +150,7 @@ export function auditReason(
     .join('')
     .replace(/\s+/gu, ' ');
   return ok(
-    Array.from(`[Vortex Case #${String(caseNumber)}] ${sanitized}`)
+    Array.from(`[Pathtex Case #${String(caseNumber)}] ${sanitized}`)
       .slice(0, 512)
       .join(''),
   );

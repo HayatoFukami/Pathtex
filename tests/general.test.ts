@@ -10,7 +10,7 @@ import {
 } from '../src/features/general/index.js';
 
 const runtime = {
-  botName: 'Vortex',
+  botName: 'Pathtex',
   avatarUrl: undefined,
   version: '1.0.0',
   nodeVersion: 'v22',

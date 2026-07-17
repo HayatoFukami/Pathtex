@@ -33,7 +33,7 @@ describe('shared domain', () => {
     ).toMatchObject({ ok: false });
     expect(
       auditReason(1, 'ok\u0000\n😀'.replace('\\u0000', '\u0000')),
-    ).toMatchObject({ ok: true, value: '[Vortex Case #1] ok 😀' });
+    ).toMatchObject({ ok: true, value: '[Pathtex Case #1] ok 😀' });
   });
   it('selects only the greatest crossed punishment', () => {
     expect(

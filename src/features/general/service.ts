@@ -35,7 +35,7 @@ export class GeneralService {
       ギルド数: String(r.guildCount),
       キャッシュユーザー数: String(r.cachedUserCount),
       統計: statistics,
-      GitHub: 'https://github.com/jagrosh/Vortex',
+      GitHub: 'https://github.com/HayatoFukami/Pathtex',
     };
   }
 

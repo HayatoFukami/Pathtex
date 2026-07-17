@@ -32,7 +32,7 @@ export class DiscordGeneralAdapter {
     const client = this.client;
     return {
       get botName() {
-        return client.user?.username ?? 'Vortex';
+        return client.user?.username ?? 'Pathtex';
       },
       get avatarUrl() {
         return client.user?.displayAvatarURL();

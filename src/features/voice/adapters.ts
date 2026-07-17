@@ -45,7 +45,7 @@ export class DiscordVoiceAdapter implements VoicePort {
     const g = await this.client.guilds.fetch(guildId);
     return (
       await g.channels.create({
-        name: 'Vortex VoiceKick',
+        name: 'Pathtex VoiceKick',
         type: ChannelType.GuildVoice,
         ...(categoryId ? { parent: categoryId } : {}),
       })

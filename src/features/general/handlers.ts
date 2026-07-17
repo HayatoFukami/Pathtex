@@ -112,7 +112,7 @@ export function generalCommands(
         interaction,
         'About',
         await service.about(),
-        'Vortex TypeScript Reimplementation',
+        'Pathtex Discord Moderation Bot',
         service.runtime.avatarUrl,
       );
     }),
@@ -122,7 +122,7 @@ export function generalCommands(
           new EmbedBuilder()
             .setTitle('Botを招待')
             .setColor(0x3498db)
-            .setDescription('Vortexをサーバーへ招待します。'),
+            .setDescription('Pathtexをサーバーへ招待します。'),
         ],
         components: [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
