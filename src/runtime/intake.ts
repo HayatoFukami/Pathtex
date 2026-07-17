@@ -9,6 +9,7 @@ import type { Logger } from 'pino';
 import type { CommandDefinition } from '../commands/contract.js';
 import { InteractionDedupe } from './dedupe.js';
 import type { PermissionPolicy } from './policy.js';
+import { ConfigurationOverviewError } from '../features/configuration/service.js';
 
 export interface IntakeOptions {
   readonly ready: () => boolean;
@@ -27,6 +28,43 @@ const tokenFailure = (error: unknown): boolean => {
 const httpAuthFailure = (error: unknown): boolean =>
   (error as { status?: number; code?: number }).status === 401 ||
   (error as { code?: number }).code === 401;
+const safeErrorMessage = (error: unknown): string | undefined => {
+  if (!(error instanceof Error)) return undefined;
+  return error.message
+    .replace(
+      /(?:discord[_ -]?token|database_url|password|secret|authorization|bearer)\s*[:=]\s*\S+/giu,
+      '[REDACTED]',
+    )
+    .replace(/postgres(?:ql)?:\/\/\S+/giu, '[REDACTED]')
+    .slice(0, 500);
+};
+const errorDiagnostics = (
+  error: unknown,
+): {
+  errorMessage?: string;
+  dependency?: string;
+  causeName?: string;
+  causeMessage?: string;
+} => {
+  const diagnostics: {
+    errorMessage?: string;
+    dependency?: string;
+    causeName?: string;
+    causeMessage?: string;
+  } = {};
+  const errorMessage = safeErrorMessage(error);
+  if (errorMessage !== undefined) diagnostics.errorMessage = errorMessage;
+  if (error instanceof ConfigurationOverviewError) {
+    diagnostics.dependency = error.dependency;
+    const cause = error.cause;
+    if (cause instanceof Error) {
+      diagnostics.causeName = cause.name;
+      const causeMessage = safeErrorMessage(cause);
+      if (causeMessage !== undefined) diagnostics.causeMessage = causeMessage;
+    }
+  }
+  return diagnostics;
+};
 const replyError = async (
   interaction: ChatInputCommandInteraction,
   correlationId: string,
@@ -69,6 +107,7 @@ export function installInteractionIntake(
         {
           event: 'interaction.autocomplete',
           errorName: error instanceof Error ? error.name : 'unknown',
+          ...errorDiagnostics(error),
         },
         'Autocomplete failed',
       );
@@ -104,6 +143,7 @@ export function installInteractionIntake(
         {
           event: 'interaction.component',
           errorName: error instanceof Error ? error.name : 'unknown',
+          ...errorDiagnostics(error),
         },
         'Component failed',
       );
@@ -192,6 +232,7 @@ export function installInteractionIntake(
             : error instanceof Error
               ? error.name
               : 'unknown',
+          ...errorDiagnostics(error),
         },
         'Interaction failed',
       );
@@ -211,6 +252,7 @@ export function installInteractionIntake(
             errorName: tokenFailure(responseError)
               ? 'expired_interaction_token'
               : 'response_failed',
+            ...errorDiagnostics(responseError),
           },
           'Interaction response failed',
         );

@@ -10,6 +10,7 @@ import { createPingCommand } from '../src/commands/ping.js';
 import { installInteractionIntake } from '../src/runtime/intake.js';
 import type { Logger } from 'pino';
 import { EventEmitter } from 'node:events';
+import { ConfigurationOverviewError } from '../src/features/configuration/service.js';
 
 const job = {
   id: '00000000-0000-4000-8000-000000000001',
@@ -199,7 +200,8 @@ describe('runtime recovery and scheduler', () => {
   it('logs expired interaction tokens without attempting a second response', async () => {
     const client = new EventEmitter();
     const reply = vi.fn(() => Promise.resolve());
-    const logger = { error: vi.fn() } as unknown as Logger;
+    const errorLog = vi.fn();
+    const logger = { error: errorLog } as unknown as Logger;
     const policy = {
       authorize: () => Promise.resolve(true),
       missingBotPermissions: () => [],
@@ -240,9 +242,71 @@ describe('runtime recovery and scheduler', () => {
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(reply).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith(
+    expect(errorLog).toHaveBeenCalledWith(
       expect.objectContaining({ errorName: 'expired_interaction_token' }),
       'Interaction failed',
+    );
+  });
+
+  it('logs safe overview failure diagnostics while preserving the error response', async () => {
+    const client = new EventEmitter();
+    const reply = vi.fn(() => Promise.resolve());
+    const errorLog = vi.fn();
+    const logger = { error: errorLog } as unknown as Logger;
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    const cause = new Error('database password=top-secret');
+    const command = {
+      name: 'settings',
+      guildOnly: true,
+      data: {
+        type: 1,
+        name: 'settings',
+        description: 'settings',
+        contexts: [0],
+        integration_types: [0],
+      },
+      requiredBotPermissions: [],
+      actorNativePermissions: [],
+      authorizationPolicy: 'PUBLIC',
+      deferMode: 'NONE',
+      execute: () =>
+        Promise.reject(new ConfigurationOverviewError('automod', cause)),
+    } as unknown as import('../src/commands/contract.js').CommandDefinition;
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [command],
+      { ready: () => true, permissionPolicy: policy, logger },
+    );
+    client.emit('interactionCreate', {
+      id: 'interaction-settings',
+      commandName: 'settings',
+      guildId: 'guild',
+      channelId: 'channel',
+      user: { id: 'user' },
+      isChatInputCommand: () => true,
+      inGuild: () => true,
+      replied: false,
+      deferred: false,
+      reply,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(reply).toHaveBeenCalledOnce();
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorName: 'ConfigurationOverviewError',
+        errorMessage: 'Settings overview dependency failed: automod',
+        dependency: 'automod',
+        causeName: 'Error',
+        causeMessage: 'database [REDACTED]',
+      }),
+      'Interaction failed',
+    );
+    expect(JSON.stringify(errorLog.mock.calls[0]?.[0])).not.toContain(
+      'top-secret',
     );
   });
 
