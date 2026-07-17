@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createCommandManifest } from '../src/commands/index.js';
 import { PrismaGeneralRepository } from '../src/repositories/prisma-repositories.js';
+import { strikesCommands } from '../src/features/strikes/commands.js';
 import {
   createGeneralManifest,
   DiscordGeneralAdapter,
@@ -380,5 +381,31 @@ describe('general commands', () => {
     expect(
       (user?.data.options as Array<{ required?: boolean }>)[0]?.required,
     ).toBe(false);
+  });
+  it('rejects blank descriptions and required options after optional options', () => {
+    const general = createGeneralManifest(
+      new GeneralService({ runtime }),
+      {} as never,
+    ).commands;
+    const strikeCommands = strikesCommands({} as never);
+    const commands = [...general, ...strikeCommands];
+    const validate = (options: unknown[]): void => {
+      let optionalSeen = false;
+      for (const option of options) {
+        const item = option as {
+          description?: string;
+          required?: boolean;
+          options?: unknown[];
+        };
+        expect(item.description?.trim().length ?? 0).toBeGreaterThan(0);
+        if (item.required === false) optionalSeen = true;
+        if (item.required === true) expect(optionalSeen).toBe(false);
+        if (item.options) validate(item.options);
+      }
+    };
+    for (const command of commands) {
+      expect(command.data.description).toMatch(/\S/);
+      validate((command.data.options as unknown[] | undefined) ?? []);
+    }
   });
 });

@@ -72,10 +72,10 @@ export function strikesCommands(
     command(
       'strike',
       data('strike', 'ストライクを付与', [
+        reason,
         user,
         additionalTargets,
         amount,
-        reason,
       ]),
       async ({ interaction }) => {
         const ids = targetIds(interaction);
@@ -116,10 +116,10 @@ export function strikesCommands(
     command(
       'pardon',
       data('pardon', 'ストライクを取り消し', [
+        reason,
         user,
         additionalTargets,
         amount,
-        reason,
       ]),
       async ({ interaction }) => {
         const ids = targetIds(interaction);

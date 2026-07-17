@@ -88,7 +88,7 @@ export function generalCommands(
   const roleinfo = {
     ...base('roleinfo', 'ロールの情報を表示します'),
     data: {
-      ...base('roleinfo', '').data,
+      ...base('roleinfo', 'ロールの情報を表示します').data,
       options: [
         { name: 'role', description: 'ロール', type: 8, required: true },
       ],
@@ -99,7 +99,7 @@ export function generalCommands(
   const userinfo = {
     ...base('userinfo', 'ユーザーの情報を表示します'),
     data: {
-      ...base('userinfo', '').data,
+      ...base('userinfo', 'ユーザーの情報を表示します').data,
       options: [
         { name: 'user', description: 'ユーザー', type: 6, required: false },
       ],
