@@ -139,6 +139,106 @@ describe('general commands', () => {
     expect(user.guildAvatar).toBe('なし');
     expect(user.guildAvatarAvailable).toBe(false);
   });
+  it('uses the target guild avatar as the userinfo thumbnail', async () => {
+    const info = {
+      username: 'target',
+      globalName: 'Target',
+      id: 'target-id',
+      bot: false,
+      system: false,
+      createdAt: 'now',
+      joinedAt: 'now',
+      nickname: 'Target',
+      highestRole: '@everyone',
+      roles: [],
+      avatar: 'https://cdn.example/global-avatar.png',
+      guildAvatar: 'https://cdn.example/guild-avatar.png',
+      guildAvatarAvailable: true,
+      banner: '取得不能',
+      accent: '取得不能',
+      timeout: 'なし',
+    };
+    const adapter = {
+      resolveMember: vi.fn(() => Promise.resolve(undefined)),
+      userWithDetails: vi.fn(() => Promise.resolve(info)),
+    };
+    const command = createGeneralManifest(
+      new GeneralService({ runtime }),
+      adapter as never,
+    ).commands.find((item) => item.name === 'userinfo');
+    const interaction = {
+      deferred: true,
+      replied: false,
+      user: { id: 'invoking-id' },
+      guild: { members: { cache: new Map() } },
+      options: { getUser: vi.fn(() => ({ id: 'target-id' })) },
+      editReply: vi.fn<(payload: unknown) => Promise<void>>(() =>
+        Promise.resolve(),
+      ),
+      followUp: vi.fn<(payload: unknown) => Promise<void>>(() =>
+        Promise.resolve(),
+      ),
+    };
+
+    await command?.execute({ interaction } as never);
+
+    const payload = interaction.editReply.mock.calls[0]?.[0] as {
+      embeds: Array<{ data: { thumbnail?: { url?: string } } }>;
+    };
+    expect(payload.embeds[0]?.data.thumbnail?.url).toBe(
+      'https://cdn.example/guild-avatar.png',
+    );
+  });
+  it('falls back to the target global avatar for userinfo thumbnails', async () => {
+    const info = {
+      username: 'target',
+      globalName: 'なし',
+      id: 'target-id',
+      bot: false,
+      system: false,
+      createdAt: 'now',
+      joinedAt: '取得不能',
+      nickname: 'なし',
+      highestRole: '@everyone',
+      roles: [],
+      avatar: 'https://cdn.example/global-avatar.png',
+      guildAvatar: 'なし',
+      guildAvatarAvailable: false,
+      banner: '取得不能',
+      accent: '取得不能',
+      timeout: 'なし',
+    };
+    const adapter = {
+      resolveMember: vi.fn(() => Promise.resolve(undefined)),
+      userWithDetails: vi.fn(() => Promise.resolve(info)),
+    };
+    const command = createGeneralManifest(
+      new GeneralService({ runtime }),
+      adapter as never,
+    ).commands.find((item) => item.name === 'userinfo');
+    const interaction = {
+      deferred: true,
+      replied: false,
+      user: { id: 'invoking-id' },
+      guild: { members: { cache: new Map() } },
+      options: { getUser: vi.fn(() => null) },
+      editReply: vi.fn<(payload: unknown) => Promise<void>>(() =>
+        Promise.resolve(),
+      ),
+      followUp: vi.fn<(payload: unknown) => Promise<void>>(() =>
+        Promise.resolve(),
+      ),
+    };
+
+    await command?.execute({ interaction } as never);
+
+    const payload = interaction.editReply.mock.calls[0]?.[0] as {
+      embeds: Array<{ data: { thumbnail?: { url?: string } } }>;
+    };
+    expect(payload.embeds[0]?.data.thumbnail?.url).toBe(
+      'https://cdn.example/global-avatar.png',
+    );
+  });
   it('uses the repository port for database ping and statistics', async () => {
     const repository = new PrismaGeneralRepository({
       $queryRaw: vi.fn(() => Promise.resolve([{ '?column?': 1 }])),

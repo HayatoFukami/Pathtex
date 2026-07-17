@@ -254,7 +254,9 @@ export function generalCommands(
           Timeout: info.timeout,
         },
         undefined,
-        service.runtime.avatarUrl,
+        info.guildAvatarAvailable && info.guildAvatar !== 'なし'
+          ? info.guildAvatar
+          : info.avatar,
       );
     }),
   ];
