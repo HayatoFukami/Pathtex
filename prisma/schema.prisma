@@ -1,0 +1,348 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RaidModeSource {
+  MANUAL
+  AUTO
+}
+
+enum PunishmentAction {
+  MUTE
+  KICK
+  SOFTBAN
+  BAN
+}
+
+enum StrikeSource {
+  MANUAL_STRIKE
+  PARDON
+  AUTOMOD
+}
+
+enum CaseAction {
+  KICK
+  BAN
+  SOFTBAN
+  SILENTBAN
+  UNBAN
+  MUTE
+  UNMUTE
+  STRIKE
+  PARDON
+  RAIDMODE_ON
+  RAIDMODE_OFF
+  VOICEKICK
+  SLOWMODE
+  AUTO_PUNISHMENT
+}
+
+enum CaseSource {
+  COMMAND
+  AUTOMOD
+  PUNISHMENT
+  RAIDMODE
+  EXTERNAL
+}
+
+enum CaseStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  PARTIAL
+}
+
+enum ScheduledActionType {
+  UNBAN
+  UNMUTE
+  RESTORE_SLOWMODE
+  DISABLE_RAIDMODE
+}
+
+enum ScheduledActionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ActiveMuteStatus {
+  ACTIVE
+  RELEASED
+  EXPIRED
+}
+
+enum GuildLifecycleStatus {
+  ACTIVE
+  LEFT
+}
+
+model GuildSettings {
+  guildId                     String                @id @map("guild_id") @db.VarChar(20)
+  modlogChannelId             String?               @map("modlog_channel_id") @db.VarChar(20)
+  messageLogChannelId         String?               @map("message_log_channel_id") @db.VarChar(20)
+  serverLogChannelId          String?               @map("server_log_channel_id") @db.VarChar(20)
+  voiceLogChannelId           String?               @map("voice_log_channel_id") @db.VarChar(20)
+  modRoleId                   String?               @map("mod_role_id") @db.VarChar(20)
+  mutedRoleId                 String?               @map("muted_role_id") @db.VarChar(20)
+  timezone                    String                @default("UTC") @db.VarChar(64)
+  raidModeEnabled             Boolean               @default(false) @map("raid_mode_enabled")
+  raidModeSource              RaidModeSource?       @map("raid_mode_source")
+  raidModeReason              String?               @map("raid_mode_reason") @db.VarChar(1000)
+  raidStartedAt               DateTime?             @map("raid_started_at") @db.Timestamptz(6)
+  verificationLevelBeforeRaid Int?                  @map("verification_level_before_raid") @db.SmallInt
+  raidVerificationChanged     Boolean               @default(false) @map("raid_verification_changed")
+  nextCaseNumber              Int                   @default(1) @map("next_case_number")
+  createdAt                   DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                   DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  automod                     AutomodSettings?
+  punishments                 Punishment[]
+  cases                       ModerationCase[]
+  scheduledActions            ScheduledAction[]
+  strikes                     UserStrike[]
+  strikeTransactions          StrikeTransaction[]
+  ignoredRoles                IgnoredRole[]
+  ignoredChannels             IgnoredChannel[]
+  messageSnapshots            MessageSnapshot[]
+  memberSnapshots             GuildMemberSnapshot[]
+  raidJoinEvents              RaidJoinEvent[]
+  activeMutes                 ActiveMute[]
+
+  @@index([modlogChannelId])
+  @@index([messageLogChannelId])
+  @@index([serverLogChannelId])
+  @@index([voiceLogChannelId])
+  @@map("guild_settings")
+}
+
+model AutomodSettings {
+  guildId                  String        @id @map("guild_id") @db.VarChar(20)
+  antiInviteStrikes        Int           @default(0) @map("anti_invite_strikes") @db.SmallInt
+  antiReferralStrikes      Int           @default(0) @map("anti_referral_strikes") @db.SmallInt
+  antiEveryoneStrikes      Int           @default(0) @map("anti_everyone_strikes") @db.SmallInt
+  antiCopypastaStrikes     Int           @default(0) @map("anti_copypasta_strikes") @db.SmallInt
+  maxUserMentions          Int?          @map("max_user_mentions") @db.SmallInt
+  maxRoleMentions          Int?          @map("max_role_mentions") @db.SmallInt
+  maxLines                 Int?          @map("max_lines") @db.SmallInt
+  duplicateEnabled         Boolean       @default(false) @map("duplicate_enabled")
+  duplicateDeleteThreshold Int?          @map("duplicate_delete_threshold") @db.SmallInt
+  duplicateStrikeThreshold Int?          @map("duplicate_strike_threshold") @db.SmallInt
+  duplicateStrikes         Int           @default(1) @map("duplicate_strikes") @db.SmallInt
+  autodehoistCharacter     String?       @map("autodehoist_character") @db.VarChar(8)
+  autoRaidEnabled          Boolean       @default(false) @map("auto_raid_enabled")
+  autoRaidJoinCount        Int           @default(10) @map("auto_raid_join_count") @db.SmallInt
+  autoRaidWindowSeconds    Int           @default(10) @map("auto_raid_window_seconds") @db.SmallInt
+  autoRaidIdleSeconds      Int           @default(120) @map("auto_raid_idle_seconds") @db.SmallInt
+  createdAt                DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild                    GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@map("automod_settings")
+}
+
+model Punishment {
+  id              String           @id @default(uuid()) @db.Uuid
+  guildId         String           @map("guild_id") @db.VarChar(20)
+  threshold       Int
+  action          PunishmentAction
+  durationSeconds Int?             @map("duration_seconds")
+  createdBy       String           @map("created_by") @db.VarChar(20)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild           GuildSettings    @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@unique([guildId, threshold])
+  @@index([guildId, threshold])
+  @@map("punishments")
+}
+
+model UserStrike {
+  guildId   String        @map("guild_id") @db.VarChar(20)
+  userId    String        @map("user_id") @db.VarChar(20)
+  count     Int           @default(0)
+  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild     GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@id([guildId, userId])
+  @@index([guildId, count(sort: Desc)])
+  @@map("user_strikes")
+}
+
+model StrikeTransaction {
+  id             String          @id @default(uuid()) @db.Uuid
+  guildId        String          @map("guild_id") @db.VarChar(20)
+  userId         String          @map("user_id") @db.VarChar(20)
+  delta          Int
+  requestedDelta Int             @map("requested_delta")
+  beforeCount    Int             @map("before_count")
+  afterCount     Int             @map("after_count")
+  source         StrikeSource
+  actorUserId    String          @map("actor_user_id") @db.VarChar(20)
+  reason         String          @db.VarChar(1000)
+  modCaseId      String?         @map("mod_case_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  guild          GuildSettings   @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+  modCase        ModerationCase? @relation(fields: [modCaseId], references: [id], onDelete: SetNull)
+
+  @@index([guildId, userId, createdAt(sort: Desc)])
+  @@index([modCaseId])
+  @@map("strike_transactions")
+}
+
+model ModerationCase {
+  id                     String              @id @default(uuid()) @db.Uuid
+  guildId                String              @map("guild_id") @db.VarChar(20)
+  caseNumber             Int                 @map("case_number")
+  action                 CaseAction
+  targetUserId           String?             @map("target_user_id") @db.VarChar(20)
+  targetDisplay          String              @map("target_display") @db.VarChar(128)
+  moderatorUserId        String              @map("moderator_user_id") @db.VarChar(20)
+  reason                 String?             @db.VarChar(1000)
+  durationSeconds        Int?                @map("duration_seconds")
+  source                 CaseSource
+  status                 CaseStatus
+  errorCode              String?             @map("error_code") @db.VarChar(64)
+  logMessageId           String?             @map("log_message_id") @db.VarChar(20)
+  logChannelId           String?             @map("log_channel_id") @db.VarChar(20)
+  discordAuditLogEntryId String?             @map("discord_audit_log_entry_id") @db.VarChar(20)
+  metadata               Json                @default("{}")
+  createdAt              DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild                  GuildSettings       @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+  strikeTransactions     StrikeTransaction[]
+  activeMutes            ActiveMute[]
+
+  @@unique([guildId, caseNumber])
+  @@unique([guildId, discordAuditLogEntryId])
+  @@index([guildId, createdAt(sort: Desc)])
+  @@index([guildId, caseNumber(sort: Desc)])
+  @@index([guildId, targetUserId, createdAt(sort: Desc)])
+  @@map("moderation_cases")
+}
+
+model ScheduledAction {
+  id              String                @id @default(uuid()) @db.Uuid
+  guildId         String                @map("guild_id") @db.VarChar(20)
+  targetUserId    String?               @map("target_user_id") @db.VarChar(20)
+  channelId       String?               @map("channel_id") @db.VarChar(20)
+  type            ScheduledActionType
+  executeAt       DateTime              @map("execute_at") @db.Timestamptz(6)
+  status          ScheduledActionStatus @default(PENDING)
+  payload         Json
+  attempts        Int                   @default(0) @db.SmallInt
+  lockedAt        DateTime?             @map("locked_at") @db.Timestamptz(6)
+  lockedBy        String?               @map("locked_by") @db.VarChar(64)
+  lastError       String?               @map("last_error") @db.Text
+  createdByCaseId String?               @map("created_by_case_id") @db.Uuid
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild           GuildSettings         @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@index([status, executeAt])
+  @@index([guildId, targetUserId, type, status])
+  @@index([guildId, channelId, type, status])
+  @@map("scheduled_actions")
+}
+
+model ActiveMute {
+  guildId   String           @map("guild_id") @db.VarChar(20)
+  userId    String           @map("user_id") @db.VarChar(20)
+  caseId    String           @map("case_id") @db.Uuid
+  expiresAt DateTime?        @map("expires_at") @db.Timestamptz(6)
+  status    ActiveMuteStatus @default(ACTIVE)
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild     GuildSettings    @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+  case      ModerationCase   @relation(fields: [caseId], references: [id], onDelete: NoAction)
+
+  @@id([guildId, userId])
+  @@index([guildId, status])
+  @@index([expiresAt])
+  @@map("active_mutes")
+}
+
+model GuildLifecycleMarker {
+  guildId           String               @id @map("guild_id") @db.VarChar(20)
+  status            GuildLifecycleStatus
+  departedAt        DateTime?            @map("departed_at") @db.Timestamptz(6)
+  rejoinedAt        DateTime?            @map("rejoined_at") @db.Timestamptz(6)
+  cleanupEligibleAt DateTime?            @map("cleanup_eligible_at") @db.Timestamptz(6)
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, cleanupEligibleAt])
+  @@map("guild_lifecycle_markers")
+}
+
+model IgnoredRole {
+  guildId   String        @map("guild_id") @db.VarChar(20)
+  roleId    String        @map("role_id") @db.VarChar(20)
+  createdBy String        @map("created_by") @db.VarChar(20)
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  guild     GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@id([guildId, roleId])
+  @@map("ignored_roles")
+}
+
+model IgnoredChannel {
+  guildId   String        @map("guild_id") @db.VarChar(20)
+  channelId String        @map("channel_id") @db.VarChar(20)
+  createdBy String        @map("created_by") @db.VarChar(20)
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  guild     GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@id([guildId, channelId])
+  @@map("ignored_channels")
+}
+
+model MessageSnapshot {
+  messageId     String        @id @map("message_id") @db.VarChar(20)
+  guildId       String        @map("guild_id") @db.VarChar(20)
+  channelId     String        @map("channel_id") @db.VarChar(20)
+  authorUserId  String        @map("author_user_id") @db.VarChar(20)
+  authorDisplay String        @map("author_display") @db.VarChar(128)
+  content       String        @db.Text
+  attachments   Json
+  embedsSummary Json          @map("embeds_summary")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  editedAt      DateTime?     @map("edited_at") @db.Timestamptz(6)
+  expiresAt     DateTime      @map("expires_at") @db.Timestamptz(6)
+  guild         GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: Cascade)
+
+  @@index([guildId, channelId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("message_snapshots")
+}
+
+model GuildMemberSnapshot {
+  guildId    String        @map("guild_id") @db.VarChar(20)
+  userId     String        @map("user_id") @db.VarChar(20)
+  username   String        @db.VarChar(32)
+  globalName String?       @map("global_name") @db.VarChar(32)
+  nickname   String?       @db.VarChar(32)
+  joinedAt   DateTime?     @map("joined_at") @db.Timestamptz(6)
+  updatedAt  DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  guild      GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@id([guildId, userId])
+  @@map("guild_member_snapshots")
+}
+
+model RaidJoinEvent {
+  id       String        @id @default(uuid()) @db.Uuid
+  guildId  String        @map("guild_id") @db.VarChar(20)
+  userId   String        @map("user_id") @db.VarChar(20)
+  joinedAt DateTime      @map("joined_at") @db.Timestamptz(6)
+  guild    GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+
+  @@unique([guildId, userId, joinedAt])
+  @@index([guildId, joinedAt(sort: Desc)])
+  @@map("raid_join_events")
+}
