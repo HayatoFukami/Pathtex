@@ -1,6 +1,4 @@
 import 'dotenv/config';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { PrismaClient } from '@prisma/client';
 import {
   ChannelType,
@@ -79,13 +77,13 @@ import {
   handleToolsComponent,
 } from './features/tools/index.js';
 import { DiscordVoiceAdapter, VoiceService } from './features/voice/index.js';
+import { runMigrations } from './migrations.js';
 import {
   DiscordGeneralAdapter,
   GeneralService,
   createGeneralManifest,
 } from './features/general/index.js';
 
-const execFileAsync = promisify(execFile);
 const context = (instanceId: string): AppLogContext => ({
   event: 'bootstrap',
   correlationId: instanceId,
@@ -838,11 +836,7 @@ export function createBootstrapDependencies(
   return {
     commandDefinitions: commands,
     database: () => prisma.connect(),
-    migrations: async () => {
-      await execFileAsync('pnpm', ['prisma', 'migrate', 'deploy'], {
-        cwd: process.cwd(),
-      });
-    },
+    migrations: () => runMigrations(process.cwd()),
     resources: async () => {
       await automod.initialize();
       return { commands: commandManifest(commands) };

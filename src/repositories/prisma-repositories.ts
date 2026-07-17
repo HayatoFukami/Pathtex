@@ -483,7 +483,11 @@ export class PrismaSchedulerRepository implements SchedulerRepository {
     const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
     const typeClause =
       supportedTypes && supportedTypes.length > 0
-        ? Prisma.sql` AND type IN (${Prisma.join(supportedTypes)})`
+        ? Prisma.sql` AND type IN (${Prisma.join(
+            supportedTypes.map(
+              (type) => Prisma.sql`${type}::"ScheduledActionType"`,
+            ),
+          )})`
         : Prisma.empty;
     return this.db.$transaction(async (tx) => {
       const rawIds = await tx.$queryRaw<unknown[]>(Prisma.sql`
@@ -797,33 +801,36 @@ export class PrismaSnapshotRepository implements SnapshotRepository {
   ): Promise<import('./contracts.js').SnapshotDto> {
     MessageSnapshotInputSchema.parse(input);
     return SnapshotDtoSchema.parse(
-      await this.db.messageSnapshot.upsert({
-        where: { messageId: input.messageId },
-        create: {
-          messageId: input.messageId,
-          guildId: input.guildId,
-          channelId: input.channelId,
-          authorUserId: input.authorUserId,
-          authorDisplay: input.authorDisplay,
-          content: input.content,
-          attachments: prismaJson(input.attachments),
-          embedsSummary: prismaJson(input.embedsSummary),
-          createdAt: input.createdAt ?? new Date(),
-          editedAt: input.editedAt ?? null,
-          expiresAt: input.expiresAt,
-        },
-        update: {
-          guildId: input.guildId,
-          channelId: input.channelId,
-          authorUserId: input.authorUserId,
-          authorDisplay: input.authorDisplay,
-          content: input.content,
-          attachments: prismaJson(input.attachments),
-          embedsSummary: prismaJson(input.embedsSummary),
-          createdAt: input.createdAt ?? new Date(),
-          editedAt: input.editedAt ?? null,
-          expiresAt: input.expiresAt,
-        },
+      await this.db.$transaction(async (tx) => {
+        await ensureSettings(tx, input.guildId);
+        return tx.messageSnapshot.upsert({
+          where: { messageId: input.messageId },
+          create: {
+            messageId: input.messageId,
+            guildId: input.guildId,
+            channelId: input.channelId,
+            authorUserId: input.authorUserId,
+            authorDisplay: input.authorDisplay,
+            content: input.content,
+            attachments: prismaJson(input.attachments),
+            embedsSummary: prismaJson(input.embedsSummary),
+            createdAt: input.createdAt ?? new Date(),
+            editedAt: input.editedAt ?? null,
+            expiresAt: input.expiresAt,
+          },
+          update: {
+            guildId: input.guildId,
+            channelId: input.channelId,
+            authorUserId: input.authorUserId,
+            authorDisplay: input.authorDisplay,
+            content: input.content,
+            attachments: prismaJson(input.attachments),
+            embedsSummary: prismaJson(input.embedsSummary),
+            createdAt: input.createdAt ?? new Date(),
+            editedAt: input.editedAt ?? null,
+            expiresAt: input.expiresAt,
+          },
+        });
       }),
     ) as import('./contracts.js').SnapshotDto;
   }

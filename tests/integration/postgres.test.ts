@@ -207,6 +207,7 @@ integration('PostgreSQL persistence foundation', () => {
           10,
           'worker-a',
           new Date('2026-01-01T00:00:00Z'),
+          ['UNBAN'],
         )
       ).some((item) => item.id === replacement.id),
     ).toBe(true);
@@ -934,7 +935,7 @@ integration('PostgreSQL persistence foundation', () => {
     const snapshots = new PrismaSnapshotRepository(getDb());
     await snapshots.upsertMessage({
       messageId: '12345678901234574',
-      guildId: '12345678901234567',
+      guildId: '12345678901234575',
       channelId: '12345678901234570',
       authorUserId: '12345678901234568',
       authorDisplay: 'snapshot',
@@ -945,6 +946,11 @@ integration('PostgreSQL persistence foundation', () => {
     });
     expect(await snapshots.getMessage('12345678901234574')).not.toBeNull();
     expect((await snapshots.getMessages(['12345678901234574'])).length).toBe(1);
+    expect(
+      await getDb().guildSettings.findUnique({
+        where: { guildId: '12345678901234575' },
+      }),
+    ).not.toBeNull();
   });
 
   it('rejects persistence constraints', async () => {
