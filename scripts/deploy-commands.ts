@@ -19,8 +19,23 @@ const logger = createLogger(config, {
 });
 const dependencies = createBootstrapDependencies(config, logger);
 const commands = commandManifest(dependencies.commandDefinitions);
-await registerCommands(
-  config,
-  DiscordRestAdapter.withToken(config.DISCORD_TOKEN),
-  commands,
-);
+try {
+  await registerCommands(
+    config,
+    DiscordRestAdapter.withToken(config.DISCORD_TOKEN),
+    commands,
+  );
+} catch (error) {
+  if (
+    config.COMMAND_SCOPE === 'guild' &&
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 50001
+  ) {
+    throw new Error(
+      'DEV_GUILD_IDにBotアプリケーションが参加できません。DEV_GUILD_IDを確認し、Botを対象サーバーへ招待してください。',
+    );
+  }
+  throw error;
+}
