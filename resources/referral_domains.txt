@@ -1,0 +1,5 @@
+# One registrable domain per line; blank lines and comments are ignored.
+bit.ly
+t.co
+tinyurl.com
+linktr.ee

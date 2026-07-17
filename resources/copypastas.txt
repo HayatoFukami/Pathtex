@@ -1,0 +1,4 @@
+# name|required phrase(s),comma separated|optional phrase(s),comma separated|min optional matches
+discord-giveaway|free nitro,discord gift|claim,limited|1
+crypto-scam|double your crypto,send crypto|wallet,investment|1
+mass-mention|everyone ping,share this|urgent,important|1
