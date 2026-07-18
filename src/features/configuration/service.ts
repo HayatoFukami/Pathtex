@@ -253,36 +253,42 @@ export class ConfigurationService {
     );
     if (!settings.ok)
       throw new ConfigurationOverviewError('settings', settings.error);
+    const automod = this.deps.automod;
+    const punishments = this.deps.punishments;
+    const ignores = this.deps.ignores;
+    const setup = this.deps.setup;
     return ok({
       settings: settings.value,
-      automod: this.deps.automod
+      automod: automod
         ? await this.overviewDependency('automod', () =>
-            this.deps.automod!.getOrCreate(guildId),
+            automod.getOrCreate(guildId),
           )
         : null,
-      punishments: this.deps.punishments
+      punishments: punishments
         ? await this.overviewDependency('punishments', () =>
-            this.deps.punishments!.list(guildId),
+            punishments.list(guildId),
           )
         : [],
-      ignoredRoles: this.deps.ignores
+      ignoredRoles: ignores
         ? await this.overviewDependency('ignoredRoles', () =>
-            this.deps.ignores!.listRoles(guildId),
+            ignores.listRoles(guildId),
           )
         : [],
-      ignoredChannels: this.deps.ignores
+      ignoredChannels: ignores
         ? await this.overviewDependency('ignoredChannels', () =>
-            this.deps.ignores!.listChannels(guildId),
+            ignores.listChannels(guildId),
           )
         : [],
-      automaticIgnoredRoles: this.deps.setup?.getAutomaticIgnoredRoles
-        ? await this.overviewDependency('automaticIgnoredRoles', () =>
-            this.deps.setup!.getAutomaticIgnoredRoles!(guildId),
+      automaticIgnoredRoles: setup?.getAutomaticIgnoredRoles
+        ? await this.overviewDependency(
+            'automaticIgnoredRoles',
+            () => setup.getAutomaticIgnoredRoles?.(guildId) ?? [],
           )
         : [],
-      botWarnings: this.deps.setup?.getBotWarnings
-        ? await this.overviewDependency('botWarnings', () =>
-            this.deps.setup!.getBotWarnings!(guildId),
+      botWarnings: setup?.getBotWarnings
+        ? await this.overviewDependency(
+            'botWarnings',
+            () => setup.getBotWarnings?.(guildId) ?? [],
           )
         : [],
       resourceWarnings: await this.overviewDependency(

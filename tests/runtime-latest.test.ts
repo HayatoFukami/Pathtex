@@ -310,6 +310,69 @@ describe('runtime recovery and scheduler', () => {
     );
   });
 
+  it('routes cfg1 buttons to configuration without changing audit routing', async () => {
+    const client = new EventEmitter();
+    const reply = vi.fn(() => Promise.resolve());
+    const configuration = vi.fn(() => Promise.resolve(true));
+    const modal = vi.fn(() => Promise.resolve(true));
+    const tools = vi.fn(() => Promise.resolve(true));
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      {
+        ready: () => true,
+        permissionPolicy: policy,
+        onConfigurationComponent: configuration,
+        onConfigurationModal: modal,
+        onComponent: tools,
+      },
+    );
+    const component = (customId: string) => ({
+      id: customId,
+      customId,
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => true,
+      isModalSubmit: () => false,
+      isButton: () => true,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply,
+      message: { createdTimestamp: Date.now() },
+    });
+    const select = {
+      ...component('cfg1.channel-message.any'),
+      isButton: () => false,
+      isAnySelectMenu: () => true,
+      values: ['channel'],
+    };
+    const invalidSelect = {
+      ...select,
+      customId: 'other.channel-message.any',
+    };
+    const modalInteraction = {
+      ...component('cfg1.timezone-submit.any'),
+      isMessageComponent: () => false,
+      isModalSubmit: () => true,
+      fields: { getTextInputValue: () => 'UTC' },
+    };
+    client.emit('interactionCreate', component('cfg1.refresh.any'));
+    client.emit('interactionCreate', select);
+    client.emit('interactionCreate', invalidSelect);
+    client.emit('interactionCreate', modalInteraction);
+    client.emit('interactionCreate', component('audit:next:token:user'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(configuration).toHaveBeenCalledTimes(2);
+    expect(modal).toHaveBeenCalledOnce();
+    expect(tools).toHaveBeenCalledOnce();
+    expect(reply).not.toHaveBeenCalled();
+  });
+
   it('treats Discord HTTP 401 as fatal intake shutdown', async () => {
     const client = new EventEmitter();
     const onFatal = vi.fn();

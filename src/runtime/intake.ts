@@ -4,7 +4,10 @@ import type {
   Interaction,
   ChatInputCommandInteraction,
   ButtonInteraction,
+  MessageComponentInteraction,
+  ModalSubmitInteraction,
 } from 'discord.js';
+import { MessageFlags } from 'discord.js';
 import type { Logger } from 'pino';
 import type { CommandDefinition } from '../commands/contract.js';
 import { InteractionDedupe } from './dedupe.js';
@@ -18,7 +21,15 @@ export interface IntakeOptions {
   readonly permissionPolicy: PermissionPolicy;
   readonly drainTimeoutMs?: number;
   readonly onFatal?: (error: Error) => void;
-  readonly onComponent?: (interaction: ButtonInteraction) => Promise<boolean>;
+  readonly onComponent?: (
+    interaction: MessageComponentInteraction,
+  ) => Promise<boolean>;
+  readonly onConfigurationComponent?: (
+    interaction: MessageComponentInteraction,
+  ) => Promise<boolean>;
+  readonly onConfigurationModal?: (
+    interaction: ModalSubmitInteraction,
+  ) => Promise<boolean>;
 }
 
 const tokenFailure = (error: unknown): boolean => {
@@ -115,11 +126,12 @@ export function installInteractionIntake(
     active.add(task);
     void task.finally(() => active.delete(task)).catch(() => undefined);
   };
-  const handleComponent = (interaction: ButtonInteraction): void => {
+  const handleAuditComponent = (interaction: ButtonInteraction): void => {
     if (!accepting || !options.ready() || !interaction.inGuild()) return;
+    const componentHandler = options.onComponent;
     const parts = interaction.customId.split(':');
+    if (parts[0] !== 'audit') return;
     if (
-      parts[0] !== 'audit' ||
       (parts[1] !== 'next' && parts[1] !== 'previous') ||
       parts.length !== 4 ||
       parts[3] !== interaction.user.id
@@ -129,14 +141,46 @@ export function installInteractionIntake(
       if (Date.now() - interaction.message.createdTimestamp > 15 * 60 * 1000) {
         await interaction.reply({
           content: 'このページは期限切れです。',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
-      if (!options.onComponent || !(await options.onComponent(interaction)))
+      if (!componentHandler || !(await componentHandler(interaction)))
         await interaction.reply({
           content: 'この操作は利用できません。',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
+        });
+    })().catch((error: unknown) => {
+      options.logger?.error(
+        {
+          event: 'interaction.component',
+          errorName: error instanceof Error ? error.name : 'unknown',
+          ...errorDiagnostics(error),
+        },
+        'Component failed',
+      );
+    });
+    active.add(task);
+    void task.finally(() => active.delete(task)).catch(() => undefined);
+  };
+  const handleConfiguration = (
+    interaction: MessageComponentInteraction | ModalSubmitInteraction,
+  ): void => {
+    if (!accepting || !options.ready() || !interaction.inGuild()) return;
+    const configurationHandler = options.onConfigurationComponent;
+    const modalHandler = options.onConfigurationModal;
+    const task = (async () => {
+      const handled = interaction.isModalSubmit()
+        ? modalHandler
+          ? await modalHandler(interaction)
+          : false
+        : configurationHandler
+          ? await configurationHandler(interaction)
+          : false;
+      if (!handled)
+        await interaction.reply({
+          content: 'この操作は利用できません。',
+          flags: MessageFlags.Ephemeral,
         });
     })().catch((error: unknown) => {
       options.logger?.error(
@@ -157,9 +201,23 @@ export function installInteractionIntake(
       handleAutocomplete(raw);
       return;
     }
-    const button = Reflect.get(raw, 'isButton');
-    if (typeof button === 'function' && button.call(raw)) {
-      handleComponent(raw as ButtonInteraction);
+    const component = Reflect.get(raw, 'isMessageComponent');
+    if (typeof component === 'function' && component.call(raw)) {
+      const messageComponent = raw as MessageComponentInteraction;
+      if (messageComponent.customId.startsWith('cfg1.')) {
+        handleConfiguration(messageComponent);
+        return;
+      }
+      if (messageComponent.isButton()) handleAuditComponent(messageComponent);
+      return;
+    }
+    const modal = Reflect.get(raw, 'isModalSubmit');
+    if (
+      typeof modal === 'function' &&
+      modal.call(raw) &&
+      (raw as ModalSubmitInteraction).customId.startsWith('cfg1.')
+    ) {
+      handleConfiguration(raw as ModalSubmitInteraction);
       return;
     }
     if (

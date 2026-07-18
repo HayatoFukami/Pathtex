@@ -3,7 +3,10 @@ import { PrismaClient } from '@prisma/client';
 import {
   ChannelType,
   type APIEmbed,
+  type ButtonInteraction,
   type Client,
+  type ChatInputCommandInteraction,
+  type MessageComponentInteraction,
   type Message,
   type VoiceState,
 } from 'discord.js';
@@ -46,7 +49,13 @@ import {
   PunishmentConfigurationService,
   IgnoreConfigurationService,
 } from './services/configuration-services.js';
-import { ConfigurationService } from './features/configuration/index.js';
+import {
+  ConfigurationService,
+  createConfigurationComponentHandler,
+  createConfigurationModalHandler,
+  type ConfigurationInteraction,
+  type ConfigurationRoleResolutionPort,
+} from './features/configuration/index.js';
 import {
   LoggingEventAdapter,
   LoggingEventPipeline,
@@ -96,6 +105,19 @@ const context = (instanceId: string): AppLogContext => ({
   errorName: null,
   discordCode: null,
 });
+
+const safeConfigurationFailureMessage = (
+  error: unknown,
+): string | undefined => {
+  if (!(error instanceof Error)) return undefined;
+  return error.message
+    .replace(
+      /(?:discord[_ -]?token|database_url|password|secret|authorization|bearer)\s*[:=]\s*\S+/giu,
+      '[REDACTED]',
+    )
+    .replace(/postgres(?:ql)?:\/\/\S+/giu, '[REDACTED]')
+    .slice(0, 500);
+};
 
 export function createBootstrapDependencies(
   config: AppConfig,
@@ -756,6 +778,70 @@ export function createBootstrapDependencies(
       });
     },
   });
+  const configurationRoles: ConfigurationRoleResolutionPort = {
+    resolveRole: async (guildId, roleId) => {
+      try {
+        const guild = await client?.client.guilds.fetch(guildId);
+        if (!guild) return null;
+        const role = await guild.roles.fetch(roleId).catch(() => null);
+        if (!role) return null;
+        const tags = role.tags;
+        return {
+          id: role.id,
+          managed: role.managed,
+          everyone: role.id === guild.id,
+          botIntegration:
+            tags !== null && ('botId' in tags || 'integrationId' in tags),
+        };
+      } catch {
+        return null;
+      }
+    },
+  };
+  const configurationAuthorization = {
+    authorize: async (interaction: ConfigurationInteraction) => {
+      if (interaction.guild?.ownerId === interaction.user.id) return true;
+      return permissionPolicy.authorize(
+        interaction as unknown as ChatInputCommandInteraction,
+        {
+          authorizationPolicy: 'MANAGE_GUILD',
+          actorNativePermissions: ['ManageGuild'],
+        } as unknown as CommandDefinition,
+      );
+    },
+  };
+  const setupPermissionPreflight = (
+    interaction: MessageComponentInteraction,
+  ): Promise<readonly string[]> =>
+    Promise.resolve(
+      permissionPolicy.missingBotPermissions(
+        interaction as unknown as ChatInputCommandInteraction,
+        ['ManageRoles', 'ManageChannels', 'ViewChannel'],
+      ),
+    );
+  const configurationHandlerOptions = {
+    service: configuration,
+    authorization: configurationAuthorization,
+    roles: configurationRoles,
+    reportFailure: (error: unknown) => {
+      const errorMessage = safeConfigurationFailureMessage(error);
+      logger.error(
+        {
+          event: 'interaction.configuration_action_failed',
+          errorName: error instanceof Error ? error.name : 'unknown',
+          ...(errorMessage === undefined ? {} : { errorMessage }),
+        },
+        'Configuration dashboard action failed',
+      );
+    },
+    setupPermissionPreflight,
+  };
+  const configurationComponentHandler = createConfigurationComponentHandler(
+    configurationHandlerOptions,
+  );
+  const configurationModalHandler = createConfigurationModalHandler(
+    configurationHandlerOptions,
+  );
   const database = {
     health: () => prisma.health(),
     gatewayPing: () => client?.client.ws.ping ?? -1,
@@ -896,7 +982,10 @@ export function createBootstrapDependencies(
         ready: () => client?.client.isReady() ?? false,
         logger,
         permissionPolicy,
-        onComponent: (interaction) => handleToolsComponent(interaction, tools),
+        onComponent: (interaction) =>
+          handleToolsComponent(interaction as ButtonInteraction, tools),
+        onConfigurationComponent: configurationComponentHandler,
+        onConfigurationModal: configurationModalHandler,
         onFatal: (error) => {
           logger.fatal(
             {

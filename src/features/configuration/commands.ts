@@ -1,6 +1,10 @@
 import { PermissionFlagsBits, ChannelType } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import { ConfigurationService, type LogKind } from './service.js';
+import {
+  configurationDashboard,
+  configurationDashboardError,
+} from './dashboard.js';
 
 const guildData = (
   name: string,
@@ -60,7 +64,7 @@ export function configurationCommands(
         await interaction.editReply(
           result.ok
             ? `Mutedロールを設定しました（成功 ${String(result.value.succeeded)} / 失敗 ${String(result.value.failed)}）`
-            : result.error.message,
+            : '設定を更新できませんでした。',
         );
       },
     ),
@@ -88,7 +92,7 @@ export function configurationCommands(
         await interaction.editReply(
           result.ok
             ? `Timezone: ${result.value.settings.timezone}\n現在時刻: ${result.value.currentTime}`
-            : result.error.message,
+            : '設定を更新できませんでした。',
         );
       },
     ),
@@ -126,7 +130,9 @@ export function configurationCommands(
             : undefined,
         );
         await interaction.editReply(
-          result.ok ? 'MODロールを更新しました。' : result.error.message,
+          result.ok
+            ? 'MODロールを更新しました。'
+            : '設定を更新できませんでした。',
         );
       },
     ),
@@ -139,8 +145,15 @@ export function configurationCommands(
         const result = await service.overview(
           requireGuildId(interaction.guildId),
         );
+        if (!result.ok) {
+          await interaction.editReply(configurationDashboardError());
+          return;
+        }
         await interaction.editReply(
-          result.ok ? serviceSettingsText(result.value) : result.error.message,
+          configurationDashboard(result.value, {
+            guildId: requireGuildId(interaction.guildId),
+            actorId: interaction.user.id,
+          }),
         );
       },
     ),
@@ -193,7 +206,7 @@ function logCommand(
               interaction.options.getChannel('channel', true).id,
             );
       await interaction.editReply(
-        result.ok ? 'ログ設定を更新しました。' : result.error.message,
+        result.ok ? 'ログ設定を更新しました。' : '設定を更新できませんでした。',
       );
     },
   );
