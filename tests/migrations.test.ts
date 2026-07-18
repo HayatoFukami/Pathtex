@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createMigrationCommand,
@@ -22,6 +23,21 @@ describe('database migrations', () => {
       process.platform === 'win32' ? 'corepack.cmd' : 'corepack',
       ['pnpm', 'prisma', 'migrate', 'deploy'],
       { cwd: '/project' },
+    );
+  });
+
+  it('keeps Automod maxLines mapped to the migrated PostgreSQL column', async () => {
+    const schema = await readFile('prisma/schema.prisma', 'utf8');
+    const migration = await readFile(
+      'prisma/migrations/20260718000000_reconcile_automod_settings/migration.sql',
+      'utf8',
+    );
+
+    expect(schema).toMatch(
+      /maxLines\s+Int\?\s+@map\("max_lines"\)\s+@db\.SmallInt/u,
+    );
+    expect(migration).toContain(
+      'ADD COLUMN IF NOT EXISTS "max_lines" SMALLINT',
     );
   });
 });

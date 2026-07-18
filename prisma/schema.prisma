@@ -129,6 +129,7 @@ model AutomodSettings {
   antiCopypastaStrikes     Int           @default(0) @map("anti_copypasta_strikes") @db.SmallInt
   maxUserMentions          Int?          @map("max_user_mentions") @db.SmallInt
   maxRoleMentions          Int?          @map("max_role_mentions") @db.SmallInt
+  // Keep the Prisma field camelCase while addressing the PostgreSQL snake_case column.
   maxLines                 Int?          @map("max_lines") @db.SmallInt
   duplicateEnabled         Boolean       @default(false) @map("duplicate_enabled")
   duplicateDeleteThreshold Int?          @map("duplicate_delete_threshold") @db.SmallInt
