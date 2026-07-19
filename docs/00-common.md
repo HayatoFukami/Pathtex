@@ -149,7 +149,7 @@ TargetIdentityの正規化に失敗した場合は、ケース作成前の入力
 | RaidMode | 参加者をTargetIdentity化（Botは除外） | ロックダウン中Kickは対象ごとにケース |
 | VoiceKick | VC参加者をTargetIdentity化 | 対象ごとにケース。VC不在もIdentity付き失敗 |
 | scheduled unban/unmute | 予約payloadのuserIdと作成元ケースの保存済みIdentityを使う | 実行時に新しい`SCHEDULED`ケースを作成し、originating caseのIdentityをコピーする。originating caseは変更しない |
-| 外部操作（Audit Log由来） | Audit対象とsnapshotからTargetIdentity化 | `discord_audit_log_entry_id`で重複排除し、外部ケースを1件だけ作成 |
+| 外部操作（Audit Log由来） | 一意に確定したAudit entry IDの対象だけAudit対象とsnapshotからTargetIdentity化 | `discord_audit_log_entry_id`で重複排除し、確定できた場合だけ外部ケースを1件作成。不可／曖昧ならケースなしでserver logのみ |
 
 既存の権限・Member/User不在・部分成功・DM失敗の規則は変更しない（[§5.1.5](#5115-共通応答)、[§8.3](#83-memberuser不在)）。
 
