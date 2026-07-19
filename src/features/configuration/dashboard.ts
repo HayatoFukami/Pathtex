@@ -208,13 +208,20 @@ function boundedSection(
 function channelSelector(
   kind: LogKind,
   context: ConfigurationDashboardContext,
+  configuredChannelId: unknown,
 ): ChannelSelectMenuBuilder {
-  return new ChannelSelectMenuBuilder()
+  const selector = new ChannelSelectMenuBuilder()
     .setCustomId(actionId(`channel-${kind}`, context))
     .setPlaceholder(`${LOG_LABELS[kind]}ログのチャンネルを選択`)
     .setMinValues(1)
     .setMaxValues(1)
     .setChannelTypes([0, 5]);
+  if (
+    typeof configuredChannelId === 'string' &&
+    /^\d{17,20}$/.test(configuredChannelId)
+  )
+    selector.setDefaultChannels(configuredChannelId);
+  return selector;
 }
 
 function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
@@ -305,6 +312,7 @@ export function configurationDashboard(
   context: ConfigurationDashboardContext,
 ): MessageEditOptions {
   const page = context.page ?? 'home';
+  const settings = (overview.settings ?? {}) as Record<string, unknown>;
   const components: TextDisplayBuilder[] = [
     text(
       page === 'home'
@@ -329,7 +337,11 @@ export function configurationDashboard(
     for (const kind of LOG_KINDS)
       rows.push(
         new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(
-          channelSelector(kind, context),
+          channelSelector(
+            kind,
+            context,
+            settings[`${kind === 'moderation' ? 'modlog' : kind}LogChannelId`],
+          ),
         ),
       );
     rows.push(
@@ -363,8 +375,6 @@ export function configurationDashboard(
     .setAccentColor(0x8b5cf6)
     .addTextDisplayComponents(...components)
     .addActionRowComponents(...rows);
-  if (context.status)
-    container.addTextDisplayComponents(text(`> ${context.status}`));
   return { flags: MessageFlags.IsComponentsV2, components: [container] };
 }
 
@@ -473,12 +483,13 @@ export function createConfigurationInteractionHandler(
       if (isComponent(interaction)) await interaction.deferUpdate();
       else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       let page: ConfigurationPage = 'home';
-      let status = '設定を更新しました。';
+      let successMessage: string | null = null;
+      let failureMessage: string | null = null;
       if (parsed.action === 'setup') {
         const result = await options.service.setup(parsed.guildId);
-        status = result.ok
-          ? `初期設定完了（成功 ${String(result.value.succeeded)} / 失敗 ${String(result.value.failed)}）`
-          : safeResultFailure(options, result.error);
+        if (result.ok)
+          successMessage = `初期設定を完了しました。成功 ${String(result.value.succeeded)} / 失敗 ${String(result.value.failed)}`;
+        else failureMessage = safeResultFailure(options, result.error);
       } else if (
         parsed.action.startsWith('channel-') &&
         isComponent(interaction)
@@ -492,9 +503,9 @@ export function createConfigurationInteractionHandler(
           kind,
           selected ?? '',
         );
-        status = result.ok
-          ? `${LOG_LABELS[kind]}ログを更新しました。`
-          : safeResultFailure(options, result.error);
+        if (result.ok)
+          successMessage = `${LOG_LABELS[kind]}ログのチャンネルを更新しました。`;
+        else failureMessage = safeResultFailure(options, result.error);
         page = 'logs';
       } else if (parsed.action === 'role-select' && isComponent(interaction)) {
         const selected = interaction.isAnySelectMenu()
@@ -510,23 +521,21 @@ export function createConfigurationInteractionHandler(
           metadata.everyone ||
           metadata.botIntegration
         ) {
-          status = 'このロールはMODロールに設定できません。';
+          failureMessage = 'このロールはMODロールに設定できません。';
         } else {
           const result = await options.service.setModRole(
             parsed.guildId,
             metadata.id,
             metadata,
           );
-          status = result.ok
-            ? 'MODロールを更新しました。'
-            : safeResultFailure(options, result.error);
+          if (result.ok) successMessage = 'MODロールを更新しました。';
+          else failureMessage = safeResultFailure(options, result.error);
         }
         page = 'access';
       } else if (parsed.action === 'role-clear') {
         const result = await options.service.setModRole(parsed.guildId, null);
-        status = result.ok
-          ? 'MODロールを解除しました。'
-          : safeResultFailure(options, result.error);
+        if (result.ok) successMessage = 'MODロールを解除しました。';
+        else failureMessage = safeResultFailure(options, result.error);
         page = 'access';
       } else if (
         parsed.action === 'timezone-submit' &&
@@ -536,9 +545,9 @@ export function createConfigurationInteractionHandler(
           parsed.guildId,
           interaction.fields.getTextInputValue('zone'),
         );
-        status = result.ok
-          ? `タイムゾーンを${result.value.settings.timezone}に変更しました。`
-          : safeResultFailure(options, result.error);
+        if (result.ok)
+          successMessage = `タイムゾーンを${result.value.settings.timezone}に変更しました。`;
+        else failureMessage = safeResultFailure(options, result.error);
         page = 'access';
       } else if (parsed.action === 'nav-logs') page = 'logs';
       else if (parsed.action === 'nav-access') page = 'access';
@@ -553,9 +562,15 @@ export function createConfigurationInteractionHandler(
         configurationDashboard(overview.value, {
           ...parsedContext(parsed, now(), ttlMs),
           page,
-          status,
         }),
       );
+      if (successMessage !== null)
+        await interaction.followUp({
+          content: successMessage,
+          flags: MessageFlags.Ephemeral,
+        });
+      else if (failureMessage !== null)
+        await interaction.followUp(ephemeralError(failureMessage));
       return true;
     } catch (error: unknown) {
       try {

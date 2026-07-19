@@ -118,6 +118,22 @@ describe('configuration Component v2 dashboard', () => {
     ).toHaveLength(3);
   });
 
+  it('sets defaults only for configured valid log channels', () => {
+    const logs = configurationDashboard(overview, {
+      guildId,
+      actorId,
+      page: 'logs',
+    });
+    const serialized = JSON.stringify(
+      (logs.components?.[0] as { toJSON(): unknown }).toJSON(),
+    );
+    expect(serialized).toContain('12345678901234569');
+    expect(serialized).not.toContain(
+      'default_values":[{"id":"12345678901234570"',
+    );
+    expect(serialized).not.toContain('default_values":[{"id":"null"');
+  });
+
   it('renders realistic DTO identities and configuration details', () => {
     const payload = configurationDashboard(overview, { guildId, actorId });
     const serialized = JSON.stringify(
@@ -231,19 +247,31 @@ describe('configuration Component v2 dashboard', () => {
       authorization,
       roles: { resolveRole: vi.fn() },
     });
-    await handler(
-      interaction(
-        createConfigurationCustomId('channel-message', guildId, actorId),
-        actorId,
-        ['12345678901234569'],
-      ),
+    const target = interaction(
+      createConfigurationCustomId('channel-message', guildId, actorId),
+      actorId,
+      ['12345678901234569'],
     );
+    await handler(target);
     expect(service.setLogChannel).toHaveBeenCalledWith(
       guildId,
       'message',
       '12345678901234569',
     );
     expect(service.overview).toHaveBeenCalledWith(guildId);
+    const editReply = Reflect.get(target, 'editReply') as ReturnType<
+      typeof vi.fn
+    >;
+    expect(JSON.stringify(editReply.mock.calls[0]?.[0])).not.toContain(
+      'status',
+    );
+    const followUp = Reflect.get(target, 'followUp') as ReturnType<
+      typeof vi.fn
+    >;
+    expect(followUp).toHaveBeenCalledWith({
+      content: 'メッセージログのチャンネルを更新しました。',
+      flags: MessageFlags.Ephemeral,
+    });
   });
 
   it('never renders a Result error message, while preserving it for the error sink', async () => {
