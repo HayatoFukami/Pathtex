@@ -18,7 +18,7 @@ const overview = {
   settings: {
     timezone: 'Asia/Tokyo',
     messageLogChannelId: '12345678901234569',
-    modlogChannelId: null,
+    modlogChannelId: '12345678901234573',
     serverLogChannelId: null,
     voiceLogChannelId: null,
     modRoleId: null,
@@ -128,6 +128,7 @@ describe('configuration Component v2 dashboard', () => {
       (logs.components?.[0] as { toJSON(): unknown }).toJSON(),
     );
     expect(serialized).toContain('12345678901234569');
+    expect(serialized).toContain('12345678901234573');
     expect(serialized).not.toContain(
       'default_values":[{"id":"12345678901234570"',
     );

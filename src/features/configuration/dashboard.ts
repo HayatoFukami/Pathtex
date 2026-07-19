@@ -334,14 +334,16 @@ export function configurationDashboard(
       ),
     );
   } else if (page === 'logs') {
+    const logChannelSetting: Record<LogKind, string> = {
+      message: 'messageLogChannelId',
+      moderation: 'modlogChannelId',
+      server: 'serverLogChannelId',
+      voice: 'voiceLogChannelId',
+    };
     for (const kind of LOG_KINDS)
       rows.push(
         new ActionRowBuilder<ChannelSelectMenuBuilder>().addComponents(
-          channelSelector(
-            kind,
-            context,
-            settings[`${kind === 'moderation' ? 'modlog' : kind}LogChannelId`],
-          ),
+          channelSelector(kind, context, settings[logChannelSetting[kind]]),
         ),
       );
     rows.push(
