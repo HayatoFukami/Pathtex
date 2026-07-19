@@ -17,6 +17,7 @@ jobs:
           node-version: 22.12.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma generate
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm typecheck
