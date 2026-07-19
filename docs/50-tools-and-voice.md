@@ -208,4 +208,10 @@ Botが参加していない非公開ギルドをIDだけで取得できない場
 
 > このギルドはIDだけでは公開情報を取得できません。有効な招待コードを指定してください。
 
+## 5.6.6 ユーザー対象ツールのIdentity
+
+`/voicekick`の対象は、処理前にVC状態とMember/User snapshotを取得し、`00-common.md §1.7–1.8`のTargetIdentityで結果・ケース・modlogへ表示する。VC未接続、移動失敗、一時VC作成／削除失敗でもfallback名とIDを省略しない。
+
+`/audit`の実行者・対象表示も同じ解決順序を使う。Audit取得不能時を含め、IDがある場合は`不明なユーザー (userId)`とし、Audit Log由来のモデレーションケースは`40-configuration-and-logs.md §8.9.1`の外部ID dedupeとsnapshot-before-deleteに従う。`/lookup`のUser表示は取得時点のlive値であり、ケースの`target_display`へ再利用してはならない。
+
 ---

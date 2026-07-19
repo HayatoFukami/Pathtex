@@ -193,7 +193,7 @@ Embed共通構成:
 | Moderator | 表示名、ID |
 | Reason | 理由または`理由未指定` |
 | Duration | 期間または`Permanent` |
-| Source | Command、AutoMod、Punishment、RaidMode、External |
+| Source | Command、AutoMod、Punishment、RaidMode、External、Scheduled（`SCHEDULED`） |
 | Status | Completed、Failed、Partial |
 | DM | 成功・失敗・対象外 |
 | Timestamp | ギルドTimezone |
@@ -209,6 +209,14 @@ Action色:
 - Failed: 灰
 
 外部操作はAudit Logから実行者と理由を取得する。対応する内部相関がある場合は二重ケースを作らない。
+
+### 8.9.1 TargetIdentityと外部監査
+
+user-target actionのTarget欄は必ず`displayName (userId)`で描画する。名前解決は`00-common.md §1.7`の順序に限定し、ケース保存後にLive APIへ問い合わせて表示名を変えてはならない。user-target actionの`target_display`へIDや整形済み値を保存せず、ケースの保存済みdisplayName snapshotとtarget_user_idから表示する。失敗ケースも`不明なユーザー (userId)`を含める。非ユーザー対象caseのTarget欄はAction固有の既存descriptorをそのまま描画し、TargetIdentityとして解析しない。
+
+ケースベースのmodlog APIは`ModlogService`が所有する。`ModlogService`は保存済みケースを受け取り、Action、Source、Status、TargetIdentity、理由、期間を一貫してEmbedへレンダリングする。モデレーション、Strike、AutoMod、Punishment、RaidMode、Scheduler等のfeature callerはTarget文字列やmodlog Embedを構築せず、ケース作成／更新と`ModlogService`の公開契約だけを呼び出す。入力／Identity解決がケース作成前に失敗した結果にはケースもmodlogもない。
+
+外部Audit Logイベントは`discord_audit_log_entry_id`をdedupe keyとして扱う。同一ギルド・同一IDが既にケース化されている場合は既存ケースを再利用し、外部ケースを二重作成しない。内部操作相関が一致したイベントは外部ケースにしない。名前変更・退出・削除を伴うイベントはAudit照合またはAPI削除の前にsnapshot-before-deleteを完了させる。
 
 ## 8.10 サーバーログ
 

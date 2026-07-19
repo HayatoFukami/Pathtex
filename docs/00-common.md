@@ -107,8 +107,51 @@
 | 時限制裁 | 指定日時に自動解除されるBAN、Mute、Slowmode |
 | 操作可能 | Botの権限とロール順位の両方を満たすこと |
 | Snowflake | DiscordのID。常に文字列として扱う |
+| TargetIdentity | ユーザー対象の表示契約。`{ userId: string, displayName: string }`で表す |
 
 ---
+
+## 1.7 ユーザー対象のIdentity契約
+
+ユーザーを対象にする全機能は、Discord APIの表示名を直接持ち回らず、次の値オブジェクトへ正規化する。
+
+```text
+TargetIdentity = {
+  userId: string,       // Snowflake
+  displayName: string   // 表示用の名前だけ。IDを含めない
+}
+```
+
+TargetIdentityの永続化およびTargetIdentity形式のmodlog描画は、明示的なuser-target actionに限る。対象は`KICK`、`BAN`、`SOFTBAN`、`SILENTBAN`、`UNBAN`、`MUTE`、`UNMUTE`、`STRIKE`、`PARDON`、`AUTO_PUNISHMENT`、RaidMode中のKick、`VOICEKICK`、および外部のユーザー操作である。RaidMode on/off、Slowmode等の非ユーザー対象ケースは、既存のtargetなし等の意味を維持する。ユーザー対象の表示は常に`displayName (userId)`とする。`displayName`へID、既に整形済みの`name (id)`、括弧付きID、メンションを保存または再利用してはならない。永続化する`moderation_cases.target_display`（[01-platform-and-data.md §4.7](01-platform-and-data.md)）にも、user-target actionのIDや整形済み値を入れず、正規化済みの名前スナップショットだけを入れる。
+
+解決順序は次のとおりで、取得できた値を正規化し、trim後に非空かつ128 Unicode code point以内で、IDのみ・置換済みID・既成の整形値・メンションでない最初の値を`displayName`とする。条件に合わない値は候補から除外して次へ進む。数字を含む通常の名前は許可する。
+
+1. イベント／Interactionに含まれるMemberのdisplayName
+2. ギルドから取得した最新MemberのdisplayName
+3. 最新Userのglobal name、なければusername
+4. `guild_member_snapshots`のnickname、global name、username
+5. `不明なユーザー`
+
+UserまたはMemberの取得失敗、対象不在、Discord API失敗を含む失敗結果でも、対象が持つIDを失わず、解決できたfallback名とIDを`displayName (userId)`として応答・ログ・ケース表示する。IDしかない場合も`不明なユーザー (userId)`とする。TargetIdentityは対象解決Serviceの公開契約とし、Handlerは独自の名前fallbackを実装しない。
+
+TargetIdentityの正規化に失敗した場合は、ケース作成前の入力／解決エラーとして扱い、その対象のケースとmodlogを作成しない。解決後にDiscord操作や予約が失敗した場合は、解決済みIdentityを必ず結果へ含める。過去のケースに保存された値は再書込みしない。
+
+ただし、歴史的ケースの`target_display`が空白、IDのみ、整形済み値、メンション等のinvalid historical valueである場合は、文字どおり`不明なユーザー (userId)`を描画する。この履歴表示ではlive Member/Userまたはsnapshotを検索せず、DBをbackfill・rewriteしない。
+
+## 1.8 ユーザー対象アクションマトリクス
+
+| 領域 | 対象Identityの扱い | ケース／外部操作／予約 |
+|---|---|---|
+| コマンドモデレーション（Kick/Ban/Softban/Silentban/Unban/Mute/Unmute） | 各対象をTargetIdentityへ解決し、成功・失敗とも表示名とIDを返す | 対象ごとにケース。時限Ban/Muteは対応予約を作成・置換 |
+| Strike/Pardon | ギルド外もUser IDを対象にTargetIdentity化 | Strike/Pardonケースと履歴。自動制裁は別ケース |
+| AutoMod | メッセージ作者をTargetIdentity化 | 集約したStrike／制裁ケースへ作者のスナップショットを付与 |
+| Punishment | 到達したStrike対象をTargetIdentity化 | 自動制裁ケースを作成。低い閾値へfallbackしない |
+| RaidMode | 参加者をTargetIdentity化（Botは除外） | ロックダウン中Kickは対象ごとにケース |
+| VoiceKick | VC参加者をTargetIdentity化 | 対象ごとにケース。VC不在もIdentity付き失敗 |
+| scheduled unban/unmute | 予約payloadのuserIdと作成元ケースの保存済みIdentityを使う | 実行時に新しい`SCHEDULED`ケースを作成し、originating caseのIdentityをコピーする。originating caseは変更しない |
+| 外部操作（Audit Log由来） | Audit対象とsnapshotからTargetIdentity化 | `discord_audit_log_entry_id`で重複排除し、外部ケースを1件だけ作成 |
+
+既存の権限・Member/User不在・部分成功・DM失敗の規則は変更しない（[§5.1.5](#5115-共通応答)、[§8.3](#83-memberuser不在)）。
 
 # 2. 技術スタック
 
@@ -359,6 +402,8 @@ USERコマンドおよびMESSAGEコマンドは実装しない。理由は以下
 9. Ban、Strike等でUserだけで処理可能な場合はDiscord APIからUser取得を試みる。
 10. Userを取得できないIDは、その対象だけ失敗とする。
 
+入力意味論: Snowflake形式不正、batch token不正、または21件超過は既存どおり入力全体のall-or-nothingエラーとし、処理・ケース・modlogを開始せず、TargetIdentityも作成しない。構文上有効なSnowflakeについてMember/Userが取得不能な場合だけ、対象単位のfallback Identity（`不明なユーザー (userId)`を含む）を作成して失敗結果へ含める。
+
 対象ごとの権限・ロール順位エラーは他対象の処理を中止しない。
 
 ## 5.1.3 時間指定
@@ -416,12 +461,14 @@ Audit Log形式:
 |---|---|
 | Title | `処理結果: <操作名>` |
 | Color | 全成功=緑、一部失敗=黄、全失敗=赤 |
-| 成功 | 表示名、ID、ケース番号 |
-| 失敗 | 表示名またはID、機械可読エラー、説明 |
+| 成功 | `displayName (userId)`、ケース番号 |
+| 失敗 | `displayName (userId)`、機械可読エラー、説明 |
 | Footer | `成功 X / 失敗 Y / 合計 Z` |
 | Timestamp | Discord timestamp |
 
 25フィールドまたは6000文字を超える場合はfollow-upへ分割する。
+
+ユーザー対象コマンドの成功・失敗を含むすべての対象結果は、このIdentity形式を使う。ただしMalformed Snowflake、件数超過等のall-or-nothing入力検証失敗は対象を確定できないため、TargetIdentityを返さず既存の入力エラーとする。構文上有効な対象が後続のMember/User解決または事前条件で失敗した場合だけ、fallback Identity付きエラーを返す。ケース作成前の失敗はケースとmodlogを作成しない。
 
 ## 5.1.6 共通エラーコード
 

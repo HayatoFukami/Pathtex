@@ -239,3 +239,9 @@ Bot権限: Manage Channels
 削除成功: Z件
 失敗: N件
 ```
+
+## 5.3.17 対象Identityとケース表示
+
+user-target commandは`00-common.md §1.7–1.8`のTargetIdentity解決を使う。MemberをKick/Mute等で変更する前にMember/User情報をsnapshot-before-deleteし、成功・失敗を問わず結果は`displayName (userId)`で表示する。user-target caseとmodlogは[01-platform-and-data.md §4.7](01-platform-and-data.md)の保存済みsnapshotから描画し、後日のDiscord API取得結果で過去のケース表示を変えない。Slowmode等の非ユーザー対象コマンドは既存のAction固有descriptorとケース意味を維持する。
+
+Unbanは既存どおりID入力を使用するが、IDから解決したfallback名を含むTargetIdentityを失敗結果にも付ける。時限UNBAN/UNMUTEは、予約の作成元ケースを変更せず、実行時にTargetIdentityをコピーした`SCHEDULED`ケースを新規作成する。新しいケースsourceの追加は既存ケースを壊さないadditive migrationとする。

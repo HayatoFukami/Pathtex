@@ -160,3 +160,7 @@ Strikeケースと自動制裁ケースは別ケースとする。
 ```
 
 自動制裁がある場合、同じDMへ制裁内容・期間を追記する。DM失敗でも制裁を中止しない。
+
+## 6.9.5 対象Identity
+
+`/strike`、`/pardon`、`/check`およびPunishmentは、ギルド外を含め`00-common.md §1.7–1.8`のTargetIdentityを使用する。ケース作成前のUser取得またはIdentity解決失敗は、Identityを含むコマンド結果だけを返し、ケースとmodlogを作成しない。ケース境界を越えた後の制裁API失敗は、保存済みIdentity付きの失敗ケースとして記録する。Strikeケース、自動制裁ケース、履歴は対象IDを共有するが、各表示は保存済みケースのtarget snapshotから行う。Pardonで過去ケースの表示名を更新しない。
