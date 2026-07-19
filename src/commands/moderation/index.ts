@@ -13,7 +13,12 @@ import {
 import RE2 from 're2';
 
 type Options = {
-  getUser(name: string): { id: string } | null;
+  getUser(name: string): {
+    id: string;
+    globalName?: string | null;
+    username?: string;
+  } | null;
+  getMember?(name: string): { displayName?: string } | null;
   getString(name: string): string | null;
   getInteger(name: string): number | null;
   getBoolean(name: string): boolean | null;
@@ -49,6 +54,9 @@ const targetOptions = [
     max_length: 1000,
   },
 ];
+const kickTargetOptions = targetOptions.filter(
+  (option) => option.name !== 'additional_targets',
+);
 const reply = async (
   interaction: ChatInputCommandInteraction,
   content: string,
@@ -78,10 +86,18 @@ const resultText = (action: string, result: unknown): string => {
     .join('\n');
   return `処理結果: ${action}\n成功: ${String(success)} / 失敗: ${String(failed)}${details ? `\n${details}` : ''}`;
 };
+const targetLabel = (
+  targetId: string,
+  names?: Readonly<Record<string, string>>,
+): string => {
+  const name = names?.[targetId];
+  return name ? `${name} (${targetId})` : targetId;
+};
 const replyOutcome = async (
   interaction: ChatInputCommandInteraction,
   action: string,
   result: unknown,
+  names?: Readonly<Record<string, string>>,
 ): Promise<void> => {
   if (
     typeof result !== 'object' ||
@@ -107,7 +123,7 @@ const replyOutcome = async (
         title: `処理結果: ${action}`,
         color: failed === 0 ? 0x2ecc71 : success === 0 ? 0xe74c3c : 0xf1c40f,
         fields: outcomes.map((item) => ({
-          name: item.targetId,
+          name: targetLabel(item.targetId, names),
           value: item.ok ? '成功' : `失敗: ${item.code ?? 'FAILED'}`,
         })),
         footer: {
@@ -194,12 +210,16 @@ function command(
                     required: false,
                   },
                 ]
-              : targetOptions,
+              : action === 'kick'
+                ? kickTargetOptions
+                : targetOptions,
     ),
     async execute({ interaction }) {
       const options = interaction.options as unknown as Options;
       const target = options.getUser('target');
-      const additional = options.getString('additional_targets');
+      const member = action === 'kick' ? options.getMember?.('target') : null;
+      const additional =
+        action === 'kick' ? null : options.getString('additional_targets');
       const parsed = resolveTargets(target?.id, additional);
       if (!parsed.ok) {
         await reply(interaction, parsed.error.message);
@@ -244,7 +264,16 @@ function command(
         ...(deleteMessages === null ? {} : { deleteMessages }),
         ...(duration?.ok ? { durationSeconds: duration.value } : {}),
       });
-      await replyOutcome(interaction, action, result);
+      const targetName =
+        member?.displayName ?? target?.globalName ?? target?.username;
+      await replyOutcome(
+        interaction,
+        action,
+        result,
+        action === 'kick' && targetName && target
+          ? { [target.id]: targetName }
+          : undefined,
+      );
     },
   };
 }
