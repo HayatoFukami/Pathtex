@@ -12,6 +12,37 @@ import {
 } from '../repositories/contracts.js';
 import { err, ok, type Result } from '../domain/result.js';
 import { z } from 'zod';
+import {
+  TargetIdentitySchema,
+  TargetDisplaySchema,
+  isUserTargetAction,
+  type TargetIdentity,
+} from './target-identity.js';
+
+export const CanonicalUserCaseSchema = CaseInputSchema.extend({
+  targetUserId: SnowflakeSchema,
+  targetDisplay: TargetDisplaySchema,
+}).superRefine((value, ctx) => {
+  if (!isUserTargetAction(value.action))
+    ctx.addIssue({
+      code: 'custom',
+      path: ['action'],
+      message: 'action is not a user-target action',
+    });
+});
+export type CanonicalUserCaseInput = z.infer<typeof CanonicalUserCaseSchema>;
+export function createCanonicalUserCase(
+  input: Omit<CanonicalUserCaseInput, 'targetUserId' | 'targetDisplay'> & {
+    identity: TargetIdentity;
+  },
+): CanonicalUserCaseInput {
+  const identity = TargetIdentitySchema.parse(input.identity);
+  return CanonicalUserCaseSchema.parse({
+    ...input,
+    targetUserId: identity.userId,
+    targetDisplay: identity.displayName,
+  });
+}
 
 export class CaseService {
   public constructor(private readonly repository: CaseRepository) {}
@@ -20,6 +51,30 @@ export class CaseService {
     if (!parsed.success) return err('INVALID_INPUT', 'Invalid case input');
     return ok(
       CaseDtoSchema.parse(await this.repository.createWithNumber(parsed.data)),
+    );
+  }
+  public async createCanonical(
+    input: CanonicalUserCaseInput,
+  ): Promise<Result<CaseDto>> {
+    const parsed = CanonicalUserCaseSchema.safeParse(input);
+    if (!parsed.success)
+      return err('INVALID_INPUT', 'Invalid canonical user case');
+    return ok(
+      CaseDtoSchema.parse(await this.repository.createWithNumber(parsed.data)),
+    );
+  }
+  public async createExternalCase(
+    input: CanonicalUserCaseInput & { discordAuditLogEntryId: string },
+  ): Promise<Result<CaseDto>> {
+    const parsed = CanonicalUserCaseSchema.extend({
+      discordAuditLogEntryId: SnowflakeSchema,
+    }).safeParse(input);
+    if (!parsed.success || parsed.data.source !== 'EXTERNAL')
+      return err('INVALID_INPUT', 'Invalid external case');
+    return ok(
+      CaseDtoSchema.parse(
+        await this.repository.createExternalWithAudit(parsed.data),
+      ),
     );
   }
   public async get(

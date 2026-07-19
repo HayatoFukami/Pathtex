@@ -43,7 +43,14 @@ export const CaseInputSchema = z.object({
   moderatorUserId: snowflake,
   reason: z.string().max(1000).nullish(),
   durationSeconds: z.number().int().positive().nullish(),
-  source: z.enum(['COMMAND', 'AUTOMOD', 'PUNISHMENT', 'RAIDMODE', 'EXTERNAL']),
+  source: z.enum([
+    'COMMAND',
+    'AUTOMOD',
+    'PUNISHMENT',
+    'RAIDMODE',
+    'EXTERNAL',
+    'SCHEDULED',
+  ]),
   status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'PARTIAL']),
   metadata: json.optional(),
 });
@@ -176,6 +183,7 @@ export const CaseSourceSchema = z.enum([
   'PUNISHMENT',
   'RAIDMODE',
   'EXTERNAL',
+  'SCHEDULED',
 ]);
 export const CaseStatusSchema = z.enum([
   'PENDING',
@@ -285,6 +293,7 @@ export interface JobDto {
   lockedBy?: string | null;
   lastError?: string | null;
   createdByCaseId?: string | null;
+  executedCaseId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -447,6 +456,7 @@ export const JobDtoSchema = z.object({
   lockedBy: z.string().max(64).nullish(),
   lastError: z.string().nullish(),
   createdByCaseId: z.uuid().nullish(),
+  executedCaseId: z.uuid().nullish(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
@@ -828,6 +838,9 @@ export interface CaseRepository {
     logMessageId: string | null,
   ): Promise<CaseDto>;
   updateAudit(id: string, auditEntryId: string | null): Promise<CaseDto>;
+  createExternalWithAudit(
+    input: CaseInput & { discordAuditLogEntryId: string },
+  ): Promise<CaseDto>;
 }
 export interface StrikeRepository {
   changeLocked(input: StrikeChange): Promise<StrikeResult>;

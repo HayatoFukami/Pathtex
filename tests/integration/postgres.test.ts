@@ -1,6 +1,7 @@
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import { PrismaClient } from '@prisma/client';
 import { execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import {
   PrismaCaseRepository,
@@ -14,6 +15,11 @@ import {
   PrismaDepartureRepository,
   PrismaRetentionRepository,
 } from '../../src/repositories/prisma-repositories.js';
+import { CaseService } from '../../src/services/case-service.js';
+import {
+  CaseDtoSchema,
+  JobDtoSchema,
+} from '../../src/repositories/contracts.js';
 
 const integration =
   process.env.RUN_INTEGRATION_TESTS === '1' ? describe : describe.skip;
@@ -86,6 +92,172 @@ integration('PostgreSQL persistence foundation', () => {
         .size,
     ).toBe(12);
   });
+
+  it('deduplicates concurrent external cases and consumes one number', async () => {
+    const guildId = '12345678901234590';
+    const auditId = '12345678901234591';
+    const service = new CaseService(new PrismaCaseRepository(getDb()));
+    const input = {
+      guildId,
+      action: 'BAN' as const,
+      targetUserId: '12345678901234592',
+      targetDisplay: 'external-user',
+      moderatorUserId: '12345678901234593',
+      source: 'EXTERNAL' as const,
+      status: 'COMPLETED' as const,
+      reason: 'audit',
+      discordAuditLogEntryId: auditId,
+    };
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => service.createExternalCase(input)),
+    );
+    expect(results.every((result) => result.ok)).toBe(true);
+    const ids = results.flatMap((result) =>
+      result.ok ? [result.value.id] : [],
+    );
+    expect(new Set(ids).size).toBe(1);
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, discordAuditLogEntryId: auditId },
+      }),
+    ).toBe(1);
+    expect(
+      (await getDb().guildSettings.findUnique({ where: { guildId } }))
+        ?.nextCaseNumber,
+    ).toBe(2);
+  });
+
+  it('round-trips SCHEDULED cases, executed jobs, FK, and nullable uniqueness', async () => {
+    const guildId = '12345678901234594';
+    const caseRow = await new PrismaCaseRepository(getDb()).createWithNumber({
+      guildId,
+      action: 'UNBAN',
+      targetUserId: '12345678901234595',
+      targetDisplay: 'scheduled',
+      moderatorUserId: '12345678901234596',
+      source: 'SCHEDULED',
+      status: 'COMPLETED',
+      reason: 'expiry',
+    });
+    expect(CaseDtoSchema.parse(caseRow).source).toBe('SCHEDULED');
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const job = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId: '12345678901234595',
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() + 60_000),
+      payload: { guildId, userId: '12345678901234595' },
+    });
+    await getDb().scheduledAction.update({
+      where: { id: job.id },
+      data: { executedCaseId: caseRow.id },
+    });
+    const roundTrip = await getDb().scheduledAction.findUnique({
+      where: { id: job.id },
+    });
+    expect(JobDtoSchema.parse(roundTrip).executedCaseId).toBe(caseRow.id);
+    const nullJob = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId: '12345678901234597',
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() + 60_000),
+      payload: { guildId, userId: '12345678901234597' },
+    });
+    expect(
+      (await getDb().scheduledAction.findUnique({ where: { id: nullJob.id } }))
+        ?.executedCaseId,
+    ).toBeNull();
+    await expect(
+      getDb().scheduledAction.update({
+        where: { id: nullJob.id },
+        data: { executedCaseId: caseRow.id },
+      }),
+    ).rejects.toThrow(/unique|scheduled_actions_executed_case_id_key/i);
+    await expect(
+      getDb()
+        .$executeRaw`UPDATE scheduled_actions SET executed_case_id = ${'00000000-0000-4000-8000-000000000099'}::uuid WHERE id = ${nullJob.id}::uuid`,
+    ).rejects.toThrow(/foreign key|scheduled_actions_executed_case_id_fkey/i);
+  });
+
+  it('upgrades legacy rows without changing job status or data', async () => {
+    const legacyContainer = await new PostgreSqlContainer(
+      'postgres:16-alpine',
+    ).start();
+    const legacyDb = new PrismaClient({
+      datasources: { db: { url: legacyContainer.getConnectionUri() } },
+    });
+    try {
+      const initial = await readFile(
+        'prisma/migrations/20260714000000_initial_persistence/migration.sql',
+        'utf8',
+      );
+      const phaseOne = await readFile(
+        'prisma/migrations/20260719000000_add_scheduled_case_execution/migration.sql',
+        'utf8',
+      );
+      await executeSqlStatements(legacyDb, initial);
+      const caseId = '00000000-0000-4000-8000-000000000091';
+      const jobIds = [
+        '00000000-0000-4000-8000-000000000092',
+        '00000000-0000-4000-8000-000000000093',
+        '00000000-0000-4000-8000-000000000094',
+        '00000000-0000-4000-8000-000000000095',
+        '00000000-0000-4000-8000-000000000096',
+      ];
+      await legacyDb.$executeRaw`INSERT INTO guild_settings (guild_id, created_at, updated_at) VALUES ('12345678901234590', now(), now())`;
+      await legacyDb.$executeRaw`INSERT INTO moderation_cases (id, guild_id, case_number, action, target_user_id, target_display, moderator_user_id, source, status, metadata, created_at, updated_at) VALUES (${caseId}::uuid, '12345678901234590', 1, 'BAN', '12345678901234595', 'legacy', '12345678901234593', 'EXTERNAL', 'COMPLETED', '{}', now(), now())`;
+      for (const [index, status] of [
+        'PENDING',
+        'RUNNING',
+        'COMPLETED',
+        'FAILED',
+        'CANCELLED',
+      ].entries()) {
+        const jobId = jobIds[index];
+        if (!jobId) throw new Error('missing legacy job id');
+        await legacyDb.$executeRaw`INSERT INTO scheduled_actions (id, guild_id, target_user_id, type, execute_at, status, payload, created_at, updated_at) VALUES (${jobId}::uuid, '12345678901234590', '12345678901234595', 'UNBAN', now(), ${status}::"ScheduledActionStatus", ${JSON.stringify({ guildId: '12345678901234590', userId: '12345678901234595' })}::jsonb, now(), now())`;
+      }
+      const legacyCase = await legacyDb.$queryRaw<
+        Array<{
+          action: string;
+          target_user_id: string | null;
+          target_display: string;
+          case_number: number;
+          source: string;
+          status: string;
+        }>
+      >`SELECT action, target_user_id, target_display, case_number, source, status FROM moderation_cases WHERE id = ${caseId}::uuid`;
+      await executeSqlStatements(legacyDb, phaseOne);
+      const rows = await legacyDb.$queryRaw<
+        Array<{ status: string; executed_case_id: string | null }>
+      >`SELECT status, executed_case_id FROM scheduled_actions ORDER BY id`;
+      expect(rows.map((row) => row.status)).toEqual([
+        'PENDING',
+        'RUNNING',
+        'COMPLETED',
+        'FAILED',
+        'CANCELLED',
+      ]);
+      expect(rows.every((row) => row.executed_case_id === null)).toBe(true);
+      expect(
+        await legacyDb.$queryRaw<
+          Array<{
+            action: string;
+            target_user_id: string | null;
+            target_display: string;
+            case_number: number;
+            source: string;
+            status: string;
+          }>
+        >`SELECT action, target_user_id, target_display, case_number, source, status FROM moderation_cases WHERE id = ${caseId}::uuid`,
+      ).toEqual(legacyCase);
+    } finally {
+      await legacyDb.$disconnect();
+      await legacyContainer.stop();
+    }
+  }, 120_000);
 
   it('does not lose concurrent locked strike changes', async () => {
     const repository = new PrismaStrikeRepository(getDb());
@@ -1060,6 +1232,56 @@ integration('PostgreSQL persistence foundation', () => {
     const text = failure instanceof Error ? failure.message : String(failure);
     expect(text).toContain(constraint);
     expect(text).toMatch(/23514|check constraint/i);
+  }
+
+  async function executeSqlStatements(client: PrismaClient, sql: string) {
+    for (const statement of splitSqlStatements(sql))
+      await client.$executeRawUnsafe(statement);
+  }
+
+  function splitSqlStatements(sql: string): string[] {
+    const statements: string[] = [];
+    let start = 0;
+    let quote: "'" | '"' | null = null;
+    let dollarQuote: string | null = null;
+    for (let index = 0; index < sql.length; index += 1) {
+      const character = sql[index];
+      const next = sql[index + 1];
+      if (dollarQuote) {
+        if (sql.startsWith(dollarQuote, index)) {
+          index += dollarQuote.length - 1;
+          dollarQuote = null;
+        }
+        continue;
+      }
+      if (quote) {
+        if (character === quote && sql[index - 1] !== '\\') quote = null;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+        continue;
+      }
+      if (character === '$') {
+        const match = sql.slice(index).match(/^\$[A-Za-z_0-9]*\$/u);
+        if (match?.[0]) {
+          dollarQuote = match[0];
+          index += match[0].length - 1;
+          continue;
+        }
+      }
+      if (character === ';') {
+        const statement = sql.slice(start, index).trim();
+        if (statement) statements.push(statement);
+        start = index + 1;
+      } else if (character === '-' && next === '-') {
+        const lineEnd = sql.indexOf('\n', index);
+        if (lineEnd >= 0) index = lineEnd;
+      }
+    }
+    const remainder = sql.slice(start).trim();
+    if (remainder) statements.push(remainder);
+    return statements;
   }
 
   function requireDefined<T>(value: T | null | undefined, message: string): T {

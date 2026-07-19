@@ -124,6 +124,31 @@ export class PrismaCaseRepository implements CaseRepository {
     CaseInputSchema.parse(input);
     return this.allocate(input, 0).then(validateDbOutput);
   }
+  public async createExternalWithAudit(
+    input: CaseInput & { discordAuditLogEntryId: string },
+  ): Promise<CaseDto> {
+    CaseInputSchema.parse(input);
+    SnowflakeSchema.parse(input.discordAuditLogEntryId);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return validateDbOutput(
+          await this.db.$transaction(async (tx) => {
+            const existing = await tx.moderationCase.findFirst({
+              where: {
+                guildId: input.guildId,
+                discordAuditLogEntryId: input.discordAuditLogEntryId,
+              },
+            });
+            if (existing) return existing;
+            return allocateCase(tx, input, input.discordAuditLogEntryId);
+          }),
+        );
+      } catch (error) {
+        if (attempt < 3 && isRetryableSerialization(error)) continue;
+        throw error;
+      }
+    }
+  }
   private async allocate(input: CaseInput, attempt: number): Promise<CaseDto> {
     try {
       return validateDbOutput(
@@ -1580,7 +1605,11 @@ async function ensureSettings(tx: DbTransaction, guildId: string) {
   });
 }
 
-async function allocateCase(tx: DbTransaction, input: CaseInput) {
+async function allocateCase(
+  tx: DbTransaction,
+  input: CaseInput,
+  auditEntryId?: string,
+) {
   const settings = await ensureSettings(tx, input.guildId);
   const rawRows = await tx.$queryRaw<unknown[]>(
     Prisma.sql`SELECT next_case_number FROM guild_settings WHERE guild_id = ${input.guildId} FOR UPDATE`,
@@ -1604,6 +1633,7 @@ async function allocateCase(tx: DbTransaction, input: CaseInput) {
       source: input.source,
       status: input.status,
       metadata: input.metadata ?? {},
+      discordAuditLogEntryId: auditEntryId ?? null,
     },
   });
 }

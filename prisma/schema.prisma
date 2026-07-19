@@ -48,6 +48,7 @@ enum CaseSource {
   PUNISHMENT
   RAIDMODE
   EXTERNAL
+  SCHEDULED
 }
 
 enum CaseStatus {
@@ -218,6 +219,7 @@ model ModerationCase {
   guild                  GuildSettings       @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
   strikeTransactions     StrikeTransaction[]
   activeMutes            ActiveMute[]
+  executedScheduledActions ScheduledAction[] @relation("ExecutedCase")
 
   @@unique([guildId, caseNumber])
   @@unique([guildId, discordAuditLogEntryId])
@@ -241,9 +243,11 @@ model ScheduledAction {
   lockedBy        String?               @map("locked_by") @db.VarChar(64)
   lastError       String?               @map("last_error") @db.Text
   createdByCaseId String?               @map("created_by_case_id") @db.Uuid
+  executedCaseId  String?               @unique @map("executed_case_id") @db.Uuid
   createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
   guild           GuildSettings         @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
+  executedCase    ModerationCase?       @relation("ExecutedCase", fields: [executedCaseId], references: [id], onDelete: SetNull)
 
   @@index([status, executeAt])
   @@index([guildId, targetUserId, type, status])
