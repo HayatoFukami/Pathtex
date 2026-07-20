@@ -18,18 +18,26 @@ export const LogEmbedSchema = z.object({
       }),
     )
     .max(25),
-  timestamp: z.string().optional(),
+  timestamp: z.iso.datetime({ offset: true }).optional(),
 });
 export type LogEmbed = z.infer<typeof LogEmbedSchema>;
+const EMBED_CHARACTER_LIMIT = 6000;
 export function normalizeEmbed(embed: LogEmbed): LogEmbed {
+  const title = truncate(embed.title, 256);
+  let remaining = EMBED_CHARACTER_LIMIT - title.length;
+  const fields = [];
+  for (const field of embed.fields.slice(0, 25)) {
+    if (remaining < 2) break;
+    const name = truncate(field.name, Math.min(256, remaining - 1));
+    remaining -= name.length;
+    const value = truncate(field.value, Math.min(1024, remaining));
+    remaining -= value.length;
+    fields.push({ ...field, name, value });
+  }
   return {
     ...embed,
-    title: truncate(embed.title, 256),
-    fields: embed.fields.slice(0, 25).map((field) => ({
-      ...field,
-      name: truncate(field.name, 256),
-      value: truncate(field.value, 1024),
-    })),
+    title,
+    fields,
   };
 }
 export interface LogSender {
@@ -141,6 +149,9 @@ export class LogDeliveryService {
 export function timestamp(date: Date, zone: string): string {
   const actual = IANAZone.isValidZone(zone) ? zone : 'UTC';
   return `${DateTime.fromJSDate(date, { zone: actual }).toFormat('yyyy-MM-dd HH:mm:ss ZZZZ')} (<t:${String(Math.floor(date.getTime() / 1000))}:F>)`;
+}
+export function discordTimestamp(date: Date): string {
+  return date.toISOString();
 }
 export function truncate(value: string, length = 1000): string {
   return value.length <= length

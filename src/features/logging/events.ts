@@ -1,4 +1,9 @@
-import { truncate, timestamp, type LogEmbed } from './service.js';
+import {
+  discordTimestamp,
+  truncate,
+  timestamp,
+  type LogEmbed,
+} from './service.js';
 
 export interface MessageView {
   guildId: string;
@@ -49,8 +54,9 @@ export function messageEditEmbed(
   if (before && !messageChanged(before, after)) return null;
   return {
     title: 'メッセージ編集',
-    timestamp: timestamp(after.createdAt, zone),
+    timestamp: discordTimestamp(after.createdAt),
     fields: [
+      { name: '日時', value: timestamp(after.createdAt, zone) },
       { name: '投稿者', value: `${after.author} (${after.authorId})` },
       {
         name: 'チャンネル',
@@ -107,8 +113,9 @@ export function messageDeleteEmbed(
 ): LogEmbed {
   return {
     title: 'メッセージ削除',
-    timestamp: timestamp(deletedAt, zone),
+    timestamp: discordTimestamp(deletedAt),
     fields: [
+      { name: '日時', value: timestamp(deletedAt, zone) },
       {
         name: '投稿者',
         value: message ? `${message.author} (${message.authorId})` : '不明',
@@ -159,8 +166,8 @@ export function bulkDeleteEmbed(
   );
   return {
     title: 'メッセージ一括削除',
-    timestamp: timestamp(deletedAt, zone),
-    fields,
+    timestamp: discordTimestamp(deletedAt),
+    fields: [{ name: '日時', value: timestamp(deletedAt, zone) }, ...fields],
   };
 }
 export function voiceEmbed(
@@ -183,7 +190,11 @@ export function voiceEmbed(
       { name: '移動先', value: newChannel ?? '不明' },
     );
   }
-  return { title: `ボイス${kind}`, timestamp: timestamp(date, zone), fields };
+  return {
+    title: `ボイス${kind}`,
+    timestamp: discordTimestamp(date),
+    fields: [{ name: '日時', value: timestamp(date, zone) }, ...fields],
+  };
 }
 
 export function moderationEmbed(input: {
@@ -201,8 +212,9 @@ export function moderationEmbed(input: {
 }): LogEmbed {
   return {
     title: `Case #${String(input.caseNumber)} — ${input.action}`,
-    timestamp: timestamp(input.date, input.zone),
+    timestamp: discordTimestamp(input.date),
     fields: [
+      { name: '日時', value: timestamp(input.date, input.zone) },
       { name: 'Target', value: input.target },
       { name: 'Moderator', value: input.moderator },
       { name: 'Reason', value: input.reason ?? '理由未指定' },
@@ -221,7 +233,12 @@ export function serverEmbed(
 ): LogEmbed {
   return {
     title,
-    timestamp: timestamp(date, zone),
-    fields: fields.map((field) => ({ name: field.name, value: field.value })),
+    timestamp: discordTimestamp(date),
+    fields: [
+      { name: '日時', value: timestamp(date, zone) },
+      ...fields
+        .slice(0, 24)
+        .map((field) => ({ name: field.name, value: field.value })),
+    ],
   };
 }
