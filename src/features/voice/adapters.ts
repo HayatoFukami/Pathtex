@@ -73,11 +73,23 @@ export class DiscordVoiceAdapter implements VoicePort {
     guildId: string,
     userId: string,
   ): Promise<VoiceMember | null> {
-    const member = await (
-      await this.client.guilds.fetch(guildId)
-    ).members
-      .fetch(userId)
-      .catch(() => null);
+    let member: GuildMember | null;
+    try {
+      member = await (
+        await this.client.guilds.fetch(guildId)
+      ).members.fetch(userId);
+    } catch (error: unknown) {
+      const status =
+        error && typeof error === 'object' && 'status' in error
+          ? (error as { status?: unknown }).status
+          : undefined;
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (status === 401 || code === 401) throw error;
+      member = null;
+    }
     if (!member) return null;
     return {
       id: member.id,
