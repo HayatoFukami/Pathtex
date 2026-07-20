@@ -5,8 +5,11 @@ import {
   formatGuildTime,
 } from '../src/features/configuration/service.js';
 import { serviceSettingsText } from '../src/features/configuration/commands.js';
+import { installMessageLoggingListeners } from '../src/index.js';
 import {
   classifyVoice,
+  isBotAuthoredMessage,
+  isConfiguredLogChannel,
   LogDeliveryService,
   messageEditEmbed,
   normalizeEmbed,
@@ -181,5 +184,158 @@ describe('configuration and logging slice', () => {
     expect(characters).toBe(6000);
     expect(embed.fields).toHaveLength(5);
     expect(embed.fields.at(-1)?.value).toHaveLength(368);
+  });
+  it('identifies every configured log channel for bot-message filtering', () => {
+    const configured = {
+      messageLogChannelId: 'message',
+      modlogChannelId: 'moderation',
+      serverLogChannelId: 'server',
+      voiceLogChannelId: 'voice',
+    };
+
+    expect(isConfiguredLogChannel('message', configured)).toBe(true);
+    expect(isConfiguredLogChannel('moderation', configured)).toBe(true);
+    expect(isConfiguredLogChannel('server', configured)).toBe(true);
+    expect(isConfiguredLogChannel('voice', configured)).toBe(true);
+    expect(isConfiguredLogChannel('other', configured)).toBe(false);
+  });
+  it('classifies bot, human, and authorless messages using snapshots safely', () => {
+    expect(isBotAuthoredMessage(true, null, 'bot')).toBe(true);
+    expect(isBotAuthoredMessage(false, 'bot', 'bot')).toBe(false);
+    expect(isBotAuthoredMessage(false, 'human', 'bot')).toBe(false);
+    expect(isBotAuthoredMessage(null, 'bot', 'bot')).toBe(true);
+    expect(isBotAuthoredMessage(undefined, 'bot', 'bot')).toBe(true);
+    expect(isBotAuthoredMessage(null, 'human', 'bot')).toBe(false);
+    expect(isBotAuthoredMessage(null, 'bot', null)).toBe(false);
+  });
+  it('orchestrates recursion guards for create, update, delete, and bulk events', async () => {
+    const logChannels = {
+      messageLogChannelId: 'message',
+      modlogChannelId: 'moderation',
+      serverLogChannelId: 'server',
+      voiceLogChannelId: 'voice',
+    };
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: 'bot' },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    const snapshotAuthors = new Map<string, string>();
+    const snapshots = {
+      getMessage: vi.fn((id: string) =>
+        Promise.resolve({
+          ok: true as const,
+          value: snapshotAuthors.has(id)
+            ? ({ authorUserId: snapshotAuthors.get(id) } as never)
+            : null,
+        }),
+      ),
+      deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const logging = {
+      messageCreate: vi.fn().mockResolvedValue(undefined),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn().mockResolvedValue(undefined),
+      messageDeleteBulk: vi.fn().mockResolvedValue(undefined),
+    };
+    const message = (overrides: Record<string, unknown> = {}) => ({
+      guildId,
+      channelId: 'other',
+      id: 'message-id',
+      content: 'content',
+      author: { id: 'human', tag: 'human', bot: false },
+      attachments: new Map(),
+      embeds: [],
+      flags: { bitfield: 0 },
+      mentions: { users: new Map(), roles: new Map(), everyone: false },
+      channel: {},
+      createdAt: new Date(),
+      webhookId: null,
+      system: false,
+      url: 'https://discord.test/message',
+      fetch: vi.fn(),
+      ...overrides,
+    });
+    installMessageLoggingListeners(
+      client as never,
+      logging,
+      {
+        get: vi.fn().mockResolvedValue({ ok: true, value: logChannels }),
+      } as never,
+      snapshots,
+      { error: vi.fn() } as never,
+    );
+
+    for (const [index, channelId] of Object.values(logChannels).entries()) {
+      const botMessage = message({
+        id: `bot-create-${String(index)}`,
+        channelId,
+        author: { id: 'bot', tag: 'bot', bot: true },
+      });
+      handlers.get('messageCreate')?.(botMessage as never);
+      const updated = message({
+        id: `bot-update-${String(index)}`,
+        channelId,
+        author: { id: 'bot', tag: 'bot', bot: true },
+      });
+      handlers.get('messageUpdate')?.(botMessage as never, updated as never);
+    }
+    const outside = message({
+      id: 'bot-outside',
+      author: { id: 'bot', tag: 'bot', bot: true },
+    });
+    handlers.get('messageCreate')?.(outside as never);
+
+    snapshotAuthors.set('partial-bot', 'bot');
+    handlers.get('messageDelete')?.(
+      message({
+        id: 'partial-bot',
+        channelId: 'message',
+        author: null,
+      }) as never,
+    );
+
+    const human = message({ id: 'human-bulk', channelId: 'message' });
+    const directBot = message({
+      id: 'direct-bot-bulk',
+      channelId: 'message',
+      author: { id: 'bot', tag: 'bot', bot: true },
+    });
+    snapshotAuthors.set('partial-bulk', 'bot');
+    const partialBot = message({
+      id: 'partial-bulk',
+      channelId: 'message',
+      author: null,
+    });
+    const batch = Object.assign(
+      new Map([
+        [human.id, human],
+        [directBot.id, directBot],
+        [partialBot.id, partialBot],
+      ]),
+      { first: () => human },
+    );
+    handlers.get('messageDeleteBulk')?.(batch as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(logging.messageCreate).toHaveBeenCalledOnce();
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+    expect(logging.messageDelete).not.toHaveBeenCalled();
+    expect(snapshots.deleteMessage).toHaveBeenCalledTimes(11);
+    expect(logging.messageDeleteBulk).toHaveBeenCalledWith(
+      guildId,
+      'message',
+      ['human-bulk'],
+      expect.arrayContaining([
+        expect.objectContaining({ messageId: 'human-bulk' }),
+      ]),
+    );
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('partial-bot');
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('direct-bot-bulk');
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('partial-bulk');
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('bot-create-0');
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('bot-update-0');
   });
 });

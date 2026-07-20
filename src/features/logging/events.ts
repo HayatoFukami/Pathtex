@@ -5,6 +5,37 @@ import {
   type LogEmbed,
 } from './service.js';
 
+export function isConfiguredLogChannel(
+  channelId: string,
+  settings: Readonly<{
+    messageLogChannelId?: string | null | undefined;
+    modlogChannelId?: string | null | undefined;
+    serverLogChannelId?: string | null | undefined;
+    voiceLogChannelId?: string | null | undefined;
+  }>,
+): boolean {
+  return [
+    settings.messageLogChannelId,
+    settings.modlogChannelId,
+    settings.serverLogChannelId,
+    settings.voiceLogChannelId,
+  ].includes(channelId);
+}
+
+export function isBotAuthoredMessage(
+  authorIsBot: boolean | null | undefined,
+  snapshotAuthorId: string | null | undefined,
+  botUserId: string | null | undefined,
+): boolean {
+  return (
+    authorIsBot === true ||
+    (authorIsBot == null &&
+      botUserId !== undefined &&
+      botUserId !== null &&
+      snapshotAuthorId === botUserId)
+  );
+}
+
 export interface MessageView {
   guildId: string;
   channelId: string;

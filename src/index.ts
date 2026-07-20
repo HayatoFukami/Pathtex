@@ -8,6 +8,7 @@ import {
   type ChatInputCommandInteraction,
   type MessageComponentInteraction,
   type Message,
+  type PartialMessage,
   type VoiceState,
   AuditLogEvent,
 } from 'discord.js';
@@ -79,7 +80,11 @@ import {
   PrismaDepartureRepository,
   PrismaRaidRepository,
 } from './repositories/prisma-repositories.js';
-import type { MessageView } from './features/logging/events.js';
+import {
+  isBotAuthoredMessage,
+  isConfiguredLogChannel,
+  type MessageView,
+} from './features/logging/events.js';
 import {
   ModerationService,
   DiscordModerationAdapter,
@@ -1360,6 +1365,124 @@ function messageView(message: Message): MessageView | null {
   };
 }
 
+export function installMessageLoggingListeners(
+  client: Client,
+  logging: Pick<
+    LoggingEventPipeline,
+    'messageCreate' | 'messageUpdate' | 'messageDelete' | 'messageDeleteBulk'
+  >,
+  settings: SettingsService,
+  snapshots: Pick<SnapshotService, 'getMessage' | 'deleteMessage'>,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  const report = (event: string, operation: Promise<void>): void => {
+    void operation.catch((error: unknown) => {
+      logger.error(
+        { event, errorName: error instanceof Error ? error.name : 'unknown' },
+        'Gateway event failed',
+      );
+    });
+  };
+  const isBotLogMessage = async (
+    message: Message | PartialMessage,
+  ): Promise<boolean> => {
+    if (!message.guildId) return false;
+    const result = await settings.get(message.guildId);
+    if (!result.ok || !isConfiguredLogChannel(message.channelId, result.value))
+      return false;
+    if (message.author?.bot === true) return true;
+    if (message.author !== null) return false;
+    const snapshot = await snapshots.getMessage(message.id);
+    return (
+      snapshot.ok &&
+      isBotAuthoredMessage(
+        undefined,
+        snapshot.value?.authorUserId,
+        client.user?.id,
+      )
+    );
+  };
+  client.on('messageCreate', (message) => {
+    report(
+      'gateway.message_create_failed',
+      (async () => {
+        if (await isBotLogMessage(message)) {
+          await snapshots.deleteMessage(message.id);
+          return;
+        }
+        const view = messageView(message);
+        if (view) await logging.messageCreate(view);
+      })(),
+    );
+  });
+  client.on('messageUpdate', (before, after) => {
+    report(
+      'gateway.message_update_failed',
+      (async () => {
+        if (await isBotLogMessage(after)) {
+          await snapshots.deleteMessage(after.id);
+          return;
+        }
+        const fullAfter = await (after as Message).fetch();
+        const oldView = messageView(before as Message);
+        const newView = messageView(fullAfter);
+        if (newView) await logging.messageUpdate(oldView, newView);
+      })(),
+    );
+  });
+  client.on('messageDelete', (message) => {
+    report(
+      'gateway.message_delete_failed',
+      (async () => {
+        if (!message.guildId) return;
+        if (await isBotLogMessage(message)) {
+          await snapshots.deleteMessage(message.id);
+          return;
+        }
+        const view = messageView(message as Message);
+        await logging.messageDelete(view, message.guildId, message.id);
+      })(),
+    );
+  });
+  client.on('messageDeleteBulk', (messages) => {
+    const first = messages.first();
+    if (!first?.guildId) return;
+    report(
+      'gateway.message_bulk_delete_failed',
+      (async () => {
+        const all = [...messages.values()];
+        const settingsResult = await settings.get(first.guildId);
+        const excluded = new Set<string>();
+        if (
+          settingsResult.ok &&
+          isConfiguredLogChannel(first.channelId, settingsResult.value)
+        ) {
+          await Promise.all(
+            all.map(async (message) => {
+              if (await isBotLogMessage(message)) excluded.add(message.id);
+            }),
+          );
+        }
+        await Promise.all(
+          [...excluded].map((id) => snapshots.deleteMessage(id)),
+        );
+        const ids = [...messages.keys()].filter((id) => !excluded.has(id));
+        if (ids.length === 0) return;
+        const cached = all
+          .filter((message) => !excluded.has(message.id))
+          .map((message) => messageView(message as Message))
+          .filter((value): value is MessageView => value !== null);
+        await logging.messageDeleteBulk(
+          first.guildId,
+          first.channelId,
+          ids,
+          cached,
+        );
+      })(),
+    );
+  });
+}
+
 function installGatewayListeners(
   client: Client,
   logging: LoggingEventPipeline,
@@ -1399,46 +1522,7 @@ function installGatewayListeners(
         );
     }
   };
-  client.on('messageCreate', (message) => {
-    const view = messageView(message);
-    if (view)
-      report('gateway.message_create_failed', logging.messageCreate(view));
-  });
-  client.on('messageUpdate', (before, after) => {
-    report(
-      'gateway.message_update_failed',
-      (async () => {
-        const fullAfter = await (after as Message).fetch();
-        const oldView = messageView(before as Message);
-        const newView = messageView(fullAfter);
-        if (newView) await logging.messageUpdate(oldView, newView);
-      })(),
-    );
-  });
-  client.on('messageDelete', (message) => {
-    const view = messageView(message as Message);
-    if (message.guildId)
-      report(
-        'gateway.message_delete_failed',
-        logging.messageDelete(view, message.guildId, message.id),
-      );
-  });
-  client.on('messageDeleteBulk', (messages) => {
-    const first = messages.first();
-    if (!first?.guildId) return;
-    const cached = [...messages.values()]
-      .map((message) => messageView(message as Message))
-      .filter((value): value is MessageView => value !== null);
-    report(
-      'gateway.message_bulk_delete_failed',
-      logging.messageDeleteBulk(
-        first.guildId,
-        first.channelId,
-        [...messages.keys()],
-        cached,
-      ),
-    );
-  });
+  installMessageLoggingListeners(client, logging, settings, snapshots, logger);
   client.on(
     'voiceStateUpdate',
     (oldState: VoiceState, newState: VoiceState) => {
