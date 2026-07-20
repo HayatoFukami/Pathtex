@@ -3,6 +3,7 @@ import type {
   CaseInput,
   CaseRepository,
   JsonValue,
+  ExternalCaseCreationResult,
 } from '../repositories/contracts.js';
 import {
   CaseInputSchema,
@@ -66,16 +67,18 @@ export class CaseService {
   public async createExternalCase(
     input: CanonicalUserCaseInput & { discordAuditLogEntryId: string },
   ): Promise<Result<CaseDto>> {
+    const result = await this.createExternalCaseResult(input);
+    return result.ok ? ok(result.value.case) : result;
+  }
+  public async createExternalCaseResult(
+    input: CanonicalUserCaseInput & { discordAuditLogEntryId: string },
+  ): Promise<Result<ExternalCaseCreationResult>> {
     const parsed = CanonicalUserCaseSchema.extend({
       discordAuditLogEntryId: SnowflakeSchema,
     }).safeParse(input);
     if (!parsed.success || parsed.data.source !== 'EXTERNAL')
       return err('INVALID_INPUT', 'Invalid external case');
-    return ok(
-      CaseDtoSchema.parse(
-        await this.repository.createExternalWithAudit(parsed.data),
-      ),
-    );
+    return ok(await this.repository.createExternalWithAuditResult(parsed.data));
   }
   public async get(
     guildId: string,

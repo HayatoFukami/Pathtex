@@ -109,11 +109,14 @@ integration('PostgreSQL persistence foundation', () => {
       discordAuditLogEntryId: auditId,
     };
     const results = await Promise.all(
-      Array.from({ length: 8 }, () => service.createExternalCase(input)),
+      Array.from({ length: 8 }, () => service.createExternalCaseResult(input)),
     );
     expect(results.every((result) => result.ok)).toBe(true);
+    expect(
+      results.map((result) => (result.ok ? result.value.created : null)).sort(),
+    ).toEqual([false, false, false, false, false, false, false, true]);
     const ids = results.flatMap((result) =>
-      result.ok ? [result.value.id] : [],
+      result.ok ? [result.value.case.id] : [],
     );
     expect(new Set(ids).size).toBe(1);
     expect(

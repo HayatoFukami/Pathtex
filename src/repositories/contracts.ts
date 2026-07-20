@@ -279,6 +279,10 @@ export interface CaseDto {
   createdAt: Date;
   updatedAt: Date;
 }
+export interface ExternalCaseCreationResult {
+  case: CaseDto;
+  created: boolean;
+}
 export interface JobDto {
   id: string;
   guildId: string;
@@ -841,6 +845,9 @@ export interface CaseRepository {
   createExternalWithAudit(
     input: CaseInput & { discordAuditLogEntryId: string },
   ): Promise<CaseDto>;
+  createExternalWithAuditResult(
+    input: CaseInput & { discordAuditLogEntryId: string },
+  ): Promise<ExternalCaseCreationResult>;
 }
 export interface StrikeRepository {
   changeLocked(input: StrikeChange): Promise<StrikeResult>;

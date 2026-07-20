@@ -11,6 +11,7 @@ import type {
   RetentionRepository,
   PunishmentActionDto,
   CaseDto,
+  ExternalCaseCreationResult,
   RaidResultDto,
   JobDto,
   MessageSnapshotInput,
@@ -127,23 +128,37 @@ export class PrismaCaseRepository implements CaseRepository {
   public async createExternalWithAudit(
     input: CaseInput & { discordAuditLogEntryId: string },
   ): Promise<CaseDto> {
+    return (await this.createExternalWithAuditResult(input)).case;
+  }
+  public async createExternalWithAuditResult(
+    input: CaseInput & { discordAuditLogEntryId: string },
+  ): Promise<ExternalCaseCreationResult> {
     CaseInputSchema.parse(input);
     SnowflakeSchema.parse(input.discordAuditLogEntryId);
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return validateDbOutput(
-          await this.db.$transaction(async (tx) => {
-            const existing = await tx.moderationCase.findFirst({
-              where: {
-                guildId: input.guildId,
-                discordAuditLogEntryId: input.discordAuditLogEntryId,
-              },
-            });
-            if (existing) return existing;
-            return allocateCase(tx, input, input.discordAuditLogEntryId);
-          }),
-        );
+        const result = await this.db.$transaction(async (tx) => {
+          const existing = await tx.moderationCase.findFirst({
+            where: {
+              guildId: input.guildId,
+              discordAuditLogEntryId: input.discordAuditLogEntryId,
+            },
+          });
+          if (existing)
+            return { case: validateDbOutput(existing), created: false };
+          const created = await allocateCase(
+            tx,
+            input,
+            input.discordAuditLogEntryId,
+          );
+          return { case: validateDbOutput(created), created: true };
+        });
+        return result;
       } catch (error) {
+        // A concurrent creator can win the audit-id unique constraint after
+        // this transaction's initial lookup. Retry the whole transaction so
+        // the winner is returned as a deduplicated result and its number is
+        // never allocated a second time.
         if (attempt < 3 && isRetryableSerialization(error)) continue;
         throw error;
       }
