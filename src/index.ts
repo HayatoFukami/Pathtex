@@ -43,6 +43,7 @@ import { SchedulerService } from './services/scheduler-service.js';
 import { SettingsService } from './services/settings-service.js';
 import { CorrelationCache } from './services/correlation-cache.js';
 import { SnapshotService } from './services/snapshot-service.js';
+import { TargetIdentityResolver } from './services/target-identity.js';
 import { ResourceLoader } from './services/resource-loader.js';
 import {
   AutomodConfigurationService,
@@ -271,6 +272,23 @@ export function createBootstrapDependencies(
   const snapshot = new SnapshotService(
     new PrismaSnapshotRepository(prisma.prisma),
   );
+  const targetIdentityResolver = new TargetIdentityResolver({
+    getMember: async (guildId, userId) =>
+      moderationDiscord.getMember(guildId, userId),
+    getUser: async (userId) => {
+      const user = await moderationDiscord.getUser('', userId);
+      return user
+        ? {
+            globalName: user.globalName,
+            username: user.username ?? user.display,
+          }
+        : null;
+    },
+    getSnapshot: async (guildId, userId) => {
+      const result = await snapshot.getMember(guildId, userId);
+      return result.ok ? result.value : null;
+    },
+  });
   const logSender = {
     send: async (channelId: string, event: unknown): Promise<void> => {
       const channel = await client?.client.channels.fetch(channelId);
@@ -291,6 +309,11 @@ export function createBootstrapDependencies(
     scheduler: schedulerService,
     activeMutes: activeMuteRepository,
     settings: settingsService,
+    targetIdentityResolver,
+    fatal: (error) => {
+      logger.fatal({ error }, 'Fatal moderation operation failure');
+      void stopLifecycle?.();
+    },
     modlog: moderationLog,
     correlation: {
       put: (kind, key, value) => correlation.put(kind, key, value),

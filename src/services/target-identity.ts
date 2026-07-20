@@ -100,20 +100,24 @@ export class TargetIdentityResolver {
     const eventIdentity = accept(context.member?.displayName);
     if (eventIdentity) return eventIdentity;
     if (this.lookup.getMember) {
-      const memberIdentity = accept(
-        (await this.lookup.getMember(guildId, userId))?.displayName,
-      );
+      const getMember = this.lookup.getMember.bind(this.lookup);
+      const member = await this.recoverable(() => getMember(guildId, userId));
+      const memberIdentity = accept(member?.displayName);
       if (memberIdentity) return memberIdentity;
     }
     if (this.lookup.getUser) {
-      const user = await this.lookup.getUser(userId);
+      const getUser = this.lookup.getUser.bind(this.lookup);
+      const user = await this.recoverable(() => getUser(userId));
       const globalIdentity = accept(user?.globalName);
       if (globalIdentity) return globalIdentity;
       const usernameIdentity = accept(user?.username);
       if (usernameIdentity) return usernameIdentity;
     }
     if (this.lookup.getSnapshot) {
-      const snapshot = await this.lookup.getSnapshot(guildId, userId);
+      const getSnapshot = this.lookup.getSnapshot.bind(this.lookup);
+      const snapshot = await this.recoverable(() =>
+        getSnapshot(guildId, userId),
+      );
       for (const candidate of [
         snapshot?.nickname,
         snapshot?.globalName,
@@ -124,5 +128,18 @@ export class TargetIdentityResolver {
       }
     }
     return fallbackTargetIdentity(userId);
+  }
+
+  private async recoverable<T>(operation: () => Promise<T>): Promise<T | null> {
+    try {
+      return await operation();
+    } catch (error) {
+      const status =
+        typeof error === 'object' && error !== null && 'status' in error
+          ? (error as { status?: unknown }).status
+          : undefined;
+      if (status === 401) throw error;
+      return null;
+    }
   }
 }

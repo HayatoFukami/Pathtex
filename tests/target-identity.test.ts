@@ -86,6 +86,30 @@ describe('target identity foundation', () => {
     ).rejects.toThrow('fatal');
   });
 
+  it('continues through recoverable lookup failures to user and snapshot names', async () => {
+    const resolver = new TargetIdentityResolver({
+      getMember: vi.fn().mockRejectedValue(new Error('member unavailable')),
+      getUser: vi.fn().mockRejectedValue(new Error('user unavailable')),
+      getSnapshot: vi.fn().mockResolvedValue({ nickname: 'snapshot-name' }),
+    });
+    await expect(resolver.resolve(guildId, userId)).resolves.toEqual({
+      userId,
+      displayName: 'snapshot-name',
+    });
+
+    const username = new TargetIdentityResolver({
+      getMember: vi.fn().mockRejectedValue(new Error('member unavailable')),
+      getUser: vi.fn().mockResolvedValue({
+        globalName: null,
+        username: 'username-name',
+      }),
+    });
+    await expect(username.resolve(guildId, userId)).resolves.toEqual({
+      userId,
+      displayName: 'username-name',
+    });
+  });
+
   it('renders historical users without performing a lookup and preserves non-user descriptors', () => {
     expect(
       renderCaseTarget({

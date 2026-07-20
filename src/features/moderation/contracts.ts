@@ -1,6 +1,7 @@
 import type { CaseDto, JsonValue } from '../../repositories/contracts.js';
 import type { Result } from '../../domain/result.js';
 import type { SettingsService } from '../../services/settings-service.js';
+import type { TargetIdentity } from '../../services/target-identity.js';
 
 export type ModerationAction =
   | 'KICK'
@@ -18,6 +19,9 @@ export type ModerationExecutionAction = ModerationAction;
 export interface ModerationTarget {
   readonly id: string;
   readonly display?: string;
+  readonly globalName?: string | null;
+  readonly username?: string;
+  readonly identity?: TargetIdentity;
 }
 
 export interface MemberSnapshot {
@@ -99,11 +103,14 @@ export interface ModerationOperationOptions {
 }
 
 export interface ModerationExecutionContext {
-  readonly source: 'COMMAND' | 'AUTO_PUNISHMENT' | 'RAIDMODE';
+  readonly source: 'COMMAND' | 'AUTO_PUNISHMENT' | 'RAIDMODE' | 'SCHEDULED';
   readonly action?: ModerationExecutionAction;
   readonly reason?: string;
   readonly sendDm?: boolean;
   readonly waitForDm?: boolean;
+  /** A caller may allocate the case transactionally before invoking moderation. */
+  readonly preCreatedCase?: CaseDto;
+  /** Reserved for scheduled callers that deliberately do not allocate a case. */
 }
 
 export interface TargetOutcome {
@@ -111,6 +118,7 @@ export interface TargetOutcome {
   readonly ok: boolean;
   readonly code?: string;
   readonly case?: CaseDto;
+  readonly identity?: TargetIdentity;
 }
 
 export interface ModerationBatchResult {
@@ -124,6 +132,14 @@ export interface ModerationServiceDependencies {
   readonly scheduler: import('../../services/scheduler-service.js').SchedulerService;
   readonly activeMutes: import('../../repositories/contracts.js').ActiveMuteRepository;
   readonly settings: SettingsService;
+  readonly targetIdentityResolver?: {
+    resolve(
+      guildId: string,
+      userId: string,
+      context?: { member?: { displayName?: unknown } | null },
+    ): Promise<TargetIdentity>;
+  };
+  readonly fatal?: (error: unknown) => void;
   readonly modlog?: {
     write(guildId: string, event: unknown, caseId?: string): Promise<unknown>;
     editReason?(guildId: string, caseId: string, reason: string): Promise<void>;

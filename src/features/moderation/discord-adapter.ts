@@ -29,7 +29,12 @@ export class DiscordModerationAdapter implements ModerationDiscordPort {
   ): Promise<ModerationTarget | null> {
     try {
       const user = await this.client().users.fetch(userId);
-      return { id: user.id, display: user.tag };
+      return {
+        id: user.id,
+        display: user.tag,
+        globalName: user.globalName,
+        username: user.username,
+      };
     } catch (error: unknown) {
       this.rethrowFatal(error);
       return null;

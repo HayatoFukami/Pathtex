@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unnecessary-condition, @typescript-eslint/no-unsafe-assignment */
+import { describe, expect, it, vi } from 'vitest';
 import {
   parseReason,
   parseTargets,
@@ -11,6 +12,101 @@ import {
 } from '../src/features/moderation/validation.js';
 import { ModerationService } from '../src/features/moderation/moderation-service.js';
 import { createModerationCommands } from '../src/commands/moderation/index.js';
+import type { CaseDto } from '../src/repositories/contracts.js';
+import type { TargetIdentity } from '../src/services/target-identity.js';
+
+const guildId = '12345678901234567';
+const actorId = '12345678901234568';
+const targetId = '12345678901234569';
+
+function caseDto(overrides: Partial<CaseDto> = {}): CaseDto {
+  const now = new Date();
+  return {
+    id: '00000000-0000-4000-8000-000000000001',
+    guildId,
+    caseNumber: 7,
+    action: 'KICK',
+    targetUserId: targetId,
+    targetDisplay: 'Stored Name',
+    moderatorUserId: actorId,
+    reason: 'reason',
+    durationSeconds: null,
+    source: 'COMMAND',
+    status: 'PENDING',
+    errorCode: null,
+    logMessageId: null,
+    logChannelId: null,
+    discordAuditLogEntryId: null,
+    metadata: {},
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function moderationDeps(overrides: Record<string, unknown> = {}) {
+  const member = {
+    id: targetId,
+    displayName: 'Member Name',
+    isOwner: false,
+    isBot: false,
+    rolePosition: 1,
+    isMember: true,
+  };
+  const discord = {
+    getMember: vi.fn(async () => member),
+    getUser: vi.fn(async () => ({ id: targetId, display: 'User Name' })),
+    getBotUserId: vi.fn(async () => '12345678901234570'),
+    getBotRolePosition: vi.fn(async () => 10),
+    getActorIsOwner: vi.fn(async () => false),
+    getActorRolePosition: vi.fn(async () => 5),
+    kick: vi.fn(async () => undefined),
+    ban: vi.fn(async () => undefined),
+    unban: vi.fn(async () => undefined),
+    isBanned: vi.fn(async () => false),
+    addRole: vi.fn(async () => undefined),
+    removeRole: vi.fn(async () => undefined),
+    sendDm: vi.fn(async () => undefined),
+    setSlowmode: vi.fn(async () => undefined),
+    getSlowmode: vi.fn(async () => 0),
+    fetchMessages: vi.fn(async () => []),
+    deleteMessages: vi.fn(async () => undefined),
+    deleteMessage: vi.fn(async () => undefined),
+  };
+  const created = caseDto();
+  const cases = {
+    create: vi.fn(async () => ({ ok: true, value: created })),
+    createCanonical: vi.fn(async () => ({ ok: true, value: created })),
+    updateStatus: vi.fn(
+      async (_guild: string, _id: string, status: CaseDto['status']) => ({
+        ok: true,
+        value: caseDto({ status }),
+      }),
+    ),
+    updateMetadata: vi.fn(async () => ({ ok: true, value: created })),
+  };
+  const deps = {
+    discord,
+    cases,
+    scheduler: {
+      cancel: vi.fn(async () => ({ ok: true })),
+      schedule: vi.fn(async () => ({ ok: true })),
+    },
+    activeMutes: {
+      activateWithSchedule: vi.fn(),
+      releaseWithSchedule: vi.fn(),
+    },
+    settings: {
+      get: vi.fn(async () => ({
+        ok: true,
+        value: { mutedRoleId: '12345678901234571' },
+      })),
+    },
+    modlog: { write: vi.fn(async () => undefined) },
+    ...overrides,
+  };
+  return { deps, discord, cases, created };
+}
 
 describe('moderation validation', () => {
   it('normalizes and bounds bulk targets', () => {
@@ -180,5 +276,363 @@ describe('moderation validation', () => {
       name: '12345678901234570',
       value: '失敗: DISCORD_API_ERROR',
     });
+  });
+
+  it('renders identities returned by the moderation outcome', async () => {
+    const calls: Array<{ id: string }> = [];
+    const replies: Array<{
+      embeds?: readonly { fields?: readonly { name: string }[] }[];
+    }> = [];
+    const service = {
+      kick: (input: { targets: readonly { id: string }[] }) => {
+        calls.push(input.targets[0] as (typeof calls)[number]);
+        return Promise.resolve({
+          ok: true,
+          value: {
+            outcomes: [
+              {
+                targetId: input.targets[0]?.id ?? '',
+                ok: true,
+                identity: {
+                  userId: '12345678901234569',
+                  displayName: 'Returned Success',
+                },
+              },
+              {
+                targetId: '12345678901234570',
+                ok: false,
+                code: 'ROLE_HIERARCHY',
+                identity: {
+                  userId: '12345678901234570',
+                  displayName: 'Returned Failure',
+                },
+              },
+            ],
+          },
+        });
+      },
+    } as unknown as ModerationService;
+    const kick = createModerationCommands(service).find(
+      (command) => command.name === 'kick',
+    );
+    const interaction = {
+      guildId: '12345678901234567',
+      user: { id: '12345678901234568' },
+      options: {
+        getUser: () => ({ id: '12345678901234569', globalName: 'Global Name' }),
+        getMember: () => ({ displayName: 'Interaction Name' }),
+        getString: () => null,
+        getInteger: () => null,
+      },
+      editReply: (reply: {
+        embeds?: readonly { fields?: readonly { name: string }[] }[];
+      }) => {
+        replies.push(reply);
+        return Promise.resolve(undefined);
+      },
+    };
+
+    await kick?.execute({ interaction } as never);
+
+    expect(calls[0]).toEqual({
+      id: '12345678901234569',
+      identity: {
+        userId: '12345678901234569',
+        displayName: 'Interaction Name',
+      },
+    });
+    expect(replies[0]?.embeds?.[0]?.fields?.map((field) => field.name)).toEqual(
+      [
+        'Returned Success (12345678901234569)',
+        'Returned Failure (12345678901234570)',
+      ],
+    );
+  });
+
+  it('passes a safe interaction member identity for non-kick actions', async () => {
+    let received: unknown;
+    const service = {
+      ban: (value: unknown) => {
+        received = value;
+        return Promise.resolve({ ok: true, value: { outcomes: [] } });
+      },
+    } as unknown as ModerationService;
+    const ban = createModerationCommands(service).find(
+      (command) => command.name === 'ban',
+    );
+    const interaction = {
+      guildId,
+      user: { id: actorId },
+      options: {
+        getUser: () => ({ id: targetId }),
+        getMember: () => ({ displayName: 'Ban Member' }),
+        getString: (name: string) => (name === 'reason' ? null : null),
+        getInteger: () => null,
+      },
+      editReply: () => Promise.resolve(undefined),
+    };
+    await ban?.execute({ interaction } as never);
+    expect(received).toMatchObject({
+      targets: [{ identity: { userId: targetId, displayName: 'Ban Member' } }],
+    });
+  });
+});
+
+describe('ModerationService P2A identity boundaries', () => {
+  const input = (
+    target: { id: string; identity?: TargetIdentity } = { id: targetId },
+  ) => ({
+    guildId,
+    actorId,
+    targets: [target],
+    reason: 'reason',
+  });
+
+  it('uses supplied identity canonically without a resolver', async () => {
+    const identity = { userId: targetId, displayName: 'Supplied Name' };
+    const { deps, cases } = moderationDeps();
+    const result = await new ModerationService(deps as never).kick(
+      input({ id: targetId, identity }),
+    );
+    expect(result.ok).toBe(true);
+    expect(cases.createCanonical).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetDisplay: 'Supplied Name',
+        targetUserId: targetId,
+      }),
+    );
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({ identity });
+  });
+
+  it('rejects mismatched resolver identities without creating a case', async () => {
+    const { deps, cases } = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => ({ userId: actorId, displayName: 'Wrong' })),
+      },
+    });
+    const result = await new ModerationService(deps as never).kick(input());
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      code: 'INVALID_TARGET_IDENTITY',
+      identity: { userId: targetId, displayName: '不明なユーザー' },
+    });
+    expect(cases.createCanonical).not.toHaveBeenCalled();
+  });
+
+  it('returns resolver fallback identities and propagates fatal resolver errors', async () => {
+    const fallback = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => ({
+          userId: targetId,
+          displayName: '不明なユーザー',
+        })),
+      },
+    });
+    const fallbackResult = await new ModerationService(
+      fallback.deps as never,
+    ).kick(input());
+    expect(fallbackResult.ok && fallbackResult.value.outcomes[0]).toMatchObject(
+      {
+        ok: true,
+        identity: { userId: targetId, displayName: '不明なユーザー' },
+      },
+    );
+
+    const fatal = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => {
+          throw Object.assign(new Error('unauthorized'), { status: 401 });
+        }),
+      },
+    });
+    await expect(
+      new ModerationService(fatal.deps as never).kick(input()),
+    ).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('retains resolved identity on precondition failure and identity/case on API failure', async () => {
+    const precondition = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => ({
+          userId: targetId,
+          displayName: 'Resolved',
+        })),
+      },
+    });
+    precondition.discord.getMember.mockResolvedValue({
+      ...precondition.discord.getMember.mock.results[0]?.value,
+      isOwner: true,
+    });
+    const before = await new ModerationService(precondition.deps as never).kick(
+      input(),
+    );
+    expect(before.ok && before.value.outcomes[0]).toMatchObject({
+      ok: false,
+      code: 'TARGET_IS_OWNER',
+      identity: { displayName: 'Resolved' },
+    });
+    expect(precondition.cases.createCanonical).not.toHaveBeenCalled();
+
+    const api = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => ({
+          userId: targetId,
+          displayName: 'Resolved',
+        })),
+      },
+    });
+    api.discord.kick.mockRejectedValue(
+      Object.assign(new Error('failed'), { status: 500 }),
+    );
+    const after = await new ModerationService(api.deps as never).kick(input());
+    expect(after.ok && after.value.outcomes[0]).toMatchObject({
+      ok: false,
+      identity: { displayName: 'Resolved' },
+      case: { id: api.created.id },
+    });
+  });
+
+  it('uses a valid pre-created case without allocation or service-owned terminalization', async () => {
+    const persisted = caseDto({ targetDisplay: 'Persisted Name' });
+    const fixture = moderationDeps({
+      targetIdentityResolver: {
+        resolve: vi.fn(async () => {
+          throw new Error('must not resolve');
+        }),
+      },
+    });
+    fixture.deps.cases.createCanonical.mockClear();
+    const result = await new ModerationService({
+      ...fixture.deps,
+      cases: {
+        ...fixture.cases,
+        createCanonical: fixture.cases.createCanonical,
+      },
+    } as never).kick({
+      ...input(),
+      execution: { source: 'COMMAND', preCreatedCase: persisted },
+    });
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: true,
+      identity: { userId: targetId, displayName: 'Persisted Name' },
+      case: persisted,
+    });
+    expect(fixture.cases.createCanonical).not.toHaveBeenCalled();
+    expect(fixture.cases.updateStatus).not.toHaveBeenCalled();
+    expect(fixture.cases.updateMetadata).not.toHaveBeenCalled();
+    expect(fixture.deps.modlog?.write).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid pre-created binding before Discord work', async () => {
+    const fixture = moderationDeps();
+    const result = await new ModerationService(fixture.deps as never).kick({
+      ...input(),
+      execution: {
+        source: 'COMMAND',
+        preCreatedCase: caseDto({ targetUserId: actorId }),
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(fixture.discord.getMember).not.toHaveBeenCalled();
+  });
+
+  it('propagates DM and modlog 401 errors', async () => {
+    const dm = moderationDeps();
+    dm.discord.sendDm.mockRejectedValue(
+      Object.assign(new Error('dm'), { status: 401 }),
+    );
+    await expect(
+      new ModerationService(dm.deps as never).kick(input()),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const log = moderationDeps();
+    log.deps.modlog?.write.mockRejectedValue(
+      Object.assign(new Error('log'), { status: 401 }),
+    );
+    await expect(
+      new ModerationService(log.deps as never).kick({
+        ...input(),
+        execution: { source: 'COMMAND', sendDm: false },
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('reports detached DM 401 and terminalizes a waited DM 401', async () => {
+    const detached = moderationDeps({ fatal: vi.fn() });
+    detached.discord.sendDm.mockRejectedValue(
+      Object.assign(new Error('dm'), { status: 401 }),
+    );
+    await expect(
+      new ModerationService(detached.deps as never).kick({
+        ...input(),
+        execution: { source: 'COMMAND', waitForDm: false },
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(
+      (detached.deps as never as { fatal: ReturnType<typeof vi.fn> }).fatal,
+    ).toHaveBeenCalledWith(expect.objectContaining({ status: 401 }));
+    expect(detached.cases.updateStatus).toHaveBeenCalledWith(
+      guildId,
+      detached.created.id,
+      'FAILED',
+      'DISCORD_API_ERROR',
+    );
+    expect(detached.cases.updateStatus).not.toHaveBeenCalledWith(
+      guildId,
+      detached.created.id,
+      'COMPLETED',
+      undefined,
+    );
+
+    const awaited = moderationDeps();
+    awaited.discord.sendDm.mockRejectedValue(
+      Object.assign(new Error('dm'), { status: 401 }),
+    );
+    await expect(
+      new ModerationService(awaited.deps as never).kick(input()),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(awaited.cases.updateStatus).toHaveBeenCalledWith(
+      guildId,
+      awaited.created.id,
+      'FAILED',
+      'DISCORD_API_ERROR',
+    );
+  });
+
+  it('uses pre-created identity and case over supplied identity on lookup failure', async () => {
+    const fixture = moderationDeps();
+    fixture.discord.getMember.mockRejectedValue(new Error('lookup failed'));
+    const persisted = caseDto({ targetDisplay: 'Persisted Name' });
+    const result = await new ModerationService(fixture.deps as never).kick({
+      ...input({
+        id: targetId,
+        identity: { userId: targetId, displayName: 'Supplied Name' },
+      }),
+      execution: { source: 'COMMAND', preCreatedCase: persisted },
+    });
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      identity: { displayName: 'Persisted Name' },
+      case: persisted,
+    });
+    expect(fixture.cases.createCanonical).not.toHaveBeenCalled();
+  });
+
+  it('includes the persisted target in the normal moderation log event', async () => {
+    const fixture = moderationDeps();
+    await new ModerationService(fixture.deps as never).kick(input());
+    expect(fixture.deps.modlog?.write).toHaveBeenCalledWith(
+      guildId,
+      expect.objectContaining({
+        embed: expect.objectContaining({
+          fields: expect.arrayContaining([
+            { name: 'Target', value: 'Stored Name (12345678901234569)' },
+          ]),
+        }),
+      }),
+      fixture.created.id,
+    );
   });
 });

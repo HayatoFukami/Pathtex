@@ -11,6 +11,10 @@ import {
   resolveDuration,
 } from '../../features/moderation/validation.js';
 import RE2 from 're2';
+import {
+  TargetIdentitySchema,
+  type TargetIdentity,
+} from '../../services/target-identity.js';
 
 type Options = {
   getUser(name: string): {
@@ -89,7 +93,9 @@ const resultText = (action: string, result: unknown): string => {
 const targetLabel = (
   targetId: string,
   names?: Readonly<Record<string, string>>,
+  identity?: TargetIdentity,
 ): string => {
+  if (identity) return `${identity.displayName} (${identity.userId})`;
   const name = names?.[targetId];
   return name ? `${name} (${targetId})` : targetId;
 };
@@ -123,7 +129,11 @@ const replyOutcome = async (
         title: `処理結果: ${action}`,
         color: failed === 0 ? 0x2ecc71 : success === 0 ? 0xe74c3c : 0xf1c40f,
         fields: outcomes.map((item) => ({
-          name: targetLabel(item.targetId, names),
+          name: targetLabel(
+            item.targetId,
+            names,
+            (item as { identity?: TargetIdentity }).identity,
+          ),
           value: item.ok ? '成功' : `失敗: ${item.code ?? 'FAILED'}`,
         })),
         footer: {
@@ -217,7 +227,7 @@ function command(
     async execute({ interaction }) {
       const options = interaction.options as unknown as Options;
       const target = options.getUser('target');
-      const member = action === 'kick' ? options.getMember?.('target') : null;
+      const member = options.getMember?.('target');
       const additional =
         action === 'kick' ? null : options.getString('additional_targets');
       const parsed = resolveTargets(target?.id, additional);
@@ -230,11 +240,25 @@ function command(
         await reply(interaction, reason.error.message);
         return;
       }
-      const targets = parsed.value.map((id) => ({ id }));
+      const targets: Array<{ id: string; identity?: TargetIdentity }> =
+        parsed.value.map((id) => ({ id }));
+      if (target) {
+        const displayName =
+          member?.displayName ?? target.globalName ?? target.username;
+        const interactionIdentity = TargetIdentitySchema.safeParse({
+          userId: target.id,
+          displayName,
+        });
+        if (interactionIdentity.success) {
+          targets[0] = { id: target.id, identity: interactionIdentity.data };
+        }
+      }
       const fn = service[actions[action]] as (input: {
         guildId: string;
         actorId: string;
-        targets: readonly { id: string }[];
+        targets: readonly {
+          id: string;
+        }[];
         reason: string;
         deleteMessages?: number;
       }) => Promise<unknown>;

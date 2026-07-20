@@ -2,16 +2,28 @@ import { err, ok, type Result } from '../../domain/result.js';
 import { auditReason } from '../../domain/parsers.js';
 import {
   CaseInputSchema,
+  CaseDtoSchema,
   SnowflakeSchema,
   type CaseDto,
 } from '../../repositories/contracts.js';
+import {
+  TargetIdentitySchema,
+  isUserTargetAction,
+} from '../../services/target-identity.js';
 import type {
   ModerationBatchResult,
+  ModerationDiscordPort,
   ModerationExecutionAction,
   ModerationOperationOptions,
   ModerationServiceDependencies,
   TargetOutcome,
 } from './contracts.js';
+import {
+  fallbackTargetIdentity,
+  type TargetIdentity,
+} from '../../services/target-identity.js';
+import { createCanonicalUserCase } from '../../services/case-service.js';
+import { renderCaseTarget } from '../../services/logging-services.js';
 
 const DAY = 86_400;
 const validId = (id: string) => SnowflakeSchema.safeParse(id).success;
@@ -73,6 +85,52 @@ export class ModerationService {
       return err('INVALID_INPUT', 'Invalid reason');
     if (input.targets.some((target) => !validId(target.id)))
       return err('INVALID_INPUT', 'Invalid target');
+    const preCreated = input.execution?.preCreatedCase;
+    if (preCreated && input.targets.length !== 1)
+      return err('INVALID_INPUT', 'A pre-created case requires one target');
+    if (preCreated) {
+      const parsedCase = CaseDtoSchema.safeParse(preCreated);
+      const parsedIdentity = parsedCase.success
+        ? TargetIdentitySchema.safeParse({
+            userId: parsedCase.data.targetUserId,
+            displayName: parsedCase.data.targetDisplay,
+          })
+        : undefined;
+      const expectedSource =
+        context?.source === 'AUTO_PUNISHMENT'
+          ? 'PUNISHMENT'
+          : context?.source === 'SCHEDULED'
+            ? 'SCHEDULED'
+            : context?.source === 'RAIDMODE'
+              ? 'RAIDMODE'
+              : 'COMMAND';
+      const onlyTarget = input.targets[0];
+      if (
+        !parsedCase.success ||
+        !onlyTarget ||
+        parsedCase.data.guildId !== input.guildId ||
+        parsedCase.data.action !== effectiveAction ||
+        parsedCase.data.targetUserId !== onlyTarget.id ||
+        !isUserTargetAction(parsedCase.data.action) ||
+        parsedCase.data.source !== expectedSource ||
+        parsedCase.data.status !== 'PENDING' ||
+        parsedCase.data.moderatorUserId !== input.actorId ||
+        (parsedCase.data.reason ?? '理由未指定') !== reason ||
+        (parsedCase.data.durationSeconds ?? undefined) !==
+          input.durationSeconds ||
+        !parsedIdentity?.success ||
+        parsedIdentity.data.displayName !== parsedCase.data.targetDisplay
+      )
+        return err('INVALID_INPUT', 'Invalid pre-created case');
+    }
+    if (
+      input.targets.some((target) => {
+        if (!target.identity) return false;
+        const parsed = TargetIdentitySchema.safeParse(target.identity);
+        return !parsed.success || parsed.data.userId !== target.id;
+      })
+    )
+      return err('INVALID_INPUT', 'Invalid target identity');
     if (
       input.deleteMessages !== undefined &&
       (!Number.isInteger(input.deleteMessages) ||
@@ -108,10 +166,32 @@ export class ModerationService {
         } catch (error: unknown) {
           const status = this.errorStatus(error);
           if (status === 401) throw error;
+          const persistedIdentity = preCreated
+            ? TargetIdentitySchema.safeParse({
+                userId: preCreated.targetUserId,
+                displayName: preCreated.targetDisplay,
+              })
+            : undefined;
+          const exceptionIdentity = target.identity
+            ? target.identity
+            : persistedIdentity?.success
+              ? persistedIdentity.data
+              : this.deps.targetIdentityResolver
+                ? (await this.resolveIdentity(input.guildId, target.id, null))
+                    .identity
+                : undefined;
           outcomes[index] = {
             targetId: target.id,
             ok: false,
             code: this.errorCode(error),
+            ...(target.identity
+              ? { identity: target.identity }
+              : persistedIdentity?.success
+                ? { identity: persistedIdentity.data }
+                : exceptionIdentity
+                  ? { identity: exceptionIdentity }
+                  : {}),
+            ...(preCreated ? { case: preCreated } : {}),
           };
         }
       }
@@ -125,71 +205,190 @@ export class ModerationService {
   private async one(
     input: ModerationOperationOptions,
     action: ModerationBatchResult['action'],
-    target: { id: string; display?: string },
+    target: { id: string; display?: string; identity?: TargetIdentity },
     reason: string,
   ): Promise<TargetOutcome> {
-    const member = await this.deps.discord.getMember(input.guildId, target.id);
-    const user =
-      member ?? (await this.deps.discord.getUser(input.guildId, target.id));
-    if (!user)
+    const preCreated = input.execution?.preCreatedCase;
+    const supplied = target.identity
+      ? TargetIdentitySchema.parse(target.identity)
+      : undefined;
+    const persisted = preCreated
+      ? TargetIdentitySchema.safeParse({
+          userId: preCreated.targetUserId,
+          displayName: preCreated.targetDisplay,
+        })
+      : undefined;
+    if (preCreated && !persisted?.success)
+      return { targetId: target.id, ok: false, code: 'INVALID_INPUT' };
+    let member: Awaited<ReturnType<ModerationDiscordPort['getMember']>> = null;
+    let user: Awaited<ReturnType<ModerationDiscordPort['getUser']>> = null;
+    try {
+      member = await this.deps.discord.getMember(input.guildId, target.id);
+      user =
+        member ?? (await this.deps.discord.getUser(input.guildId, target.id));
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
+      if (persisted?.success && preCreated)
+        return {
+          targetId: target.id,
+          ok: false,
+          code: this.errorCode(error),
+          identity: persisted.data,
+          case: preCreated,
+        };
+      if (supplied)
+        return {
+          targetId: target.id,
+          ok: false,
+          code: this.errorCode(error),
+          identity: supplied,
+        };
+      if (this.deps.targetIdentityResolver) {
+        const resolved = await this.resolveIdentity(
+          input.guildId,
+          target.id,
+          null,
+        );
+        if (resolved.errorCode)
+          return {
+            targetId: target.id,
+            ok: false,
+            code: resolved.errorCode,
+            identity: resolved.identity,
+          };
+        return {
+          targetId: target.id,
+          ok: false,
+          code: this.errorCode(error),
+          identity: resolved.identity,
+        };
+      }
       return {
         targetId: target.id,
         ok: false,
-        code: member
+        code: this.errorCode(error),
+      };
+    }
+    const resolved: TargetIdentity | undefined = persisted?.data ?? supplied;
+    const identityResult = resolved
+      ? { identity: resolved, errorCode: undefined }
+      : await this.resolveIdentity(input.guildId, target.id, member);
+    const identity = identityResult.identity;
+    const failed = (code: string, caseValue?: CaseDto): TargetOutcome => ({
+      targetId: target.id,
+      ok: false,
+      code,
+      ...(this.deps.targetIdentityResolver || supplied || preCreated
+        ? { identity }
+        : {}),
+      ...(preCreated
+        ? { case: caseValue ?? preCreated }
+        : caseValue
+          ? { case: caseValue }
+          : {}),
+    });
+    if (identityResult.errorCode) return failed(identityResult.errorCode);
+    if (preCreated) {
+      const expectedSource =
+        input.execution.source === 'AUTO_PUNISHMENT'
+          ? 'PUNISHMENT'
+          : input.execution.source === 'SCHEDULED'
+            ? 'SCHEDULED'
+            : input.execution.source === 'RAIDMODE'
+              ? 'RAIDMODE'
+              : 'COMMAND';
+      if (
+        preCreated.guildId !== input.guildId ||
+        preCreated.action !== action ||
+        preCreated.targetUserId !== target.id ||
+        !isUserTargetAction(preCreated.action) ||
+        preCreated.source !== expectedSource ||
+        preCreated.status !== 'PENDING'
+      )
+        return failed('INVALID_INPUT');
+    }
+    if (!user)
+      return failed(
+        member
           ? 'USER_NOT_FOUND'
           : action === 'KICK' || action === 'MUTE' || action === 'UNMUTE'
             ? 'MEMBER_NOT_FOUND'
             : 'USER_NOT_FOUND',
-      };
-    const botId = await this.deps.discord.getBotUserId(input.guildId);
-    if (target.id === input.actorId)
-      return { targetId: target.id, ok: false, code: 'TARGET_IS_SELF' };
-    if (target.id === botId)
-      return { targetId: target.id, ok: false, code: 'TARGET_IS_BOT' };
+      );
+    let botId: string;
+    try {
+      botId = await this.deps.discord.getBotUserId(input.guildId);
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
+      return failed(this.errorCode(error));
+    }
+    if (target.id === input.actorId) return failed('TARGET_IS_SELF');
+    if (target.id === botId) return failed('TARGET_IS_BOT');
     if (
       (action === 'KICK' || action === 'MUTE' || action === 'UNMUTE') &&
       !member
     )
-      return { targetId: target.id, ok: false, code: 'MEMBER_NOT_FOUND' };
-    if (member?.isOwner)
-      return { targetId: target.id, ok: false, code: 'TARGET_IS_OWNER' };
-    if (
-      member &&
-      member.rolePosition >=
-        (await this.deps.discord.getBotRolePosition(input.guildId))
-    )
-      return { targetId: target.id, ok: false, code: 'ROLE_HIERARCHY' };
-    const actorIsOwner = this.deps.discord.getActorIsOwner
-      ? await this.deps.discord.getActorIsOwner(input.guildId, input.actorId)
-      : false;
-    if (member && this.deps.discord.getActorRolePosition && !actorIsOwner) {
-      const actorRole = await this.deps.discord.getActorRolePosition(
-        input.guildId,
-        input.actorId,
-      );
-      if (member.rolePosition >= actorRole)
-        return { targetId: target.id, ok: false, code: 'ROLE_HIERARCHY' };
+      return failed('MEMBER_NOT_FOUND');
+    if (member?.isOwner) return failed('TARGET_IS_OWNER');
+    let botRolePosition: number | undefined;
+    if (member) {
+      try {
+        botRolePosition = await this.deps.discord.getBotRolePosition(
+          input.guildId,
+        );
+      } catch (error) {
+        if (this.errorStatus(error) === 401) throw error;
+        return failed(this.errorCode(error));
+      }
     }
-    const pending = await this.createCase(
-      input,
-      action,
-      target.id,
-      member?.displayName ?? target.display ?? target.id,
-      reason,
-    );
-    if (!pending.ok)
-      return { targetId: target.id, ok: false, code: pending.error.code };
+    if (member && member.rolePosition >= (botRolePosition ?? -1))
+      return failed('ROLE_HIERARCHY');
+    let actorIsOwner = false;
+    try {
+      actorIsOwner = this.deps.discord.getActorIsOwner
+        ? await this.deps.discord.getActorIsOwner(input.guildId, input.actorId)
+        : false;
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
+      return failed(this.errorCode(error));
+    }
+    if (member && this.deps.discord.getActorRolePosition && !actorIsOwner) {
+      let actorRole: number;
+      try {
+        actorRole = await this.deps.discord.getActorRolePosition(
+          input.guildId,
+          input.actorId,
+        );
+      } catch (error) {
+        if (this.errorStatus(error) === 401) throw error;
+        return failed(this.errorCode(error));
+      }
+      if (member.rolePosition >= actorRole) return failed('ROLE_HIERARCHY');
+    }
+    let pending: Awaited<ReturnType<ModerationService['createCase']>>;
+    try {
+      pending = await this.createCase(
+        input,
+        action,
+        target.id,
+        this.deps.targetIdentityResolver || supplied || preCreated
+          ? identity.displayName
+          : (member?.displayName ?? target.display ?? target.id),
+        reason,
+        identity,
+      );
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
+      return failed(this.errorCode(error));
+    }
+    if (!pending.ok) return failed(pending.error.code);
     const audit = auditReason(pending.value.caseNumber, reason);
-    if (!audit.ok)
-      return {
-        targetId: target.id,
-        ok: false,
-        code: audit.error.code,
-        case: pending.value,
-      };
+    if (!audit.ok) return failed(audit.error.code, pending.value);
     let dmDelivered = true;
     let apiError: unknown;
     let banSucceeded = false;
+    let detachedDm: Promise<void> | undefined;
+    let detachedFatal: unknown;
     try {
       if (
         input.execution?.sendDm !== false &&
@@ -200,10 +399,33 @@ export class ModerationService {
           `${input.guildId} から${action === 'KICK' ? 'キック' : action === 'MUTE' ? 'ミュート' : '制裁'}されました。\n理由: ${reason}\nケース: #${String(pending.value.caseNumber)}`,
         );
         if (input.execution?.waitForDm === false)
-          void dm.catch(() => undefined);
-        else await dm;
+          detachedDm = dm.catch(async (error: unknown) => {
+            if (this.errorStatus(error) !== 401) return;
+            detachedFatal = error;
+            if (preCreated) {
+              this.deps.fatal?.(error);
+              return;
+            }
+            try {
+              await this.terminalizeFatal(error, pending.value);
+            } catch (fatalError) {
+              this.deps.fatal?.(fatalError);
+            }
+          });
+        else {
+          try {
+            await dm;
+          } catch (error) {
+            if (this.errorStatus(error) === 401)
+              throw preCreated
+                ? error
+                : await this.terminalizeFatal(error, pending.value);
+            throw error;
+          }
+        }
       }
-    } catch {
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
       dmDelivered = false;
     }
     try {
@@ -291,8 +513,16 @@ export class ModerationService {
           pending.value.id,
         );
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
+      if (this.errorStatus(error) === 401)
+        throw preCreated
+          ? error
+          : await this.terminalizeFatal(error, pending.value);
       apiError = error;
+    }
+    if (detachedDm) await detachedDm;
+    if (detachedFatal) {
+      if (detachedFatal instanceof Error) throw detachedFatal;
+      throw new Error('Fatal detached DM failure');
     }
     const failureCode = apiError ? this.errorCode(apiError) : undefined;
     const partial =
@@ -301,30 +531,54 @@ export class ModerationService {
         : apiError
           ? 'FAILED'
           : 'COMPLETED';
-    const updated = await this.deps.cases.updateStatus(
-      input.guildId,
-      pending.value.id,
-      partial,
-      failureCode,
-    );
-    await this.deps.cases.updateMetadata(input.guildId, pending.value.id, {
-      dmDelivered,
-      ...(apiError ? { errorCode: failureCode ?? 'DISCORD_API_ERROR' } : {}),
-    });
-    try {
-      await this.deps.modlog?.write(
-        input.guildId,
-        {
-          type: 'moderation',
-          guildId: input.guildId,
-          occurredAt: this.clock(),
-          timezone: 'UTC',
-          embed: { title: action, fields: [{ name: 'Reason', value: reason }] },
-        },
-        pending.value.id,
-      );
-    } catch {
-      /* modlog is non-fatal */
+    let updated: Result<CaseDto> = pending;
+    if (!preCreated) {
+      try {
+        updated = await this.deps.cases.updateStatus(
+          input.guildId,
+          pending.value.id,
+          partial,
+          failureCode,
+        );
+      } catch (error) {
+        if (this.errorStatus(error) === 401) throw error;
+        return failed(this.errorCode(error), pending.value);
+      }
+    }
+    if (!preCreated) {
+      try {
+        await this.deps.cases.updateMetadata(input.guildId, pending.value.id, {
+          dmDelivered,
+          ...(apiError
+            ? { errorCode: failureCode ?? 'DISCORD_API_ERROR' }
+            : {}),
+        });
+      } catch (error) {
+        if (this.errorStatus(error) === 401) throw error;
+        return failed(this.errorCode(error), pending.value);
+      }
+      try {
+        await this.deps.modlog?.write(
+          input.guildId,
+          {
+            type: 'moderation',
+            guildId: input.guildId,
+            occurredAt: this.clock(),
+            timezone: 'UTC',
+            embed: {
+              title: action,
+              fields: [
+                { name: 'Target', value: renderCaseTarget(pending.value) },
+                { name: 'Reason', value: reason },
+              ],
+            },
+          },
+          pending.value.id,
+        );
+      } catch (error) {
+        if (this.errorStatus(error) === 401) throw error;
+        /* modlog is non-fatal */
+      }
     }
     return apiError
       ? {
@@ -332,12 +586,49 @@ export class ModerationService {
           ok: false,
           code: failureCode ?? 'DISCORD_API_ERROR',
           case: updated.ok ? updated.value : pending.value,
+          ...(this.deps.targetIdentityResolver || supplied || preCreated
+            ? { identity }
+            : {}),
         }
       : {
           targetId: target.id,
           ok: true,
           case: updated.ok ? updated.value : pending.value,
+          ...(this.deps.targetIdentityResolver || supplied || preCreated
+            ? { identity }
+            : {}),
         };
+  }
+
+  private async resolveIdentity(
+    guildId: string,
+    userId: string,
+    member: { displayName?: unknown } | null,
+  ): Promise<{ identity: TargetIdentity; errorCode?: string }> {
+    if (!this.deps.targetIdentityResolver)
+      return { identity: fallbackTargetIdentity(userId) };
+    try {
+      const value = await this.deps.targetIdentityResolver.resolve(
+        guildId,
+        userId,
+        { member },
+      );
+      const parsed = TargetIdentitySchema.safeParse(value);
+      if (!parsed.success || parsed.data.userId !== userId)
+        return {
+          identity: fallbackTargetIdentity(userId),
+          errorCode: 'INVALID_TARGET_IDENTITY',
+        };
+      return {
+        identity: parsed.data,
+      };
+    } catch (error) {
+      if (this.errorStatus(error) === 401) throw error;
+      return {
+        identity: fallbackTargetIdentity(userId),
+        errorCode: this.errorCode(error),
+      };
+    }
   }
 
   private errorStatus(error: unknown): number | undefined {
@@ -354,13 +645,33 @@ export class ModerationService {
     return this.errorStatus(error) ? 'DISCORD_API_ERROR' : 'INTERNAL_ERROR';
   }
 
+  private async terminalizeFatal(
+    error: unknown,
+    caseValue: CaseDto,
+  ): Promise<never> {
+    try {
+      await this.deps.cases.updateStatus(
+        caseValue.guildId,
+        caseValue.id,
+        'FAILED',
+        this.errorCode(error),
+      );
+    } catch {
+      /* Preserve the fatal error when persistence is unavailable. */
+    }
+    throw error;
+  }
+
   private async createCase(
     input: ModerationOperationOptions,
     action: CaseDto['action'],
     targetUserId: string,
     display: string,
     reason: string,
+    identity?: TargetIdentity,
   ) {
+    if (input.execution?.preCreatedCase)
+      return ok(input.execution.preCreatedCase);
     const parsed = CaseInputSchema.safeParse({
       guildId: input.guildId,
       action,
@@ -376,9 +687,22 @@ export class ModerationService {
       status: 'PENDING',
       metadata: {},
     });
-    return parsed.success
-      ? this.deps.cases.create(parsed.data)
-      : err('INVALID_INPUT', 'Invalid case input');
+    if (!parsed.success) return err('INVALID_INPUT', 'Invalid case input');
+    if (this.deps.targetIdentityResolver || identity) {
+      return this.deps.cases.createCanonical(
+        createCanonicalUserCase({
+          ...parsed.data,
+          identity:
+            identity ??
+            (
+              await this.resolveIdentity(input.guildId, targetUserId, {
+                displayName: display,
+              })
+            ).identity,
+        }),
+      );
+    }
+    return this.deps.cases.create(parsed.data);
   }
   private async schedule(
     input: ModerationOperationOptions,
