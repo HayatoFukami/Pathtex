@@ -255,6 +255,49 @@ describe('external audit and snapshot lane', () => {
     expect(cases.createExternalCaseResult).not.toHaveBeenCalled();
   });
 
+  it('consumes KICK correlation before deferred snapshot saving', async () => {
+    const correlation = new CorrelationCache();
+    correlation.put('moderation', `${guildId}:${targetUserId}:KICK`, {
+      caseId: '123e4567-e89b-12d3-a456-426614174000',
+    });
+    let releaseSave!: () => void;
+    const saveMember = vi.fn(
+      () =>
+        new Promise<{ ok: true; value: never }>((resolve) => {
+          releaseSave = () => {
+            resolve({ ok: true, value: undefined as never });
+          };
+        }),
+    );
+    const service = new ExternalEventService({
+      correlation,
+      audit: new ExternalAuditPolicy({ list: vi.fn() }),
+      snapshots: {
+        saveMember,
+        deleteMember: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
+      },
+      identity: { resolve: vi.fn() },
+      cases: { createExternalCaseResult: vi.fn() },
+    });
+    const removal = service.process({
+      guildId,
+      targetUserId,
+      kind: 'MEMBER_REMOVE',
+      occurredAt: at,
+      snapshot: { guildId, userId: targetUserId, username: 'user' },
+    });
+    await Promise.resolve();
+    expect(saveMember).toHaveBeenCalledOnce();
+    expect(
+      correlation.peek('moderation', `${guildId}:${targetUserId}:KICK`),
+    ).toBeUndefined();
+    releaseSave();
+    await expect(removal).resolves.toMatchObject({
+      action: 'KICK',
+      correlated: true,
+    });
+  });
+
   it('requires a configured muted role and transition, and validates snapshots', async () => {
     const base = {
       guildId,
@@ -324,11 +367,20 @@ describe('external audit and snapshot lane', () => {
       serverLogged: true,
       snapshotDeleted: true,
     });
-    expect(serverLog).toHaveBeenCalledOnce();
+    expect(serverLog).toHaveBeenCalledTimes(2);
     expect(cases.createExternalCaseResult).not.toHaveBeenCalled();
     expect(lifecycle.indexOf('save')).toBeLessThan(lifecycle.indexOf('audit'));
-    expect(lifecycle.indexOf('audit')).toBeLessThan(
+    expect(lifecycle.indexOf('save')).toBeLessThan(
       lifecycle.indexOf('server-log'),
+    );
+    expect(lifecycle.indexOf('server-log')).toBeLessThan(
+      lifecycle.indexOf('audit'),
+    );
+    expect(lifecycle.lastIndexOf('server-log')).toBeGreaterThan(
+      lifecycle.indexOf('audit'),
+    );
+    expect(lifecycle.lastIndexOf('server-log')).toBeLessThan(
+      lifecycle.indexOf('delete'),
     );
     expect(lifecycle.indexOf('server-log')).toBeLessThan(
       lifecycle.indexOf('delete'),
@@ -365,6 +417,136 @@ describe('external audit and snapshot lane', () => {
     });
     expect(cases.createExternalCaseResult).not.toHaveBeenCalled();
     expect(serverLog).toHaveBeenCalledOnce();
+  });
+
+  it('cancels UNBAN reservations for every observed unban transition', async () => {
+    const cancelUnban = vi.fn().mockResolvedValue(undefined);
+    const service = new ExternalEventService({
+      correlation: new CorrelationCache(),
+      audit: new ExternalAuditPolicy(
+        { list: vi.fn().mockResolvedValue([]) },
+        () => Promise.resolve(),
+        () => 0,
+      ),
+      identity: { resolve: vi.fn() },
+      cases: { createExternalCaseResult: vi.fn() },
+      cancelUnban,
+    });
+    const result = await service.process({
+      guildId,
+      targetUserId,
+      kind: 'BAN_REMOVE',
+      occurredAt: at,
+    });
+    expect(result.case).toBeNull();
+    expect(cancelUnban).toHaveBeenCalledWith(guildId, targetUserId);
+  });
+
+  it.each([
+    ['MUTE' as const, 'ADD' as const],
+    ['UNMUTE' as const, 'REMOVE' as const],
+  ])(
+    'consumes internal %s role correlation without creating an external case',
+    async (action, change) => {
+      const correlation = new CorrelationCache();
+      correlation.put('moderation', `${guildId}:${targetUserId}:${action}`, {
+        caseId: '123e4567-e89b-12d3-a456-426614174000',
+      });
+      const cases = { createExternalCaseResult: vi.fn() };
+      const service = new ExternalEventService({
+        correlation,
+        audit: new ExternalAuditPolicy({ list: vi.fn() }),
+        identity: { resolve: vi.fn() },
+        cases,
+      });
+      const result = await service.process({
+        guildId,
+        targetUserId,
+        kind: 'MUTED_ROLE_UPDATE',
+        mutedRoleId: '12345678901234571',
+        mutedRoleChange: change,
+        occurredAt: at,
+      });
+      expect(result).toMatchObject({ action, correlated: true, case: null });
+      expect(cases.createExternalCaseResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps leave logging and cleanup when audit handling fails', async () => {
+    const order: string[] = [];
+    const snapshots = {
+      saveMember: vi.fn().mockImplementation(() => {
+        order.push('save');
+        return { ok: true, value: {} };
+      }),
+      deleteMember: vi.fn().mockImplementation(() => {
+        order.push('delete');
+        return { ok: true, value: undefined };
+      }),
+    };
+    const serverLog = vi.fn().mockImplementation(() => {
+      order.push('server-log');
+    });
+    const service = new ExternalEventService({
+      correlation: new CorrelationCache(),
+      audit: new ExternalAuditPolicy(
+        {
+          list: vi.fn().mockRejectedValue(new Error('temporary audit failure')),
+        },
+        () => Promise.resolve(),
+        () => 0,
+      ),
+      identity: { resolve: vi.fn() },
+      snapshots,
+      serverLog,
+      cases: { createExternalCaseResult: vi.fn() },
+    });
+    await expect(
+      service.process({
+        guildId,
+        targetUserId,
+        kind: 'MEMBER_REMOVE',
+        occurredAt: at,
+        snapshot: { guildId, userId: targetUserId, username: 'user' },
+      }),
+    ).rejects.toThrow('temporary audit failure');
+    expect(order).toEqual(['save', 'server-log', 'server-log', 'delete']);
+  });
+
+  it('returns a persisted case despite post-case failures for one safe delivery attempt', async () => {
+    const operationalErrors: unknown[] = [];
+    const createdCase = { id: 'case-id' };
+    const service = new ExternalEventService({
+      correlation: new CorrelationCache(),
+      audit: new ExternalAuditPolicy({
+        list: vi.fn().mockResolvedValue([audit]),
+      }),
+      identity: {
+        resolve: vi
+          .fn()
+          .mockResolvedValue({ userId: targetUserId, displayName: 'User' }),
+      },
+      cases: {
+        createExternalCaseResult: vi.fn().mockResolvedValue({
+          ok: true,
+          value: { case: createdCase, created: true },
+        }),
+      },
+      serverLog: vi.fn().mockRejectedValue(new Error('server log failed')),
+      onOperationalError: (error) => operationalErrors.push(error),
+    });
+    const result = await service.process({
+      guildId,
+      targetUserId,
+      kind: 'BAN_ADD',
+      occurredAt: at,
+    });
+    expect(result).toMatchObject({
+      case: createdCase,
+      created: true,
+      deliveryEligible: true,
+    });
+    expect(operationalErrors).toHaveLength(1);
   });
 
   it('creates UNMUTE for a matching muted-role removal', async () => {

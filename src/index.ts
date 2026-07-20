@@ -9,6 +9,7 @@ import {
   type MessageComponentInteraction,
   type Message,
   type VoiceState,
+  AuditLogEvent,
 } from 'discord.js';
 import { loadConfig, type AppConfig } from './config/env.js';
 import { createLogger, type AppLogContext } from './logging/logger.js';
@@ -45,6 +46,14 @@ import { SettingsService } from './services/settings-service.js';
 import { CorrelationCache } from './services/correlation-cache.js';
 import { SnapshotService } from './services/snapshot-service.js';
 import { TargetIdentityResolver } from './services/target-identity.js';
+import {
+  ExternalAuditEntrySchema,
+  ExternalAuditPolicy,
+  ExternalEventService,
+  type ExternalAuditEntry,
+  type ExternalEvent,
+  type ExternalEventResult,
+} from './services/external-event-service.js';
 import { ResourceLoader } from './services/resource-loader.js';
 import {
   AutomodConfigurationService,
@@ -303,6 +312,13 @@ export function createBootstrapDependencies(
     logSender,
     logSettings,
     caseService,
+    {
+      getTimezone: async (guildId) => {
+        const result = await configuration.getWithTimezoneRepair(guildId);
+        if (!result.ok) throw result.error;
+        return result.value.timezone;
+      },
+    },
   );
   const moderation = new ModerationService({
     discord: moderationDiscord,
@@ -624,6 +640,10 @@ export function createBootstrapDependencies(
                     new Error('Scheduled unmute was superseded'),
                     { code: 'NOT_APPLIED' },
                   );
+                if (job.createdByCaseId)
+                  correlation.put('moderation', `${guildId}:${userId}:UNMUTE`, {
+                    caseId: job.createdByCaseId,
+                  });
                 await moderationDiscord.removeRoleUnlocked(
                   guildId,
                   userId,
@@ -992,6 +1012,163 @@ export function createBootstrapDependencies(
       return result.ok ? result.value.timezone : 'UTC';
     },
   });
+  const externalAuditReader = {
+    list: async (
+      guildId: string,
+      query: import('./services/external-event-service.js').AuditQuery,
+    ): Promise<readonly ExternalAuditEntry[]> => {
+      try {
+        const guild = await rawClient.guilds.fetch(guildId);
+        const logs = await guild.fetchAuditLogs({ limit: query.limit });
+        const entries: ExternalAuditEntry[] = [];
+        for (const entry of logs.entries.values()) {
+          const createdAt = new Date(entry.createdTimestamp);
+          if (createdAt < query.after || createdAt > query.before) continue;
+          const targetUserId = (entry.target as { id?: unknown } | null)?.id;
+          const executorUserId = entry.executorId;
+          if (
+            typeof targetUserId !== 'string' ||
+            typeof executorUserId !== 'string'
+          )
+            continue;
+          const action =
+            entry.action === AuditLogEvent.MemberKick
+              ? 'MEMBER_KICK'
+              : entry.action === AuditLogEvent.MemberBanAdd
+                ? 'MEMBER_BAN_ADD'
+                : entry.action === AuditLogEvent.MemberBanRemove
+                  ? 'MEMBER_BAN_REMOVE'
+                  : entry.action === AuditLogEvent.MemberRoleUpdate
+                    ? 'MEMBER_ROLE_UPDATE'
+                    : null;
+          if (!action) continue;
+          const base = {
+            id: entry.id,
+            action,
+            targetUserId,
+            executorUserId,
+            createdAt,
+          };
+          if (action !== 'MEMBER_ROLE_UPDATE') {
+            const parsed = ExternalAuditEntrySchema.safeParse(base);
+            if (parsed.success) entries.push(parsed.data);
+            continue;
+          }
+          const changes = (
+            (Array.isArray(entry.changes) ? entry.changes : []) as readonly {
+              key?: unknown;
+              new?: unknown;
+              old?: unknown;
+            }[]
+          ).filter(
+            (change) => change.key === '$add' || change.key === '$remove',
+          );
+          for (const change of changes) {
+            const roleChange = change.key === '$add' ? 'ADD' : 'REMOVE';
+            const roleValues: readonly unknown[] = Array.isArray(
+              change.new ?? change.old,
+            )
+              ? ((change.new ?? change.old) as readonly unknown[])
+              : [];
+            for (const role of roleValues) {
+              const roleId =
+                typeof role === 'object' && role !== null && 'id' in role
+                  ? role.id
+                  : undefined;
+              const parsed = ExternalAuditEntrySchema.safeParse({
+                ...base,
+                roleId,
+                roleChange,
+              });
+              if (parsed.success) entries.push(parsed.data);
+            }
+          }
+        }
+        return entries;
+      } catch (error: unknown) {
+        const status =
+          typeof error === 'object' && error !== null && 'status' in error
+            ? (error as { status?: unknown }).status
+            : undefined;
+        const code =
+          typeof error === 'object' && error !== null && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (status === 401 || code === 401) {
+          logger.fatal(
+            { event: 'gateway.audit_auth_failed', discordCode: 401 },
+            'Discord audit-log authentication failed',
+          );
+          process.exitCode = 1;
+          void stopLifecycle?.();
+        }
+        throw error;
+      }
+    },
+  };
+  const externalEvents = new ExternalEventService({
+    cases: caseService,
+    audit: new ExternalAuditPolicy(externalAuditReader),
+    correlation,
+    identity: targetIdentityResolver,
+    snapshots: snapshot,
+    cancelUnban: (guildId, userId) =>
+      schedulerService
+        .cancel({
+          guildId,
+          targetUserId: userId,
+          channelId: null,
+          type: 'UNBAN',
+        })
+        .then(() => undefined),
+    onOperationalError: (error) => {
+      logger.error(
+        {
+          event: 'external_event.operational_failure',
+          errorName: error instanceof Error ? error.name : 'unknown',
+        },
+        'External event post-case operation failed',
+      );
+    },
+    serverLog: async (event: ExternalEvent, result: ExternalEventResult) => {
+      const labels: Record<ExternalEvent['kind'], string> = {
+        MEMBER_REMOVE: 'メンバー退出',
+        BAN_ADD: 'BANイベント',
+        BAN_REMOVE: 'UNBANイベント',
+        MUTED_ROLE_UPDATE: 'Mutedロール変更',
+      };
+      const finalLeaveClassification =
+        event.kind === 'MEMBER_REMOVE' && result.serverLogged;
+      const snapshot = event.snapshot;
+      const displayName =
+        event.memberDisplayName?.trim() ||
+        snapshot?.nickname ||
+        snapshot?.globalName ||
+        snapshot?.username ||
+        '不明なユーザー';
+      const classification =
+        !finalLeaveClassification && event.kind === 'MEMBER_REMOVE'
+          ? 'Audit Log照合待ち'
+          : result.correlated
+            ? '内部操作（Bot起因）'
+            : result.auditEntryId
+              ? 'Audit Log照合済み'
+              : event.kind === 'MEMBER_REMOVE'
+                ? '自主退出または特定不能'
+                : 'Audit Log照合不可';
+      await logging.server(
+        event.guildId,
+        finalLeaveClassification ? 'メンバー退出判定' : labels[event.kind],
+        [
+          {
+            name: 'User',
+            value: `${displayName} (${event.targetUserId})`,
+          },
+          { name: '判定', value: classification },
+        ],
+      );
+    },
+  });
   return {
     commandDefinitions: commands,
     database: () => prisma.connect(),
@@ -1061,6 +1238,7 @@ export function createBootstrapDependencies(
         correlation,
         caseService,
         moderationLog,
+        externalEvents,
         raid,
         automod,
         logger,
@@ -1196,6 +1374,7 @@ function installGatewayListeners(
   correlations: CorrelationCache,
   cases: CaseService,
   moderationLog: ModerationLogService,
+  externalEvents: ExternalEventService,
   raid: RaidService,
   automod: AutomodService,
   logger: ReturnType<typeof createLogger>,
@@ -1207,6 +1386,18 @@ function installGatewayListeners(
         'Gateway event failed',
       );
     });
+  };
+  const deliverExternalCase = async (
+    guildId: string,
+    result: ExternalEventResult,
+  ): Promise<void> => {
+    if (result.created && result.case) {
+      const delivery = await moderationLog.writeCase(guildId, result.case.id);
+      if (delivery.status === 'failed')
+        throw new Error(
+          `External case log failed: ${delivery.errorCode ?? 'UNKNOWN'}`,
+        );
+    }
   };
   client.on('messageCreate', (message) => {
     const view = messageView(message);
@@ -1305,6 +1496,11 @@ function installGatewayListeners(
               guildSettings.ok &&
               guildSettings.value.mutedRoleId
             ) {
+              correlations.put(
+                'moderation',
+                `${member.guild.id}:${member.id}:MUTE`,
+                { caseId: mute.caseId },
+              );
               await moderationDiscord.addRoleUnlocked(
                 member.guild.id,
                 member.id,
@@ -1327,10 +1523,22 @@ function installGatewayListeners(
     report(
       'gateway.member_remove_failed',
       (async () => {
-        await logging.server(member.guild.id, 'メンバー退出', [
-          { name: 'User', value: `${member.user.tag} (${member.id})` },
-        ]);
-        await snapshots.deleteMember(member.guild.id, member.id);
+        const result = await externalEvents.process({
+          guildId: member.guild.id,
+          targetUserId: member.id,
+          kind: 'MEMBER_REMOVE',
+          occurredAt: new Date(),
+          memberDisplayName: member.displayName,
+          snapshot: {
+            guildId: member.guild.id,
+            userId: member.id,
+            username: member.user.username,
+            globalName: member.user.globalName,
+            nickname: member.nickname,
+            joinedAt: member.joinedAt,
+          },
+        });
+        await deliverExternalCase(member.guild.id, result);
       })(),
     );
   });
@@ -1342,6 +1550,27 @@ function installGatewayListeners(
           .autoDehoist(after.guild.id, after.id, after.displayName)
           .then(() => undefined),
       );
+    report(
+      'gateway.external_muted_transition_failed',
+      (async () => {
+        const configured = await settings.get(after.guild.id);
+        const mutedRoleId = configured.ok ? configured.value.mutedRoleId : null;
+        if (!mutedRoleId) return;
+        const beforeHas = before.roles.cache.has(mutedRoleId);
+        const afterHas = after.roles.cache.has(mutedRoleId);
+        if (beforeHas === afterHas) return;
+        const result = await externalEvents.process({
+          guildId: after.guild.id,
+          targetUserId: after.id,
+          kind: 'MUTED_ROLE_UPDATE',
+          mutedRoleId,
+          mutedRoleChange: afterHas ? 'ADD' : 'REMOVE',
+          occurredAt: new Date(),
+          memberDisplayName: after.displayName,
+        });
+        await deliverExternalCase(after.guild.id, result);
+      })(),
+    );
     if (before.displayName === after.displayName) return;
     report(
       'gateway.member_update_failed',
@@ -1371,53 +1600,13 @@ function installGatewayListeners(
     report(
       'gateway.ban_add_failed',
       (async () => {
-        const internal = correlations.consume(
-          'moderation',
-          `${ban.guild.id}:${ban.user.id}:BAN`,
-        );
-        let caseId: string | undefined =
-          internal && 'caseId' in internal ? internal.caseId : undefined;
-        if (caseId) return;
-        const auditEntry = (
-          await ban.guild.fetchAuditLogs({ limit: 20 })
-        ).entries.find(
-          (entry) =>
-            (String(entry.action) === '22' || String(entry.action) === '23') &&
-            (entry.target as { id?: string } | null)?.id === ban.user.id &&
-            Date.now() - entry.createdTimestamp < 30_000,
-        );
-        const reason = auditEntry?.reason ?? (caseId ? '内部BAN' : '外部BAN');
-        if (!caseId) {
-          const created = await cases.create({
-            guildId: ban.guild.id,
-            action: 'BAN',
-            targetUserId: ban.user.id,
-            targetDisplay: ban.user.tag,
-            moderatorUserId: auditEntry?.executorId ?? ban.guild.ownerId,
-            reason,
-            source: 'EXTERNAL',
-            status: 'COMPLETED',
-            metadata: { external: true },
-          });
-          if (created.ok) caseId = created.value.id;
-        }
-        await moderationLog.write(
-          ban.guild.id,
-          {
-            type: 'moderation',
-            guildId: ban.guild.id,
-            occurredAt: new Date(),
-            timezone: 'UTC',
-            embed: {
-              title: 'BAN',
-              fields: [
-                { name: 'Target', value: ban.user.tag },
-                { name: 'Reason', value: reason },
-              ],
-            },
-          },
-          caseId,
-        );
+        const result = await externalEvents.process({
+          guildId: ban.guild.id,
+          targetUserId: ban.user.id,
+          kind: 'BAN_ADD',
+          occurredAt: new Date(),
+        });
+        await deliverExternalCase(ban.guild.id, result);
       })(),
     );
   });
@@ -1425,58 +1614,13 @@ function installGatewayListeners(
     report(
       'gateway.ban_remove_failed',
       (async () => {
-        const internal = correlations.consume(
-          'moderation',
-          `${ban.guild.id}:${ban.user.id}:UNBAN`,
-        );
-        if (internal && 'caseId' in internal) return;
-        const auditEntry = await ban.guild
-          .fetchAuditLogs({ limit: 20 })
-          .then((logs) =>
-            logs.entries.find(
-              (entry) =>
-                (String(entry.action) === '23' ||
-                  String(entry.action) === '24') &&
-                (entry.target as { id?: string } | null)?.id === ban.user.id &&
-                Date.now() - entry.createdTimestamp < 30_000,
-            ),
-          );
-        const reason = auditEntry?.reason ?? '外部UNBAN';
-        const created = await cases.create({
-          guildId: ban.guild.id,
-          action: 'UNBAN',
-          targetUserId: ban.user.id,
-          targetDisplay: ban.user.tag,
-          moderatorUserId: auditEntry?.executorId ?? ban.guild.ownerId,
-          reason,
-          source: 'EXTERNAL',
-          status: 'COMPLETED',
-          metadata: { external: true },
-        });
-        await scheduler.cancel({
+        const result = await externalEvents.process({
           guildId: ban.guild.id,
           targetUserId: ban.user.id,
-          channelId: null,
-          type: 'UNBAN',
+          kind: 'BAN_REMOVE',
+          occurredAt: new Date(),
         });
-        await moderationLog.write(
-          ban.guild.id,
-          {
-            type: 'moderation',
-            guildId: ban.guild.id,
-            occurredAt: new Date(),
-            timezone: 'UTC',
-            embed: {
-              title: 'UNBAN',
-              fields: [
-                { name: 'User', value: ban.user.tag },
-                { name: 'Reason', value: reason },
-              ],
-            },
-          },
-          created.ok ? created.value.id : undefined,
-        );
-        void created;
+        await deliverExternalCase(ban.guild.id, result);
       })(),
     );
   });

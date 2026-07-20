@@ -199,6 +199,8 @@ export class ExternalEventService {
       correlation: Pick<CorrelationCache, 'consume' | 'peek'>;
       identity: Pick<TargetIdentityResolver, 'resolve'>;
       snapshots?: Pick<SnapshotService, 'saveMember' | 'deleteMember'>;
+      cancelUnban?: (guildId: string, userId: string) => Promise<void>;
+      onOperationalError?: (error: unknown) => void;
       serverLog?: (
         event: ExternalEvent,
         result: ExternalEventResult,
@@ -230,113 +232,199 @@ export class ExternalEventService {
         'moderation',
         `${event.guildId}:${event.targetUserId}:BAN`,
       ) !== undefined;
+    const kickCorrelationObserved =
+      event.kind === 'MEMBER_REMOVE' &&
+      !banCorrelationObserved &&
+      this.deps.correlation.consume(
+        'moderation',
+        `${event.guildId}:${event.targetUserId}:KICK`,
+      ) !== undefined;
+
+    let failure: unknown;
+    const throwFailure = (): never => {
+      if (failure instanceof Error) throw failure;
+      throw new Error('External event processing failed');
+    };
+    const rememberFailure = (error: unknown): void => {
+      if (failure === undefined) failure = error;
+    };
+    let serverLogged = false;
+    let serverLogAttempted = false;
+    const logServer = async (
+      result: ExternalEventResult,
+      force = false,
+    ): Promise<void> => {
+      if (!this.deps.serverLog || (serverLogAttempted && !force)) return;
+      result.serverLogged = serverLogged;
+      serverLogAttempted = true;
+      try {
+        await this.deps.serverLog(event, result);
+        serverLogged = true;
+      } catch (error) {
+        rememberFailure(error);
+      }
+    };
 
     // Snapshot-before-delete is deliberately performed before correlation or
     // audit lookup: the member may be unavailable after the gateway event.
     let snapshotSaved = false;
     if (event.kind === 'MEMBER_REMOVE') {
-      if (!this.deps.snapshots)
-        throw new Error('Member removal requires snapshot persistence');
-      const saved = await this.deps.snapshots.saveMember(event.snapshot);
-      if (!saved.ok) throw new Error('Member snapshot could not be saved');
-      snapshotSaved = saved.ok;
+      try {
+        if (!this.deps.snapshots)
+          throw new Error('Member removal requires snapshot persistence');
+        const saved = await this.deps.snapshots.saveMember(event.snapshot);
+        if (!saved.ok) throw new Error('Member snapshot could not be saved');
+        snapshotSaved = saved.ok;
+      } catch (error) {
+        rememberFailure(error);
+      }
     }
 
+    let finalized = false;
+    let finalizedCasePersisted = false;
     const finish = async (
       result: ExternalEventResult,
+      casePersisted = false,
     ): Promise<ExternalEventResult> => {
+      if (finalized) {
+        if (failure !== undefined && !finalizedCasePersisted) throwFailure();
+        return result;
+      }
+      finalized = true;
+      finalizedCasePersisted = casePersisted;
       try {
-        if (this.deps.serverLog) {
-          await this.deps.serverLog(event, result);
-          result.serverLogged = true;
-        }
+        // MEMBER_REMOVE has an independent leave record before audit lookup;
+        // emit its final classification after lookup as a separate update.
+        await logServer(result, event.kind === 'MEMBER_REMOVE');
+        result.serverLogged = serverLogged;
       } finally {
-        if (event.kind === 'MEMBER_REMOVE' && this.deps.snapshots) {
-          await this.deps.snapshots.deleteMember(
-            event.guildId,
-            event.targetUserId,
-          );
-          result.snapshotDeleted = true;
+        if (event.kind === 'BAN_REMOVE' && this.deps.cancelUnban) {
+          try {
+            await this.deps.cancelUnban(event.guildId, event.targetUserId);
+          } catch (error) {
+            rememberFailure(error);
+          }
         }
+        if (event.kind === 'MEMBER_REMOVE' && this.deps.snapshots) {
+          try {
+            await this.deps.snapshots.deleteMember(
+              event.guildId,
+              event.targetUserId,
+            );
+            result.snapshotDeleted = true;
+          } catch (error) {
+            rememberFailure(error);
+          }
+        }
+      }
+      if (failure !== undefined) {
+        if (casePersisted) {
+          try {
+            this.deps.onOperationalError?.(failure);
+          } catch {
+            /* error reporting must not affect the single case delivery path */
+          }
+        } else throwFailure();
       }
       return result;
     };
 
-    // A MEMBER_REMOVE must inspect, but not consume, BAN correlation. The
-    // subsequent BAN_ADD event owns consumption of that correlation entry.
-    if (banCorrelationObserved)
-      return finish({ ...base, action: null, correlated: true, snapshotSaved });
-    const correlationActions: ExternalCaseAction[] =
-      event.kind === 'MEMBER_REMOVE' ? ['KICK'] : action ? [action] : [];
-    for (const correlationAction of correlationActions) {
-      if (
-        this.deps.correlation.consume(
-          'moderation',
-          `${event.guildId}:${event.targetUserId}:${correlationAction}`,
-        )
-      )
-        return finish({
+    // The leave record is independent of audit/case processing and must be
+    // emitted before any potentially slow or failing audit lookup.
+    if (event.kind === 'MEMBER_REMOVE') await logServer(base);
+
+    try {
+      // A MEMBER_REMOVE must inspect, but not consume, BAN correlation. The
+      // subsequent BAN_ADD event owns consumption of that correlation entry.
+      if (banCorrelationObserved)
+        return await finish({
           ...base,
-          action:
-            event.kind === 'MEMBER_REMOVE' && correlationAction === 'BAN'
-              ? null
-              : action,
+          action: null,
           correlated: true,
           snapshotSaved,
         });
+      if (kickCorrelationObserved)
+        return await finish({
+          ...base,
+          action: 'KICK',
+          correlated: true,
+          snapshotSaved,
+        });
+      const correlationActions: ExternalCaseAction[] =
+        event.kind === 'MEMBER_REMOVE' ? [] : action ? [action] : [];
+      for (const correlationAction of correlationActions) {
+        if (
+          this.deps.correlation.consume(
+            'moderation',
+            `${event.guildId}:${event.targetUserId}:${correlationAction}`,
+          )
+        )
+          return await finish({
+            ...base,
+            action,
+            correlated: true,
+            snapshotSaved,
+          });
+      }
+      const expectedAuditAction = auditActionForEvent(event);
+      if (!action || !expectedAuditAction)
+        return await finish({ ...base, snapshotSaved });
+      const auditInput: AuditMatchInput = {
+        expectedAction: expectedAuditAction,
+        targetUserId: event.targetUserId,
+        occurredAt: event.occurredAt,
+        ...(event.kind === 'MUTED_ROLE_UPDATE'
+          ? {
+              mutedRoleId: event.mutedRoleId,
+              mutedRoleChange: event.mutedRoleChange,
+            }
+          : {}),
+      };
+      const entry = await this.deps.audit.find(event.guildId, auditInput);
+      if (!entry || !entry.executorUserId)
+        return await finish({ ...base, snapshotSaved });
+      const identity = await this.deps.identity.resolve(
+        event.guildId,
+        event.targetUserId,
+        {
+          member: event.memberDisplayName
+            ? { displayName: event.memberDisplayName }
+            : event.snapshot
+              ? {
+                  displayName:
+                    event.snapshot.nickname ??
+                    event.snapshot.globalName ??
+                    event.snapshot.username,
+                }
+              : null,
+        },
+      );
+      const created = await this.deps.cases.createExternalCaseResult({
+        guildId: event.guildId,
+        action,
+        targetUserId: identity.userId,
+        targetDisplay: identity.displayName,
+        moderatorUserId: entry.executorUserId,
+        source: 'EXTERNAL',
+        status: 'COMPLETED',
+        reason: '外部操作',
+        discordAuditLogEntryId: entry.id,
+      });
+      if (!created.ok) return await finish({ ...base, snapshotSaved });
+      return await finish(
+        {
+          ...base,
+          auditEntryId: entry.id,
+          case: created.value.case,
+          created: created.value.created,
+          deliveryEligible: created.value.created,
+          snapshotSaved,
+        },
+        created.value.created,
+      );
+    } catch (error) {
+      rememberFailure(error);
+      return await finish({ ...base, snapshotSaved });
     }
-    const expectedAuditAction = auditActionForEvent(event);
-    if (!action || !expectedAuditAction)
-      return finish({ ...base, snapshotSaved });
-    const auditInput: AuditMatchInput = {
-      expectedAction: expectedAuditAction,
-      targetUserId: event.targetUserId,
-      occurredAt: event.occurredAt,
-      ...(event.kind === 'MUTED_ROLE_UPDATE'
-        ? {
-            mutedRoleId: event.mutedRoleId,
-            mutedRoleChange: event.mutedRoleChange,
-          }
-        : {}),
-    };
-    const entry = await this.deps.audit.find(event.guildId, auditInput);
-    if (!entry || !entry.executorUserId)
-      return finish({ ...base, snapshotSaved });
-    const identity = await this.deps.identity.resolve(
-      event.guildId,
-      event.targetUserId,
-      {
-        member: event.memberDisplayName
-          ? { displayName: event.memberDisplayName }
-          : event.snapshot
-            ? {
-                displayName:
-                  event.snapshot.nickname ??
-                  event.snapshot.globalName ??
-                  event.snapshot.username,
-              }
-            : null,
-      },
-    );
-    const created = await this.deps.cases.createExternalCaseResult({
-      guildId: event.guildId,
-      action,
-      targetUserId: identity.userId,
-      targetDisplay: identity.displayName,
-      moderatorUserId: entry.executorUserId,
-      source: 'EXTERNAL',
-      status: 'COMPLETED',
-      reason: '外部操作',
-      discordAuditLogEntryId: entry.id,
-    });
-    if (!created.ok) return finish({ ...base, snapshotSaved });
-    return finish({
-      ...base,
-      auditEntryId: entry.id,
-      case: created.value.case,
-      created: created.value.created,
-      deliveryEligible: created.value.created,
-      snapshotSaved,
-    });
   }
 }
