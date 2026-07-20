@@ -6,6 +6,10 @@ import type {
 } from '../../repositories/contracts.js';
 import type { CaseService } from '../../services/case-service.js';
 import type { SettingsService } from '../../services/settings-service.js';
+import type {
+  TargetIdentity,
+  TargetIdentityContext,
+} from '../../services/target-identity.js';
 
 export interface StrikeDiscordPort {
   getUser(
@@ -38,6 +42,13 @@ export interface StrikeServiceDependencies {
   };
   readonly moderation: ModerationService;
   readonly discord: StrikeDiscordPort;
+  readonly targetIdentityResolver?: {
+    resolve(
+      guildId: string,
+      userId: string,
+      context?: TargetIdentityContext,
+    ): Promise<TargetIdentity>;
+  };
   readonly settings?: SettingsService;
   readonly activeMutes?: {
     getActive(
@@ -68,6 +79,7 @@ export interface StrikeChangeInput {
   readonly amount: number;
   readonly reason: string;
   readonly display?: string;
+  readonly identity?: TargetIdentity;
   readonly evidence?: readonly unknown[];
   readonly warnings?: readonly string[];
 }

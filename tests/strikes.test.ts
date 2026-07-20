@@ -44,13 +44,17 @@ describe('strikes', () => {
       actorId: '12345678901234569',
       amount: 1,
       reason: 'spam',
+      evidence: [{ rule: 'anti-invite', count: 2 }],
     });
     const call = changeLocked.mock.calls[0]?.[0] as {
       source: string;
-      caseInput: { source: string };
+      caseInput: { source: string; metadata?: unknown };
     };
     expect(call.source).toBe('AUTOMOD');
     expect(call.caseInput.source).toBe('AUTOMOD');
+    expect(call.caseInput.metadata).toEqual({
+      evidence: [{ rule: 'anti-invite', count: 2 }],
+    });
   });
 
   it('keeps check user independent from strike target option', () => {
@@ -80,15 +84,166 @@ describe('strikes', () => {
       moderation: { execute: auto },
       crossedPunishments: [punishment('BAN')],
     });
+    const identity = {
+      userId: '12345678901234568',
+      displayName: 'Canonical User',
+    };
     await service.strike({
       guildId: id,
       userId: '12345678901234568',
       actorId: '12345678901234569',
       amount: 1,
       reason: 'spam',
+      identity,
     });
     expect(auto).toHaveBeenCalled();
+    const execution = auto.mock.calls[0]?.[0] as {
+      targets: Array<{ identity?: unknown }>;
+    };
+    expect(execution.targets[0]?.identity).toEqual(identity);
     expect(cases.create).not.toHaveBeenCalled();
+  });
+
+  it('uses one resolver identity for manual strike and pardon cases', async () => {
+    const resolver = {
+      resolve: vi.fn().mockResolvedValue({
+        userId: '12345678901234568',
+        displayName: 'Resolved User',
+      }),
+    };
+    const cases = fakeCases();
+    const changeLocked = vi
+      .fn()
+      .mockResolvedValueOnce({
+        beforeCount: 0,
+        afterCount: 1,
+        delta: 1,
+        crossedPunishments: [],
+        transaction: { modCaseId: '00000000-0000-4000-8000-000000000011' },
+      })
+      .mockResolvedValueOnce({
+        beforeCount: 1,
+        afterCount: 0,
+        delta: -1,
+        crossedPunishments: [],
+        transaction: { modCaseId: '00000000-0000-4000-8000-000000000011' },
+      });
+    const service = makeService({
+      cases,
+      changeLocked,
+      targetIdentityResolver: resolver,
+    });
+    await service.strike({
+      guildId: id,
+      userId: '12345678901234568',
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'manual',
+    });
+    await service.pardon({
+      guildId: id,
+      userId: '12345678901234568',
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'manual pardon',
+      identity: { userId: '12345678901234568', displayName: 'Supplied User' },
+    });
+    expect(resolver.resolve).toHaveBeenCalledTimes(1);
+    const firstChange = changeLocked.mock.calls[0]?.[0] as {
+      caseInput: { targetDisplay: string };
+    };
+    const secondChange = changeLocked.mock.calls[1]?.[0] as {
+      caseInput: { targetDisplay: string };
+    };
+    expect(firstChange.caseInput.targetDisplay).toBe('Resolved User');
+    expect(secondChange.caseInput.targetDisplay).toBe('Supplied User');
+  });
+
+  it('keeps legacy display priority without passing it as member context', async () => {
+    const resolver = { resolve: vi.fn() };
+    const changeLocked = vi.fn().mockResolvedValue({
+      beforeCount: 0,
+      afterCount: 1,
+      delta: 1,
+      crossedPunishments: [],
+      transaction: null,
+    });
+    const service = makeService({
+      changeLocked,
+      targetIdentityResolver: resolver,
+    });
+    await service.strike({
+      guildId: id,
+      userId: '12345678901234568',
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'legacy',
+      display: 'Legacy Display',
+    });
+    const call = changeLocked.mock.calls[0]?.[0] as {
+      caseInput: { targetDisplay: string };
+    };
+    expect(call.caseInput.targetDisplay).toBe('Legacy Display');
+    expect(resolver.resolve).not.toHaveBeenCalled();
+  });
+
+  it('propagates resolver authentication failures', async () => {
+    const resolver = {
+      resolve: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('expired'), { status: 401 }),
+        ),
+    };
+    const service = makeService({ targetIdentityResolver: resolver });
+    await expect(
+      service.strike({
+        guildId: id,
+        userId: '12345678901234568',
+        actorId: '12345678901234569',
+        amount: 1,
+        reason: 'auth',
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('passes only the actual member context to the resolver', async () => {
+    const resolver = {
+      resolve: vi.fn().mockResolvedValue({
+        userId: '12345678901234568',
+        displayName: 'Member User',
+      }),
+    };
+    const service = makeService({
+      targetIdentityResolver: resolver,
+      memberDisplay: 'Actual Member',
+    });
+    await service.strike({
+      guildId: id,
+      userId: '12345678901234568',
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'member',
+    });
+    expect(resolver.resolve).toHaveBeenCalledWith(id, '12345678901234568', {
+      member: { displayName: 'Actual Member' },
+    });
+  });
+
+  it('rejects a supplied identity for a different target', async () => {
+    const service = makeService();
+    const result = await service.strike({
+      guildId: id,
+      userId: '12345678901234568',
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'mismatch',
+      identity: { userId: '12345678901234569', displayName: 'Wrong User' },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
   });
 
   it('synthesizes only a precondition-failure case and avoids duplicates', async () => {
@@ -148,6 +303,43 @@ describe('strikes', () => {
       reason: 'spam',
     });
     expect(existing.create).not.toHaveBeenCalled();
+  });
+
+  it('uses the exact identity for synthesized punishment failures', async () => {
+    const cases = fakeCases();
+    const createCanonical = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { id: '00000000-0000-4000-8000-000000000013' },
+    });
+    (cases as { createCanonical?: typeof createCanonical }).createCanonical =
+      createCanonical;
+    const identity = { userId: '12345678901234568', displayName: 'Exact User' };
+    const service = makeService({
+      cases,
+      crossedPunishments: [punishment('KICK')],
+      moderation: {
+        execute: vi.fn().mockResolvedValue({
+          ok: true,
+          value: {
+            outcomes: [{ targetId: identity.userId, ok: false, code: '403' }],
+          },
+        }),
+      },
+    });
+    await service.strike({
+      guildId: id,
+      userId: identity.userId,
+      actorId: '12345678901234569',
+      amount: 1,
+      reason: 'blocked',
+      identity,
+    });
+    expect(createCanonical).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetUserId: identity.userId,
+        targetDisplay: identity.displayName,
+      }),
+    );
   });
 
   it('executes multi-target strikes independently', async () => {
@@ -238,6 +430,8 @@ function makeService(
     moderation?: unknown;
     crossedPunishments?: unknown[];
     changeLocked?: unknown;
+    targetIdentityResolver?: unknown;
+    memberDisplay?: string | null;
   } = {},
 ) {
   return new StrikeService({
@@ -257,9 +451,20 @@ function makeService(
     moderation: (overrides.moderation ?? { execute: vi.fn() }) as never,
     discord: {
       getUser: vi.fn().mockResolvedValue({ id }),
-      getMember: vi.fn().mockResolvedValue(null),
+      getMember: vi.fn().mockResolvedValue(
+        overrides.memberDisplay === undefined
+          ? null
+          : {
+              id: '12345678901234568',
+              displayName: overrides.memberDisplay,
+              rolePosition: 0,
+            },
+      ),
       isBanned: vi.fn().mockResolvedValue(false),
       sendDm: vi.fn().mockResolvedValue(undefined),
     },
+    ...(overrides.targetIdentityResolver === undefined
+      ? {}
+      : { targetIdentityResolver: overrides.targetIdentityResolver as never }),
   });
 }

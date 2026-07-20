@@ -49,6 +49,73 @@ const make = (patch: Record<string, unknown> = {}) => {
   return { service, strike, discord, deleteMessage };
 };
 describe('AutoMod', () => {
+  it('never passes an author ID as the legacy display', async () => {
+    const { service, strike } = make();
+    await service.evaluate({
+      id: 'identity-no-display',
+      guildId: '12345678901234567',
+      channelId: '12345678901234568',
+      authorId: '12345678901234569',
+      content: 'discord.gg/abc',
+    });
+    expect(strike).toHaveBeenCalledWith(
+      expect.not.objectContaining({ display: '12345678901234569' }),
+    );
+  });
+
+  it('passes the actual member display as a canonical identity to StrikeService', async () => {
+    const { service, strike, discord } = make();
+    discord.getMember.mockResolvedValue({
+      roleIds: [],
+      canMentionEveryone: false,
+      displayName: 'Actual Author',
+    });
+    await service.evaluate({
+      id: 'identity-member',
+      guildId: '12345678901234567',
+      channelId: '12345678901234568',
+      authorId: '12345678901234569',
+      content: 'discord.gg/abc',
+    });
+    expect(strike).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity: {
+          userId: '12345678901234569',
+          displayName: 'Actual Author',
+        },
+      }),
+    );
+  });
+
+  it('skips AutoMod when the required member is missing', async () => {
+    const { service, strike, discord } = make();
+    discord.getMember.mockResolvedValue(null);
+    await service.evaluate({
+      id: 'identity-missing-member',
+      guildId: '12345678901234567',
+      channelId: '12345678901234568',
+      authorId: '12345678901234569',
+      content: 'discord.gg/abc',
+    });
+    expect(strike).not.toHaveBeenCalled();
+  });
+
+  it('propagates fatal Strike resolver authentication failures', async () => {
+    const { service, strike } = make();
+    strike.mockRejectedValueOnce(
+      Object.assign(new Error('expired'), { status: 401 }),
+    );
+    await expect(
+      service.evaluate({
+        id: 'identity-auth-failure',
+        guildId: '12345678901234567',
+        channelId: '12345678901234568',
+        authorId: '12345678901234569',
+        content: 'discord.gg/abc',
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
   it('excludes the author, bots, and duplicate users from max user mentions', async () => {
     const { service, strike } = make({ maxUserMentions: 2 });
     const message = {

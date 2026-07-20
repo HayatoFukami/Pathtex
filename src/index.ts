@@ -348,6 +348,7 @@ export function createBootstrapDependencies(
     moderation,
     discord: strikeDiscord,
     settings: settingsService,
+    targetIdentityResolver,
     activeMutes: activeMuteRepository,
     modlog: moderationLog,
   });
@@ -502,6 +503,7 @@ export function createBootstrapDependencies(
         return member
           ? {
               isOwner: member.id === member.guild.ownerId,
+              displayName: member.displayName,
               roleIds: [...member.roles.cache.keys()],
               highestRolePosition: member.roles.highest.position,
               ...(member.guild.members.me

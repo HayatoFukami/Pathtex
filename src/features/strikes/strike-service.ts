@@ -1,6 +1,5 @@
 import { err, ok, type Result } from '../../domain/result.js';
 import {
-  CaseInputSchema,
   SnowflakeSchema,
   StrikeChangeSchema,
   type StrikeResult,
@@ -11,6 +10,15 @@ import type {
   StrikeServiceDependencies,
 } from './contracts.js';
 import { parseDuration } from '../../domain/parsers.js';
+import {
+  TargetIdentitySchema,
+  fallbackTargetIdentity,
+  type TargetIdentity,
+} from '../../services/target-identity.js';
+import {
+  createCanonicalUserCase,
+  type CanonicalUserCaseInput,
+} from '../../services/case-service.js';
 
 const valid = (id: string) => SnowflakeSchema.safeParse(id).success;
 
@@ -85,6 +93,9 @@ export class StrikeService {
       return err('INVALID_INPUT', 'Invalid strike input');
     const user = await this.deps.discord.getUser(input.guildId, input.userId);
     if (!user) return err('USER_NOT_FOUND', 'User not found');
+    const identityResult = await this.resolveIdentity(input);
+    if (!identityResult.ok) return identityResult;
+    const identity = identityResult.value;
     if (input.userId === input.actorId)
       return err('TARGET_IS_SELF', 'Cannot target yourself');
     if (
@@ -93,18 +104,24 @@ export class StrikeService {
     )
       return err('TARGET_IS_BOT', 'Cannot target the bot');
     const action = source === 'PARDON' ? 'PARDON' : 'STRIKE';
-    const caseInput = CaseInputSchema.parse({
+    const caseInput = createCanonicalUserCase({
       guildId: input.guildId,
       action,
-      targetUserId: input.userId,
-      targetDisplay: input.display ?? user.display ?? input.userId,
       moderatorUserId: input.actorId,
       reason,
       source: source === 'AUTOMOD' ? 'AUTOMOD' : 'COMMAND',
       status: 'PENDING',
+      identity,
       metadata: {
-        ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
-        ...(input.warnings === undefined ? {} : { warnings: input.warnings }),
+        ...(input.evidence === undefined
+          ? {}
+          : {
+              evidence:
+                input.evidence as unknown as import('../../repositories/contracts.js').JsonValue,
+            }),
+        ...(input.warnings === undefined
+          ? {}
+          : { warnings: [...input.warnings] }),
       },
     });
     const parsed = StrikeChangeSchema.safeParse({
@@ -164,11 +181,7 @@ export class StrikeService {
         {
           guildId: input.guildId,
           actorId: input.actorId,
-          targets: [
-            input.display
-              ? { id: input.userId, display: input.display }
-              : { id: input.userId },
-          ],
+          targets: [{ id: identity.userId, identity }],
           reason: `${String(result.afterCount)}ストライクに到達: ${reason}`,
           ...(punishment.durationSeconds === null ||
           punishment.durationSeconds === undefined
@@ -209,12 +222,10 @@ export class StrikeService {
         // the case/operation boundary. Only synthesize a case for failures
         // that occurred before it could create one.
         if (failedOutcome.case) continue;
-        const failedCase = await this.deps.cases.create(
-          CaseInputSchema.parse({
+        const failedCase = await this.createCanonicalCase(
+          createCanonicalUserCase({
             guildId: input.guildId,
             action: 'AUTO_PUNISHMENT',
-            targetUserId: input.userId,
-            targetDisplay: input.display ?? user.display ?? input.userId,
             moderatorUserId: input.actorId,
             reason: `${String(result.afterCount)}ストライクに到達: ${reason}`,
             durationSeconds: punishment.durationSeconds,
@@ -224,6 +235,7 @@ export class StrikeService {
               error: failedOutcome.code ?? 'DISCORD_API_ERROR',
               punishment: punishment.action,
             },
+            identity,
           }),
         );
         if (failedCase.ok) {
@@ -244,6 +256,59 @@ export class StrikeService {
       }
     }
     return ok(result);
+  }
+
+  private async resolveIdentity(
+    input: StrikeChangeInput,
+  ): Promise<Result<TargetIdentity>> {
+    if (input.identity) {
+      const parsed = TargetIdentitySchema.safeParse(input.identity);
+      return parsed.success && parsed.data.userId === input.userId
+        ? ok(parsed.data)
+        : err('INVALID_INPUT', 'Invalid target identity');
+    }
+    if (input.display !== undefined) {
+      const parsed = TargetIdentitySchema.safeParse({
+        userId: input.userId,
+        displayName: input.display,
+      });
+      return parsed.success
+        ? ok(parsed.data)
+        : err('INVALID_INPUT', 'Invalid target identity');
+    }
+    try {
+      if (this.deps.targetIdentityResolver) {
+        const member = await this.deps.discord.getMember(
+          input.guildId,
+          input.userId,
+        );
+        const resolved = await this.deps.targetIdentityResolver.resolve(
+          input.guildId,
+          input.userId,
+          member ? { member: { displayName: member.displayName } } : {},
+        );
+        const parsed = TargetIdentitySchema.safeParse(resolved);
+        return parsed.success && parsed.data.userId === input.userId
+          ? ok(parsed.data)
+          : err('INVALID_INPUT', 'Invalid target identity');
+      }
+      return ok(fallbackTargetIdentity(input.userId));
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'status' in error &&
+        (error as { status?: unknown }).status === 401
+      )
+        throw error;
+      return err('INVALID_INPUT', 'Unable to resolve target identity');
+    }
+  }
+
+  private async createCanonicalCase(input: CanonicalUserCaseInput) {
+    if (typeof this.deps.cases.createCanonical === 'function')
+      return this.deps.cases.createCanonical(input);
+    return this.deps.cases.create(input);
   }
 
   public async check(

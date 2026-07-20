@@ -79,6 +79,7 @@ export interface AutomodDiscordPort {
     userId: string,
   ): Promise<{
     isOwner?: boolean;
+    displayName?: string;
     roleIds: readonly string[];
     canManageMessages?: boolean;
     canMentionEveryone?: boolean;

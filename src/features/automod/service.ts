@@ -20,6 +20,7 @@ import type {
   AutomodResult,
 } from './contracts.js';
 import type { MessageView } from '../logging/events.js';
+import { TargetIdentitySchema } from '../../services/target-identity.js';
 
 export class AutomodService {
   public readonly duplicate = new DuplicateLru();
@@ -567,7 +568,7 @@ export class AutomodService {
             : message.authorId,
           amount: strikeAmount,
           reason: aggregate.value.reason,
-          display: message.authorId,
+          ...this.authorIdentity(message.authorId, member.displayName),
           evidence: aggregate.value.evidence,
           warnings,
         });
@@ -580,6 +581,13 @@ export class AutomodService {
           for (const key of pendingCacheKeys)
             this.editedRules.set(key, now + 600_000);
       } catch (error) {
+        if (
+          typeof error === 'object' &&
+          error !== null &&
+          'status' in error &&
+          (error as { status?: unknown }).status === 401
+        )
+          throw error;
         warnings.push(
           error instanceof Error
             ? error.message
@@ -738,6 +746,12 @@ export class AutomodService {
       )
     );
   }
+
+  private authorIdentity(userId: string, displayName?: string) {
+    const parsed = TargetIdentitySchema.safeParse({ userId, displayName });
+    return parsed.success ? { identity: parsed.data } : {};
+  }
+
   private async hasEveryoneRoleMention(
     message: AutomodMessage,
   ): Promise<boolean> {
