@@ -1,5 +1,7 @@
 import type {
   JobDto,
+  ScheduledCaseCreationResult,
+  ScheduledCaseTerminalizationInput,
   ScheduledActionInput,
   SchedulerRepository,
 } from '../repositories/contracts.js';
@@ -89,6 +91,41 @@ export class SchedulerService {
     const parsed = z.uuid().safeParse(id);
     if (!parsed.success) return err('INVALID_INPUT', 'Invalid job ID');
     return ok(await this.repository.complete(id, this.workerId));
+  }
+  public async createScheduledCase(
+    jobId: string,
+    fallbackModeratorUserId: string,
+  ): Promise<Result<ScheduledCaseCreationResult>> {
+    const parsedId = z.uuid().safeParse(jobId);
+    const parsedModerator = snowflake.safeParse(fallbackModeratorUserId);
+    if (!parsedId.success || !parsedModerator.success)
+      return err('INVALID_INPUT', 'Invalid scheduled case identity');
+    return ok(
+      await this.repository.createScheduledCase(
+        jobId,
+        this.workerId,
+        fallbackModeratorUserId,
+      ),
+    );
+  }
+  public async terminalizeScheduledCase(
+    input: Omit<ScheduledCaseTerminalizationInput, 'workerId'>,
+  ): Promise<Result<boolean>> {
+    const parsed = z
+      .object({
+        jobId: z.uuid(),
+        executedCaseId: z.uuid(),
+        status: z.enum(['COMPLETED', 'FAILED']),
+        errorCode: z.string().max(64).nullish(),
+      })
+      .safeParse(input);
+    if (!parsed.success) return err('INVALID_INPUT', 'Invalid terminalization');
+    return ok(
+      await this.repository.terminalizeScheduledCase({
+        ...parsed.data,
+        workerId: this.workerId,
+      }),
+    );
   }
   private fail(
     id: string,

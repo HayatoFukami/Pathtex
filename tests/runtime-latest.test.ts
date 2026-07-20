@@ -32,6 +32,8 @@ const repository = (): SchedulerRepository => ({
   claimDue: vi.fn(() => Promise.resolve([job])),
   complete: vi.fn(() => Promise.resolve(true)),
   fail: vi.fn(() => Promise.resolve(true)),
+  createScheduledCase: vi.fn(),
+  terminalizeScheduledCase: vi.fn(),
 });
 
 describe('runtime recovery and scheduler', () => {

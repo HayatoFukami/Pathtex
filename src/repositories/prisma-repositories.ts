@@ -14,6 +14,8 @@ import type {
   ExternalCaseCreationResult,
   RaidResultDto,
   JobDto,
+  ScheduledCaseCreationResult,
+  ScheduledCaseTerminalizationInput,
   MessageSnapshotInput,
   MemberSnapshotInput,
   JsonValue,
@@ -69,6 +71,19 @@ import type { GeneralRepository } from './contracts.js';
 import type { Prisma as PrismaTypes } from '@prisma/client';
 
 type DbTransaction = PrismaTypes.TransactionClient;
+
+function canonicalScheduledTargetDisplay(value: string): string | null {
+  const display = value.normalize('NFKC').trim();
+  if (
+    display.length > 0 &&
+    Array.from(display).length <= 128 &&
+    !/^\d{17,20}$/u.test(display) &&
+    !/^<@!?\d{17,20}>$/u.test(display) &&
+    !/\(\d{17,20}\)$/u.test(display)
+  )
+    return display;
+  return null;
+}
 
 export class PrismaGeneralRepository implements GeneralRepository {
   public constructor(private readonly db: PrismaClient) {}
@@ -631,6 +646,133 @@ export class PrismaSchedulerRepository implements SchedulerRepository {
       select: { status: true },
     });
     return job?.status ?? null;
+  }
+  public async createScheduledCase(
+    jobId: string,
+    workerId: string,
+    fallbackModeratorUserId: string,
+  ): Promise<ScheduledCaseCreationResult> {
+    z.uuid().parse(jobId);
+    WorkerIdSchema.parse(workerId);
+    SnowflakeSchema.parse(fallbackModeratorUserId);
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id FROM scheduled_actions WHERE id = ${jobId}::uuid FOR UPDATE`,
+      );
+      const job = await tx.scheduledAction.findUnique({ where: { id: jobId } });
+      if (!job || job.status !== 'RUNNING' || job.lockedBy !== workerId)
+        throw new Error('Scheduled job is not owned by worker');
+      if (job.type !== 'UNBAN' && job.type !== 'UNMUTE')
+        throw new Error('Scheduled case is only supported for UNBAN/UNMUTE');
+      const payload = z
+        .object({ guildId: SnowflakeSchema, userId: SnowflakeSchema })
+        .safeParse(job.payload);
+      if (
+        !payload.success ||
+        job.targetUserId === null ||
+        job.targetUserId !== payload.data.userId ||
+        job.guildId !== payload.data.guildId
+      )
+        throw new Error('Scheduled job target does not match its payload');
+      if (job.executedCaseId) {
+        const existing = await tx.moderationCase.findUnique({
+          where: { id: job.executedCaseId },
+        });
+        if (!existing) throw new Error('Scheduled case reference is missing');
+        return {
+          case: validateDbOutput(existing),
+          created: false,
+          terminalization: { jobId, workerId, executedCaseId: existing.id },
+        };
+      }
+      const originCandidate = job.createdByCaseId
+        ? await tx.moderationCase.findUnique({
+            where: { id: job.createdByCaseId },
+          })
+        : null;
+      const originMatchesJob =
+        originCandidate?.guildId === job.guildId &&
+        originCandidate.targetUserId === job.targetUserId;
+      const originDisplay = originMatchesJob
+        ? canonicalScheduledTargetDisplay(originCandidate.targetDisplay)
+        : null;
+      const origin =
+        originCandidate?.guildId === job.guildId &&
+        originCandidate.targetUserId === job.targetUserId &&
+        originDisplay !== null
+          ? originCandidate
+          : null;
+      const created = await allocateCase(tx, {
+        guildId: job.guildId,
+        action: job.type === 'UNBAN' ? 'UNBAN' : 'UNMUTE',
+        targetUserId: job.targetUserId,
+        targetDisplay: originDisplay ?? '不明なユーザー',
+        moderatorUserId: origin?.moderatorUserId ?? fallbackModeratorUserId,
+        reason: origin?.reason ?? null,
+        durationSeconds: null,
+        source: 'SCHEDULED',
+        status: 'PENDING',
+        metadata: {},
+      });
+      await tx.scheduledAction.update({
+        where: { id: jobId },
+        data: { executedCaseId: created.id },
+      });
+      return {
+        case: validateDbOutput(created),
+        created: true,
+        terminalization: { jobId, workerId, executedCaseId: created.id },
+      };
+    });
+  }
+  public async terminalizeScheduledCase(
+    input: ScheduledCaseTerminalizationInput,
+  ): Promise<boolean> {
+    z.uuid().parse(input.jobId);
+    z.uuid().parse(input.executedCaseId);
+    WorkerIdSchema.parse(input.workerId);
+    z.enum(['COMPLETED', 'FAILED', 'PARTIAL']).parse(input.status);
+    if (input.errorCode !== undefined && input.errorCode !== null)
+      ErrorCodeSchema.parse(input.errorCode);
+    return this.db.$transaction(async (tx) => {
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id FROM scheduled_actions WHERE id = ${input.jobId}::uuid FOR UPDATE`,
+      );
+      const job = await tx.scheduledAction.findUnique({
+        where: { id: input.jobId },
+      });
+      if (
+        !job ||
+        job.status !== 'RUNNING' ||
+        job.lockedBy !== input.workerId ||
+        job.executedCaseId !== input.executedCaseId
+      )
+        return false;
+      const caseUpdated = await tx.moderationCase.updateMany({
+        where: { id: input.executedCaseId, status: 'PENDING' },
+        data: {
+          status: input.status,
+          errorCode: input.errorCode ?? null,
+        },
+      });
+      if (caseUpdated.count !== 1) return false;
+      const jobUpdated = await tx.scheduledAction.updateMany({
+        where: {
+          id: input.jobId,
+          status: 'RUNNING',
+          lockedBy: input.workerId,
+          executedCaseId: input.executedCaseId,
+        },
+        data: {
+          status: input.status === 'FAILED' ? 'FAILED' : 'COMPLETED',
+          lockedAt: null,
+          lockedBy: null,
+        },
+      });
+      if (jobUpdated.count !== 1)
+        throw new Error('Scheduled job terminalization CAS failed');
+      return true;
+    });
   }
 }
 

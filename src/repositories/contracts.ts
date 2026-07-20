@@ -283,6 +283,20 @@ export interface ExternalCaseCreationResult {
   case: CaseDto;
   created: boolean;
 }
+export interface ScheduledCaseTerminalization {
+  readonly jobId: string;
+  readonly workerId: string;
+  readonly executedCaseId: string;
+}
+export interface ScheduledCaseCreationResult {
+  readonly case: CaseDto;
+  readonly created: boolean;
+  readonly terminalization: ScheduledCaseTerminalization;
+}
+export interface ScheduledCaseTerminalizationInput extends ScheduledCaseTerminalization {
+  readonly status: 'COMPLETED' | 'FAILED';
+  readonly errorCode?: string | null | undefined;
+}
 export interface JobDto {
   id: string;
   guildId: string;
@@ -882,6 +896,14 @@ export interface SchedulerRepository {
     type: ScheduledActionInput['type'],
   ): Promise<JobDto | null>;
   getStatus(id: string): Promise<JobDto['status'] | null>;
+  createScheduledCase(
+    jobId: string,
+    workerId: string,
+    fallbackModeratorUserId: string,
+  ): Promise<ScheduledCaseCreationResult>;
+  terminalizeScheduledCase(
+    input: ScheduledCaseTerminalizationInput,
+  ): Promise<boolean>;
 }
 export interface DepartureRepository {
   markLeft(input: Departure): Promise<LifecycleDto>;

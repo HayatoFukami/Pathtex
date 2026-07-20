@@ -16,6 +16,7 @@ import {
   PrismaRetentionRepository,
 } from '../../src/repositories/prisma-repositories.js';
 import { CaseService } from '../../src/services/case-service.js';
+import { SchedulerService } from '../../src/services/scheduler-service.js';
 import {
   CaseDtoSchema,
   JobDtoSchema,
@@ -182,6 +183,195 @@ integration('PostgreSQL persistence foundation', () => {
       getDb()
         .$executeRaw`UPDATE scheduled_actions SET executed_case_id = ${'00000000-0000-4000-8000-000000000099'}::uuid WHERE id = ${nullJob.id}::uuid`,
     ).rejects.toThrow(/foreign key|scheduled_actions_executed_case_id_fkey/i);
+  });
+
+  it('creates one scheduled case across workers, retries, and legacy jobs', async () => {
+    const guildId = '12345678901234610';
+    const targetUserId = '12345678901234611';
+    const moderatorUserId = '12345678901234612';
+    const cases = new PrismaCaseRepository(getDb());
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const origin = await cases.createWithNumber({
+      guildId,
+      action: 'MUTE',
+      targetUserId,
+      targetDisplay: 'snapshot-name',
+      moderatorUserId,
+      source: 'COMMAND',
+      status: 'COMPLETED',
+      reason: 'temporary mute',
+    });
+    const job = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId,
+      channelId: null,
+      type: 'UNMUTE',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: targetUserId },
+      createdByCaseId: origin.id,
+    });
+    const workerOne = new SchedulerService(scheduler, {
+      workerId: 'worker-one',
+    });
+    const workerTwo = new SchedulerService(scheduler, {
+      workerId: 'worker-two',
+    });
+    const claimed = await workerOne.claimDue(1);
+    expect(claimed.ok).toBe(true);
+    const otherClaim = await workerTwo.claimDue(1);
+    expect(otherClaim.ok).toBe(true);
+    if (!otherClaim.ok) throw new Error('second worker claim failed');
+    expect(otherClaim.value).toHaveLength(0);
+    await expect(
+      workerTwo.createScheduledCase(job.id, moderatorUserId),
+    ).rejects.toThrow(/owned by worker/i);
+    const [first, retry] = await Promise.all([
+      workerOne.createScheduledCase(job.id, moderatorUserId),
+      workerOne.createScheduledCase(job.id, moderatorUserId),
+    ]);
+    expect(first.ok && retry.ok).toBe(true);
+    if (!first.ok || !retry.ok)
+      throw new Error('scheduled case creation failed');
+    expect(first.value.created || retry.value.created).toBe(true);
+    expect(first.value.case.id).toBe(retry.value.case.id);
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, source: 'SCHEDULED' },
+      }),
+    ).toBe(1);
+    expect(first.value.case.targetDisplay).toBe('snapshot-name');
+    const wrongOwnerTerminalization = await workerTwo.terminalizeScheduledCase({
+      jobId: job.id,
+      executedCaseId: first.value.case.id,
+      status: 'COMPLETED',
+    });
+    expect(
+      wrongOwnerTerminalization.ok && wrongOwnerTerminalization.value,
+    ).toBe(false);
+    await getDb().scheduledAction.update({
+      where: { id: job.id },
+      data: { status: 'PENDING', lockedAt: null, lockedBy: null },
+    });
+    const reclaimed = await workerTwo.claimDue(1);
+    expect(reclaimed.ok).toBe(true);
+    if (!reclaimed.ok) throw new Error('reclaimed job claim failed');
+    expect(reclaimed.value).toHaveLength(1);
+    const reclaimedCase = await workerTwo.createScheduledCase(
+      job.id,
+      moderatorUserId,
+    );
+    expect(reclaimedCase.ok).toBe(true);
+    if (!reclaimedCase.ok) throw new Error('reclaimed case creation failed');
+    expect(reclaimedCase.value.created).toBe(false);
+    expect(reclaimedCase.value.case.id).toBe(first.value.case.id);
+    const terminalized = await workerTwo.terminalizeScheduledCase({
+      jobId: job.id,
+      executedCaseId: first.value.case.id,
+      status: 'COMPLETED',
+    });
+    expect(terminalized.ok && terminalized.value).toBe(true);
+    const duplicateTerminalization = await workerTwo.terminalizeScheduledCase({
+      jobId: job.id,
+      executedCaseId: first.value.case.id,
+      status: 'COMPLETED',
+    });
+    expect(duplicateTerminalization.ok && duplicateTerminalization.value).toBe(
+      false,
+    );
+    await expect(
+      getDb().scheduledAction.findUnique({ where: { id: job.id } }),
+    ).resolves.toMatchObject({
+      status: 'COMPLETED',
+      executedCaseId: first.value.case.id,
+    });
+
+    const staleJob = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId: '12345678901234614',
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: '12345678901234614' },
+    });
+    const staleInitialClaim = await workerOne.claimDue(1);
+    expect(staleInitialClaim.ok).toBe(true);
+    if (!staleInitialClaim.ok) throw new Error('stale initial claim failed');
+    expect(staleInitialClaim.value).toHaveLength(1);
+    await getDb().scheduledAction.update({
+      where: { id: staleJob.id },
+      data: { lockedAt: new Date(Date.now() - 6 * 60_000) },
+    });
+    expect(await workerTwo.recoverStale()).toBe(1);
+    const staleClaim = await workerTwo.claimDue(1);
+    expect(staleClaim.ok).toBe(true);
+    if (!staleClaim.ok) throw new Error('stale job claim failed');
+    expect(staleClaim.value).toHaveLength(1);
+    const recoveredCase = await workerTwo.createScheduledCase(
+      staleJob.id,
+      moderatorUserId,
+    );
+    expect(recoveredCase.ok).toBe(true);
+    if (!recoveredCase.ok) throw new Error('recovered case creation failed');
+    const failedTerminalization = await workerTwo.terminalizeScheduledCase({
+      jobId: staleJob.id,
+      executedCaseId: recoveredCase.value.case.id,
+      status: 'FAILED',
+      errorCode: 'DISCORD_API_ERROR',
+    });
+    expect(failedTerminalization.ok && failedTerminalization.value).toBe(true);
+    await expect(
+      getDb().scheduledAction.findUnique({ where: { id: staleJob.id } }),
+    ).resolves.toMatchObject({ status: 'FAILED' });
+    await expect(
+      getDb().moderationCase.findUnique({
+        where: { id: recoveredCase.value.case.id },
+      }),
+    ).resolves.toMatchObject({
+      status: 'FAILED',
+      errorCode: 'DISCORD_API_ERROR',
+    });
+
+    const mismatchedOriginJob = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId: '12345678901234615',
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: '12345678901234615' },
+      createdByCaseId: origin.id,
+    });
+    const mismatchedClaim = await workerTwo.claimDue(1);
+    expect(mismatchedClaim.ok).toBe(true);
+    if (!mismatchedClaim.ok) throw new Error('mismatched origin claim failed');
+    expect(mismatchedClaim.value).toHaveLength(1);
+    const mismatchedCase = await workerTwo.createScheduledCase(
+      mismatchedOriginJob.id,
+      moderatorUserId,
+    );
+    expect(mismatchedCase.ok).toBe(true);
+    if (!mismatchedCase.ok) throw new Error('mismatched origin case failed');
+    expect(mismatchedCase.value.case.targetDisplay).toBe('不明なユーザー');
+
+    const legacyJob = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId: '12345678901234613',
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: '12345678901234613' },
+    });
+    const legacyClaim = await workerTwo.claimDue(1);
+    expect(legacyClaim.ok).toBe(true);
+    if (!legacyClaim.ok) throw new Error('legacy worker claim failed');
+    expect(legacyClaim.value).toHaveLength(1);
+    const legacy = await workerTwo.createScheduledCase(
+      legacyJob.id,
+      moderatorUserId,
+    );
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) throw new Error('legacy scheduled case creation failed');
+    expect(legacy.value.created).toBe(true);
+    expect(legacy.value.case.targetDisplay).toBe('不明なユーザー');
   });
 
   it('upgrades legacy rows without changing job status or data', async () => {
