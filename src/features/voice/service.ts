@@ -6,7 +6,13 @@ import type {
   VoiceResult,
   VoiceSession,
   VoiceOutcome,
+  VoiceIdentityResolver,
 } from './contracts.js';
+import {
+  fallbackTargetIdentity,
+  TargetIdentitySchema,
+  type TargetIdentity,
+} from '../../services/target-identity.js';
 
 const limit = async <T>(
   items: readonly T[],
@@ -24,6 +30,26 @@ const limit = async <T>(
     Array.from({ length: Math.min(concurrency, items.length) }, worker),
   );
 };
+
+const identityFor = (userId: string, displayName?: unknown): TargetIdentity => {
+  const parsed = TargetIdentitySchema.safeParse({ userId, displayName });
+  if (parsed.success) return parsed.data;
+  try {
+    const fallback = TargetIdentitySchema.safeParse(
+      fallbackTargetIdentity(userId),
+    );
+    if (fallback.success) return fallback.data;
+  } catch {
+    // Legacy unit callers may use short fixture IDs.
+  }
+  return { userId, displayName: '不明なユーザー' };
+};
+const outcomeIdentity = (
+  outcomes: readonly VoiceOutcome[],
+  userId: string,
+): TargetIdentity =>
+  outcomes.find((outcome) => outcome.userId === userId)?.identity ??
+  identityFor(userId);
 class Semaphore {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
@@ -75,7 +101,19 @@ export class VoiceService {
     private readonly port: VoicePort,
     private readonly cases?: VoiceCasePort,
     private readonly now = () => new Date(),
+    private readonly identityResolver?: VoiceIdentityResolver,
   ) {}
+  private resolveIdentity(
+    guildId: string,
+    userId: string,
+    displayName?: unknown,
+  ) {
+    return this.identityResolver
+      ? this.identityResolver.resolve(guildId, userId, {
+          member: { displayName },
+        })
+      : Promise.resolve(identityFor(userId, displayName));
+  }
   public member(guildId: string, userId: string): Promise<VoiceMember | null> {
     return this.port.member(guildId, userId);
   }
@@ -94,7 +132,19 @@ export class VoiceService {
     const resolved = await Promise.all(
       uniqueIds.map(async (id) => ({
         id,
-        member: await this.port.member(guildId, id),
+        member: await Promise.resolve(this.port.member(guildId, id)).catch(
+          (error: unknown) => {
+            if (
+              error &&
+              typeof error === 'object' &&
+              (('status' in error &&
+                (error as { status?: unknown }).status === 401) ||
+                ('code' in error && (error as { code?: unknown }).code === 401))
+            )
+              throw error;
+            return null;
+          },
+        ),
       })),
     );
     const missing = resolved
@@ -106,11 +156,14 @@ export class VoiceService {
       resolved.flatMap((item) => (item.member ? [item.member] : [])),
     );
     if (!result.ok) return result;
-    const missingOutcomes: VoiceOutcome[] = missing.map((userId) => ({
-      userId,
-      ok: false,
-      code: 'MEMBER_NOT_FOUND',
-    }));
+    const missingOutcomes: VoiceOutcome[] = await Promise.all(
+      missing.map(async (userId) => ({
+        userId,
+        identity: await this.resolveIdentity(guildId, userId),
+        ok: false,
+        code: 'MEMBER_NOT_FOUND' as const,
+      })),
+    );
     await Promise.all(
       missing.map(async (targetUserId) => {
         const created = await Promise.resolve(
@@ -118,6 +171,9 @@ export class VoiceService {
             guildId,
             action: 'VOICEKICK',
             targetUserId,
+            identity:
+              missingOutcomes.find((item) => item.userId === targetUserId)
+                ?.identity ?? identityFor(targetUserId),
             moderatorUserId: actorId,
             status: 'FAILED',
             errorCode: 'MEMBER_NOT_FOUND',
@@ -287,6 +343,22 @@ export class VoiceService {
           }
         }
       });
+      const identities = new Map<string, TargetIdentity>();
+      await Promise.all(
+        [...new Set(outcomes.map((outcome) => outcome.userId))].map(
+          async (userId) => {
+            const member = members.find((item) => item.id === userId);
+            const identity = await this.resolveIdentity(
+              guildId,
+              userId,
+              member?.displayName,
+            );
+            identities.set(userId, identity);
+          },
+        ),
+      );
+      for (const outcome of outcomes)
+        Object.assign(outcome, { identity: identities.get(outcome.userId) });
       await Promise.all(
         [
           ...success.map((targetUserId) => ({
@@ -303,6 +375,7 @@ export class VoiceService {
               guildId,
               action: 'VOICEKICK',
               targetUserId,
+              identity: outcomeIdentity(outcomes, targetUserId),
               moderatorUserId: actorId,
               status,
             });

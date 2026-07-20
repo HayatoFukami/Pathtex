@@ -39,6 +39,7 @@ import {
   PrismaStrikeRepository,
 } from './repositories/prisma-repositories.js';
 import { CaseService } from './services/case-service.js';
+import { createCanonicalUserCase } from './services/case-service.js';
 import { SchedulerService } from './services/scheduler-service.js';
 import { SettingsService } from './services/settings-service.js';
 import { CorrelationCache } from './services/correlation-cache.js';
@@ -552,6 +553,7 @@ export function createBootstrapDependencies(
         (await client?.client.guilds.fetch(guildId))?.name ?? 'このサーバー',
     },
     modlog: moderationLog,
+    targetIdentityResolver,
   });
   const schedulerDispatcher = {
     available: true,
@@ -735,6 +737,7 @@ export function createBootstrapDependencies(
         ok?: boolean;
         code?: string;
         caseNumber?: number;
+        identity?: { displayName?: string; userId?: string };
       };
       await moderationLog.write(
         guildId,
@@ -745,7 +748,7 @@ export function createBootstrapDependencies(
           timezone: 'UTC',
           embed: {
             title: 'VoiceKick',
-            description: `対象: ${details.userId ?? '不明'}\n結果: ${details.ok ? '成功' : (details.code ?? '失敗')}${details.caseNumber === undefined ? '' : `\nCase #${String(details.caseNumber)}`}`,
+            description: `対象: ${details.identity?.displayName ?? '不明'} (${details.identity?.userId ?? details.userId ?? '不明'})\n結果: ${details.ok ? '成功' : (details.code ?? '失敗')}${details.caseNumber === undefined ? '' : `\nCase #${String(details.caseNumber)}`}`,
             fields: [
               { name: '実行者', value: details.moderatorUserId ?? '不明' },
             ],
@@ -755,33 +758,42 @@ export function createBootstrapDependencies(
       );
     },
   });
-  const voice = new VoiceService(voicePort, {
-    create: async (input) => {
-      const result = await caseService.create({
-        guildId: input.guildId,
-        action: input.action,
-        targetUserId: input.targetUserId,
-        targetDisplay: input.targetUserId,
-        moderatorUserId: input.moderatorUserId,
-        reason: null,
-        source: 'COMMAND',
-        status: input.status ?? 'COMPLETED',
-        metadata: input.errorCode ? { errorCode: input.errorCode } : {},
-      });
-      if (!result.ok) {
-        logger.error(
-          {
-            event: 'voice.case_failed',
+  const voice = new VoiceService(
+    voicePort,
+    {
+      create: async (input) => {
+        const result = await caseService.createCanonical(
+          createCanonicalUserCase({
             guildId: input.guildId,
-            errorName: result.error.name,
-          },
-          'Voice case creation failed',
+            action: input.action,
+            identity: input.identity ?? {
+              userId: input.targetUserId,
+              displayName: '不明なユーザー',
+            },
+            moderatorUserId: input.moderatorUserId,
+            reason: null,
+            source: 'COMMAND',
+            status: input.status ?? 'COMPLETED',
+            metadata: input.errorCode ? { errorCode: input.errorCode } : {},
+          }),
         );
-        return null;
-      }
-      return { caseId: result.value.id, caseNumber: result.value.caseNumber };
+        if (!result.ok) {
+          logger.error(
+            {
+              event: 'voice.case_failed',
+              guildId: input.guildId,
+              errorName: result.error.name,
+            },
+            'Voice case creation failed',
+          );
+          return null;
+        }
+        return { caseId: result.value.id, caseNumber: result.value.caseNumber };
+      },
     },
-  });
+    undefined,
+    targetIdentityResolver,
+  );
   const permissionPolicy = createPermissionPolicy({
     getModRoleId: async (guildId) =>
       (await settings.get(guildId))?.modRoleId ?? null,
@@ -1271,6 +1283,7 @@ function installGatewayListeners(
           guildId: member.guild.id,
           userId: member.id,
           isBot: member.user.bot,
+          displayName: member.displayName,
         });
         await moderationDiscord.withRoleMutationLock(
           member.guild.id,

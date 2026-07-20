@@ -30,7 +30,9 @@ describe('raid sliding window', () => {
     const service = new RaidService({
       automod: { getOrCreate: vi.fn(), update },
       settings: {},
-      repository: {},
+      repository: {
+        recordJoin: vi.fn(() => Promise.resolve()),
+      },
       scheduler: {},
       moderation: {},
       cases: {},
@@ -139,5 +141,173 @@ describe('raid sliding window', () => {
       20,
       30,
     );
+  });
+
+  const lockdownService = (overrides: Record<string, unknown> = {}) => {
+    const execute = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        value: {
+          action: 'KICK',
+          outcomes: [{ targetId: '22345678901234567', ok: true }],
+        },
+      }),
+    );
+    const service = new RaidService({
+      automod: {
+        getOrCreate: vi.fn(() =>
+          Promise.resolve({
+            autoRaidEnabled: false,
+            autoRaidJoinCount: 10,
+            autoRaidWindowSeconds: 10,
+          }),
+        ),
+      },
+      settings: {
+        get: vi.fn(() =>
+          Promise.resolve({
+            ok: true,
+            value: { raidModeEnabled: true, raidModeSource: 'MANUAL' },
+          }),
+        ),
+      },
+      repository: {
+        recordJoin: vi.fn(() => Promise.resolve()),
+      },
+      scheduler: {},
+      moderation: { execute },
+      cases: {},
+      discord: {
+        getBotUserId: vi.fn(() => Promise.resolve('12345678901234567')),
+        getGuildName: vi.fn(() => Promise.resolve('guild')),
+        sendDm: vi.fn(() => Promise.resolve()),
+      },
+      ...overrides,
+    } as never);
+    return { service, execute };
+  };
+
+  it('passes the joining member identity resolved from event context to Kick', async () => {
+    const resolver = {
+      resolve: vi.fn((_guild: string, userId: string) =>
+        Promise.resolve({ userId, displayName: 'joined member' }),
+      ),
+    };
+    const { service, execute } = lockdownService({
+      targetIdentityResolver: resolver,
+    });
+    await service.memberAdd({
+      guildId: '12345678901234567',
+      userId: '22345678901234567',
+      isBot: false,
+      displayName: 'joined member',
+    });
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [
+          {
+            id: '22345678901234567',
+            identity: {
+              userId: '22345678901234567',
+              displayName: 'joined member',
+            },
+          },
+        ],
+      }),
+      'KICK',
+      expect.anything(),
+    );
+  });
+
+  it('passes a fallback identity when resolving the joining member fails', async () => {
+    const resolver = {
+      resolve: vi.fn(() => Promise.reject(new Error('lookup failed'))),
+    };
+    const { service, execute } = lockdownService({
+      targetIdentityResolver: resolver,
+    });
+    await service.memberAdd({
+      guildId: '12345678901234567',
+      userId: '22345678901234567',
+      isBot: false,
+    });
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [
+          {
+            id: '22345678901234567',
+            identity: {
+              userId: '22345678901234567',
+              displayName: '不明なユーザー',
+            },
+          },
+        ],
+      }),
+      'KICK',
+      expect.anything(),
+    );
+  });
+
+  it('propagates a fatal resolver 401', async () => {
+    const resolver = {
+      resolve: vi.fn(() =>
+        Promise.reject(
+          Object.assign(new Error('unauthorized'), { status: 401 }),
+        ),
+      ),
+    };
+    const { service, execute } = lockdownService({
+      targetIdentityResolver: resolver,
+    });
+    await expect(
+      service.memberAdd({
+        guildId: '12345678901234567',
+        userId: '22345678901234567',
+        isBot: false,
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the identity on a failed Kick outcome', async () => {
+    const execute = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        value: {
+          action: 'KICK',
+          outcomes: [
+            {
+              targetId: '22345678901234567',
+              ok: false,
+              code: 'DISCORD_API_ERROR',
+              identity: {
+                userId: '22345678901234567',
+                displayName: 'joined member',
+              },
+            },
+          ],
+        },
+      }),
+    );
+    const { service } = lockdownService({ moderation: { execute } });
+    await service.memberAdd({
+      guildId: '12345678901234567',
+      userId: '22345678901234567',
+      isBot: false,
+      identity: {
+        userId: '22345678901234567',
+        displayName: 'joined member',
+      },
+    });
+    expect(await execute.mock.results[0]?.value).toMatchObject({
+      value: {
+        outcomes: [
+          {
+            ok: false,
+            identity: { displayName: 'joined member' },
+          },
+        ],
+      },
+    });
   });
 });

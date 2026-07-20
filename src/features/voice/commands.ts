@@ -2,6 +2,10 @@ import { PermissionFlagsBits } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import type { VoiceService } from './service.js';
 import { parseVoiceTargets } from './validation.js';
+import {
+  fallbackTargetIdentity,
+  formatTargetIdentity,
+} from '../../services/target-identity.js';
 const data = (
   name: string,
   description: string,
@@ -51,7 +55,7 @@ export function voiceCommands(
       );
       await interaction.editReply(
         result.ok
-          ? `完了: 成功 ${String(result.value.success.length)} / 失敗 ${String(result.value.failed.length)}\n${result.value.outcomes.map((outcome) => `${outcome.userId}: ${outcome.ok ? `成功${outcome.caseNumber === undefined ? '' : ` Case #${String(outcome.caseNumber)}`}` : (outcome.code ?? '失敗')}`).join('\n')}`
+          ? `完了: 成功 ${String(result.value.success.length)} / 失敗 ${String(result.value.failed.length)}\n${result.value.outcomes.map((outcome) => `${formatTargetIdentity(outcome.identity ?? fallbackTargetIdentity(outcome.userId))}: ${outcome.ok ? `成功${outcome.caseNumber === undefined ? '' : ` Case #${String(outcome.caseNumber)}`}` : (outcome.code ?? '失敗')}`).join('\n')}`
           : result.error.message,
       );
     },

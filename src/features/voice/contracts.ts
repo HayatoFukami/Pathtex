@@ -1,4 +1,15 @@
 import type { Result } from '../../domain/result.js';
+import type { TargetIdentity } from '../../services/target-identity.js';
+
+export interface VoiceIdentityResolver {
+  resolve(
+    guildId: string,
+    userId: string,
+    context?: {
+      member?: { displayName?: unknown } | null;
+    },
+  ): Promise<TargetIdentity>;
+}
 
 export interface VoiceMember {
   readonly id: string;
@@ -53,6 +64,7 @@ export interface VoiceCasePort {
     guildId: string;
     action: 'VOICEKICK';
     targetUserId: string;
+    readonly identity?: TargetIdentity;
     moderatorUserId: string;
     readonly status?: 'COMPLETED' | 'PARTIAL' | 'FAILED';
     readonly errorCode?: string;
@@ -63,6 +75,7 @@ export interface VoiceCasePort {
 }
 export interface VoiceOutcome {
   readonly userId: string;
+  readonly identity?: TargetIdentity;
   readonly ok: boolean;
   readonly code?: string;
   readonly caseId?: string;

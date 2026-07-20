@@ -593,6 +593,10 @@ describe('tools and voice services', () => {
     );
     if (!result.ok) throw result.error;
     expect(result.value.failed).toEqual(['12345678901234567']);
+    expect(result.value.outcomes[0]?.identity).toEqual({
+      userId: '12345678901234567',
+      displayName: '不明なユーザー',
+    });
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ errorCode: 'MEMBER_NOT_FOUND' }),
     );
@@ -637,6 +641,7 @@ describe('tools and voice services', () => {
       id: '12345678901234567',
       bot: false,
       channelId: 'source',
+      displayName: 'Resolved Member',
       categoryId: null,
     };
     const port: VoicePort = {
@@ -655,6 +660,10 @@ describe('tools and voice services', () => {
       member.id,
     ]);
     if (!result.ok) throw result.error;
+    expect(result.value.outcomes[0]?.identity).toEqual({
+      userId: member.id,
+      displayName: 'Resolved Member',
+    });
     expect(result.value.outcomes).toHaveLength(1);
     expect(modlog).toHaveBeenCalledTimes(1);
     expect(modlog).toHaveBeenCalledWith(
@@ -662,6 +671,119 @@ describe('tools and voice services', () => {
       expect.objectContaining({ userId: member.id, ok: true }),
       undefined,
     );
+  });
+  it('retains fallback identity when VoiceKick member lookup fails', async () => {
+    const port: VoicePort = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member: vi.fn().mockRejectedValue(new Error('discord unavailable')),
+      dm: vi.fn(),
+    };
+    const result = await new VoiceService(port).voiceKickTargets('g', 'actor', [
+      '12345678901234567',
+    ]);
+    if (!result.ok) throw result.error;
+    expect(result.value.outcomes[0]?.identity).toEqual({
+      userId: '12345678901234567',
+      displayName: '不明なユーザー',
+    });
+    expect(result.value.outcomes[0]?.code).toBe('MEMBER_NOT_FOUND');
+  });
+  it('resolves a missing VoiceKick target from the shared identity resolver', async () => {
+    const resolver = {
+      resolve: vi.fn().mockResolvedValue({
+        userId: '12345678901234567',
+        displayName: 'Recovered User',
+      }),
+    };
+    const create = vi.fn().mockResolvedValue({ caseId: 'recovered-case' });
+    const port = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member: vi.fn().mockResolvedValue(null),
+      dm: vi.fn(),
+    } satisfies VoicePort;
+    const result = await new VoiceService(
+      port,
+      { create },
+      undefined,
+      resolver,
+    ).voiceKickTargets('guild', 'actor', ['12345678901234567']);
+    if (!result.ok) throw result.error;
+    expect(result.value.outcomes[0]?.identity?.displayName).toBe(
+      'Recovered User',
+    );
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity: {
+          userId: '12345678901234567',
+          displayName: 'Recovered User',
+        },
+      }),
+    );
+    expect(resolver.resolve).toHaveBeenCalledTimes(1);
+  });
+  it('resolves invalid member display through the shared resolver once', async () => {
+    const identity = { userId: '12345678901234567', displayName: 'User Name' };
+    const resolver = { resolve: vi.fn().mockResolvedValue(identity) };
+    const create = vi.fn().mockResolvedValue({ caseId: 'case' });
+    const modlog = vi.fn();
+    const port: VoicePort = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn().mockResolvedValue('temporary'),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member: vi.fn().mockResolvedValue({
+        id: identity.userId,
+        bot: false,
+        channelId: 'source',
+        displayName: '12345678901234567',
+      }),
+      dm: vi.fn(),
+      modlog,
+    };
+    const result = await new VoiceService(
+      port,
+      { create },
+      undefined,
+      resolver,
+    ).voiceKickTargets('guild', 'actor', [identity.userId]);
+    if (!result.ok) throw result.error;
+    expect(resolver.resolve).toHaveBeenCalledTimes(1);
+    expect(result.value.outcomes[0]?.identity).toBe(identity);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ identity }));
+    expect(modlog).toHaveBeenCalledWith(
+      'guild',
+      expect.objectContaining({ identity }),
+      'case',
+    );
+  });
+  it('propagates fatal Discord 401 errors from VoiceKick resolution', async () => {
+    const port = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member: vi.fn().mockRejectedValue({ status: 401 }),
+      dm: vi.fn(),
+    } satisfies VoicePort;
+    await expect(
+      new VoiceService(port).voiceKickTargets('guild', 'actor', [
+        '12345678901234567',
+      ]),
+    ).rejects.toMatchObject({ status: 401 });
   });
   it('rejects a VoiceMove target the actor or bot cannot view', async () => {
     const port: VoicePort = {

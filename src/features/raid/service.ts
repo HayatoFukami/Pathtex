@@ -4,6 +4,12 @@ import {
   CaseInputSchema,
 } from '../../repositories/contracts.js';
 import type { RaidDependencies } from './contracts.js';
+import type { RaidMemberAdd } from './contracts.js';
+import {
+  TargetIdentitySchema,
+  fallbackTargetIdentity,
+  type TargetIdentity,
+} from '../../services/target-identity.js';
 
 const validId = (value: string) => SnowflakeSchema.safeParse(value).success;
 const reasonOf = (reason?: string) => reason?.trim() || '理由未指定';
@@ -117,11 +123,7 @@ export class RaidService {
     return ok({ settings, ...(created.ok ? { case: created.value } : {}) });
   }
 
-  public async memberAdd(member: {
-    guildId: string;
-    userId: string;
-    isBot: boolean;
-  }): Promise<void> {
+  public async memberAdd(member: RaidMemberAdd): Promise<void> {
     if (member.isBot) return;
     const now = this.clock();
     const auto = await this.deps.automod.getOrCreate(member.guildId);
@@ -173,11 +175,12 @@ export class RaidService {
     } catch {
       /* DM failure is non-fatal. */
     }
+    const identity = await this.resolveJoinIdentity(member);
     await this.deps.moderation.execute(
       {
         guildId: member.guildId,
         actorId: await this.deps.discord.getBotUserId(member.guildId),
-        targets: [{ id: member.userId }],
+        targets: [{ id: member.userId, identity }],
         reason: 'RaidModeによるロックダウン',
         execution: { source: 'RAIDMODE', sendDm: false, waitForDm: false },
       },
@@ -194,6 +197,38 @@ export class RaidService {
         payload: { guildId: member.guildId },
         createdByCaseId: null,
       });
+  }
+
+  private async resolveJoinIdentity(
+    member: RaidMemberAdd,
+  ): Promise<TargetIdentity> {
+    const supplied = TargetIdentitySchema.safeParse(member.identity);
+    if (supplied.success && supplied.data.userId === member.userId)
+      return supplied.data;
+    if (this.deps.targetIdentityResolver) {
+      try {
+        const resolved = await this.deps.targetIdentityResolver.resolve(
+          member.guildId,
+          member.userId,
+          { member: { displayName: member.displayName } },
+        );
+        const parsed = TargetIdentitySchema.safeParse(resolved);
+        if (parsed.success && parsed.data.userId === member.userId)
+          return parsed.data;
+      } catch (error: unknown) {
+        const status =
+          error && typeof error === 'object' && 'status' in error
+            ? (error as { status?: unknown }).status
+            : undefined;
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (status === 401 || code === 401) throw error;
+        /* Identity lookup failure must not prevent the lockdown kick. */
+      }
+    }
+    return fallbackTargetIdentity(member.userId);
   }
 
   /** Scheduler entry point: stale jobs cannot disable manual raids or a raid
