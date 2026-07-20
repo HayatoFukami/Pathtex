@@ -367,7 +367,7 @@ describe('external audit and snapshot lane', () => {
       serverLogged: true,
       snapshotDeleted: true,
     });
-    expect(serverLog).toHaveBeenCalledTimes(2);
+    expect(serverLog).toHaveBeenCalledOnce();
     expect(cases.createExternalCaseResult).not.toHaveBeenCalled();
     expect(lifecycle.indexOf('save')).toBeLessThan(lifecycle.indexOf('audit'));
     expect(lifecycle.indexOf('save')).toBeLessThan(
@@ -375,12 +375,6 @@ describe('external audit and snapshot lane', () => {
     );
     expect(lifecycle.indexOf('server-log')).toBeLessThan(
       lifecycle.indexOf('audit'),
-    );
-    expect(lifecycle.lastIndexOf('server-log')).toBeGreaterThan(
-      lifecycle.indexOf('audit'),
-    );
-    expect(lifecycle.lastIndexOf('server-log')).toBeLessThan(
-      lifecycle.indexOf('delete'),
     );
     expect(lifecycle.indexOf('server-log')).toBeLessThan(
       lifecycle.indexOf('delete'),
@@ -491,7 +485,10 @@ describe('external audit and snapshot lane', () => {
       correlation: new CorrelationCache(),
       audit: new ExternalAuditPolicy(
         {
-          list: vi.fn().mockRejectedValue(new Error('temporary audit failure')),
+          list: vi.fn().mockImplementation(() => {
+            order.push('audit');
+            return Promise.reject(new Error('temporary audit failure'));
+          }),
         },
         () => Promise.resolve(),
         () => 0,
@@ -510,7 +507,8 @@ describe('external audit and snapshot lane', () => {
         snapshot: { guildId, userId: targetUserId, username: 'user' },
       }),
     ).rejects.toThrow('temporary audit failure');
-    expect(order).toEqual(['save', 'server-log', 'server-log', 'delete']);
+    expect(order).toEqual(['save', 'server-log', 'audit', 'delete']);
+    expect(serverLog).toHaveBeenCalledOnce();
   });
 
   it('returns a persisted case despite post-case failures for one safe delivery attempt', async () => {

@@ -249,14 +249,9 @@ export class ExternalEventService {
       if (failure === undefined) failure = error;
     };
     let serverLogged = false;
-    let serverLogAttempted = false;
-    const logServer = async (
-      result: ExternalEventResult,
-      force = false,
-    ): Promise<void> => {
-      if (!this.deps.serverLog || (serverLogAttempted && !force)) return;
+    const logServer = async (result: ExternalEventResult): Promise<void> => {
+      if (!this.deps.serverLog) return;
       result.serverLogged = serverLogged;
-      serverLogAttempted = true;
       try {
         await this.deps.serverLog(event, result);
         serverLogged = true;
@@ -293,9 +288,7 @@ export class ExternalEventService {
       finalized = true;
       finalizedCasePersisted = casePersisted;
       try {
-        // MEMBER_REMOVE has an independent leave record before audit lookup;
-        // emit its final classification after lookup as a separate update.
-        await logServer(result, event.kind === 'MEMBER_REMOVE');
+        if (event.kind !== 'MEMBER_REMOVE') await logServer(result);
         result.serverLogged = serverLogged;
       } finally {
         if (event.kind === 'BAN_REMOVE' && this.deps.cancelUnban) {

@@ -1142,8 +1142,6 @@ export function createBootstrapDependencies(
         BAN_REMOVE: 'UNBANイベント',
         MUTED_ROLE_UPDATE: 'Mutedロール変更',
       };
-      const finalLeaveClassification =
-        event.kind === 'MEMBER_REMOVE' && result.serverLogged;
       const snapshot = event.snapshot;
       const displayName =
         event.memberDisplayName?.trim() ||
@@ -1151,27 +1149,24 @@ export function createBootstrapDependencies(
         snapshot?.globalName ||
         snapshot?.username ||
         '不明なユーザー';
-      const classification =
-        !finalLeaveClassification && event.kind === 'MEMBER_REMOVE'
-          ? 'Audit Log照合待ち'
-          : result.correlated
-            ? '内部操作（Bot起因）'
-            : result.auditEntryId
-              ? 'Audit Log照合済み'
-              : event.kind === 'MEMBER_REMOVE'
-                ? '自主退出または特定不能'
-                : 'Audit Log照合不可';
-      await logging.server(
-        event.guildId,
-        finalLeaveClassification ? 'メンバー退出判定' : labels[event.kind],
-        [
-          {
-            name: 'User',
-            value: `${displayName} (${event.targetUserId})`,
-          },
-          { name: '判定', value: classification },
-        ],
-      );
+      await logging.server(event.guildId, labels[event.kind], [
+        {
+          name: 'User',
+          value: `${displayName} (${event.targetUserId})`,
+        },
+        ...(event.kind === 'MEMBER_REMOVE'
+          ? []
+          : [
+              {
+                name: '判定',
+                value: result.correlated
+                  ? '内部操作（Bot起因）'
+                  : result.auditEntryId
+                    ? 'Audit Log照合済み'
+                    : 'Audit Log照合不可',
+              },
+            ]),
+      ]);
     },
   });
   return {
