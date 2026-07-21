@@ -153,6 +153,19 @@ TargetIdentityの正規化に失敗した場合は、ケース作成前の入力
 
 既存の権限・Member/User不在・部分成功・DM失敗の規則は変更しない（[§5.1.5](#5115-共通応答)、[§8.3](#83-memberuser不在)）。
 
+## 1.9 ロール変更サーバーログの共通規則
+
+`guildMemberUpdate`で検知したロールの付与・除去は、Mutedロールに限らずすべてのロールを対象に、ロールごとに1件のサーバーログを記録する。旧来の`Mutedロール変更`等のMuted専用サーバーログ表示は使用せず、すべてのロール変更は汎用ロール変更レコードで記録する。既存の外部MUTE/UNMUTEケースとmodlogは設定済みMutedロール遷移に対して維持する。非Mutedロールの変更はmoderation caseを作成しない。
+
+- 1つの`guildMemberUpdate`で複数のロール変更がある場合、除去を先に、付与を後に、それぞれ安定した順序（role ID昇順）で1件ずつ記録する。
+- 各レコードは対象の表示名+ID、ロール名+ID、付与/除去、executorを表示する。
+- executor描画: ロール変更相関が一致、または一意なAudit executorがこのBot自身なら`Bot`。一意に確定した外部executorなら`displayName (userId)`（表示名取得不能時は`userId`のみ）。不明またはambiguousなら`不明`。
+- 一意なAudit executorがBotである設定済みMutedロール遷移は、相関の有無にかかわらず外部MUTE/UNMUTEケースを作成しない。
+- 遷移ごとに相関を先に確認し、相関一致遷移はAudit照合を省略する。未解決遷移だけを対象に、1回のbounded retry試行ごとに共有のAudit fetchを1回実行する（[01-platform-and-data.md §3.5.1](01-platform-and-data.md)）。
+- 1件のサーバーログ送信失敗は、他のロールログやケース処理を停止しない。
+- ロール変更相関キー`{guild}:{target}:{role}:{ADD|REMOVE}`は、実際のロール変更API呼び出しの直前に登録し、`guildMemberUpdate`で一致した遷移を一度消費する。API失敗時は即座に削除し、消費されなければTTL満了で失効する。ロールAPIを呼ばないno-op操作（既にMuted/既にロールなし）では相関を登録しない。
+- ロール変更レーンの所有者は`MemberRoleChangeService`（または同等のcoordinator）であり、共有の`ExternalAuditPolicy`を使ってexecutorを解決する。
+
 # 2. 技術スタック
 
 ## 2.1 正式採用

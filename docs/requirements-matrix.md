@@ -27,7 +27,7 @@
 | `interactionCreate` | コマンドごとの認可 | コマンド契約に従う | CommandRouter | 共通§3.3、§8.6 |
 | `messageCreate`、`messageUpdate` | なし（対象判定） | N/A / ログ設定に従う | AutoModService、MessageLogService | [AutoMod](30-automod.md)、[設定・ログ](40-configuration-and-logs.md) |
 | `messageDelete`、`messageDeleteBulk` | なし | N/A / ログ設定に従う | MessageLogService | [設定・ログ](40-configuration-and-logs.md)、基盤§3.5 |
-| `guildMemberAdd`、`guildMemberRemove`、`guildMemberUpdate`、`userUpdate` | なし | N/A / ログ設定に従う | ServerLogService、RaidService、ModerationService | [RaidMode](31-raidmode.md)、[設定・ログ](40-configuration-and-logs.md)、基盤§4.8 |
+| `guildMemberAdd`、`guildMemberRemove`、`guildMemberUpdate`、`userUpdate` | なし | N/A / ログ設定に従う | ServerLogService、MemberRoleChangeService、RaidService、ModerationService | [RaidMode](31-raidmode.md)、[設定・ログ](40-configuration-and-logs.md)§8.10、基盤§3.5・§4.8 |
 | `voiceStateUpdate` | なし | N/A / ログ設定に従う | VoiceLogService、VoiceService | [設定・ログ](40-configuration-and-logs.md)、[ツール・ボイス](50-tools-and-voice.md) |
 | `guildBanAdd`、`guildBanRemove` | なし | N/A / ケース・ログ設定に従う | ModerationService、AuditService | [モデレーション](20-moderation.md)、基盤§3.5 |
 | `channelCreate`、`channelDelete`、`channelUpdate` | なし | N/A / 設定に従う | SettingsService、ModerationService、AuditService | [設定・ログ](40-configuration-and-logs.md)、[モデレーション](20-moderation.md)、基盤§3.5 |

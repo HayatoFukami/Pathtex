@@ -129,7 +129,7 @@ Bot権限: Manage Roles
 2. ロール不存在なら`/setup`を案内して拒否。
 3. Member、ロール順位、Ownerを検査。
 4. DM送信。
-5. Mutedロール付与。
+5. 既にMutedロールを保持している場合はロールAPIを呼ばず、相関も登録しない（no-op）。それ以外の場合、ロール変更相関`guildId:targetId:mutedRoleId:ADD`を実際のロール付与API呼び出しの直前に登録し、Mutedロール付与。API失敗時は相関を即座に削除する。
 6. durationありならUNMUTE予約を置換。
 7. durationなしなら既存予約を取消。
 8. ケース・modlog作成。
@@ -145,7 +145,7 @@ Bot権限: Manage Roles
 
 認可/Bot権限はMuteと同じ。
 
-Mutedロールを削除し、既存UNMUTE予約を取消する。既にロールがない場合も冪等成功とする。
+既にMutedロールがない場合はロールAPIを呼ばず、相関も登録しない（no-op）。それ以外の場合、ロール変更相関`guildId:targetId:mutedRoleId:REMOVE`を実際のロール削除API呼び出しの直前に登録し、Mutedロールを削除する。API失敗時は相関を即座に削除する。既存UNMUTE予約を取消する。既にロールがない場合も冪等成功とする。
 
 ---
 
