@@ -49,6 +49,7 @@ export interface ModerationDiscordPort {
   ): Promise<void>;
   unban(guildId: string, userId: string, auditReason: string): Promise<void>;
   isBanned(guildId: string, userId: string): Promise<boolean>;
+  hasRole(guildId: string, userId: string, roleId: string): Promise<boolean>;
   addRole(
     guildId: string,
     userId: string,
@@ -160,6 +161,25 @@ export interface ModerationServiceDependencies {
   ) => Promise<T>;
   readonly addRoleUnlocked?: ModerationDiscordPort['addRole'];
   readonly removeRoleUnlocked?: ModerationDiscordPort['removeRole'];
+  readonly hasRoleUnlocked?: (
+    guildId: string,
+    userId: string,
+    roleId: string,
+  ) => Promise<boolean>;
+  readonly roleCorrelation?: {
+    put(
+      guildId: string,
+      targetUserId: string,
+      roleId: string,
+      direction: 'ADD' | 'REMOVE',
+    ): void;
+    remove(
+      guildId: string,
+      targetUserId: string,
+      roleId: string,
+      direction: 'ADD' | 'REMOVE',
+    ): void;
+  };
 }
 
 export type ModerationResult = Result<ModerationBatchResult>;

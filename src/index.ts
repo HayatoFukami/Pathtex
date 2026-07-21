@@ -45,6 +45,9 @@ import { createCanonicalUserCase } from './services/case-service.js';
 import { SchedulerService } from './services/scheduler-service.js';
 import { SettingsService } from './services/settings-service.js';
 import { CorrelationCache } from './services/correlation-cache.js';
+import { RoleCorrelationCache } from './services/role-correlation-cache.js';
+import { RoleBatchResolver } from './services/role-audit-resolver.js';
+import { MemberRoleChangeService } from './services/member-role-change-service.js';
 import { SnapshotService } from './services/snapshot-service.js';
 import { TargetIdentityResolver } from './services/target-identity.js';
 import {
@@ -281,6 +284,7 @@ export function createBootstrapDependencies(
   const activeMuteRepository = new PrismaActiveMuteRepository(prisma.prisma);
   const lifecycleRepository = new PrismaDepartureRepository(prisma.prisma);
   const correlation = new CorrelationCache();
+  const roleCorrelation = new RoleCorrelationCache();
   const moderationDiscord = new DiscordModerationAdapter(
     () => client?.client ?? undefined,
   );
@@ -349,6 +353,9 @@ export function createBootstrapDependencies(
       moderationDiscord.addRoleUnlocked(guildId, userId, roleId, reason),
     removeRoleUnlocked: (guildId, userId, roleId, reason) =>
       moderationDiscord.removeRoleUnlocked(guildId, userId, roleId, reason),
+    hasRoleUnlocked: (guildId, userId, roleId) =>
+      moderationDiscord.hasRole(guildId, userId, roleId),
+    roleCorrelation,
   });
   const strikeDiscord = Object.assign(moderationDiscord, {
     getGuildName: async (guildId: string) =>
@@ -645,16 +652,33 @@ export function createBootstrapDependencies(
                     new Error('Scheduled unmute was superseded'),
                     { code: 'NOT_APPLIED' },
                   );
-                if (job.createdByCaseId)
-                  correlation.put('moderation', `${guildId}:${userId}:UNMUTE`, {
-                    caseId: job.createdByCaseId,
-                  });
-                await moderationDiscord.removeRoleUnlocked(
+                // Check actual role presence; no-op if already removed.
+                const actuallyHas = await moderationDiscord.hasRole(
                   guildId,
                   userId,
                   roleId,
-                  `scheduled:${job.id}`,
                 );
+                if (!actuallyHas) {
+                  await activeMuteRepository.completeScheduledUnmute(
+                    guildId,
+                    userId,
+                    job.id,
+                    config.INSTANCE_ID,
+                  );
+                  return;
+                }
+                roleCorrelation.put(guildId, userId, roleId, 'REMOVE');
+                try {
+                  await moderationDiscord.removeRoleUnlocked(
+                    guildId,
+                    userId,
+                    roleId,
+                    `scheduled:${job.id}`,
+                  );
+                } catch (error) {
+                  roleCorrelation.remove(guildId, userId, roleId, 'REMOVE');
+                  throw error;
+                }
                 const completed =
                   await activeMuteRepository.completeScheduledUnmute(
                     guildId,
@@ -1217,12 +1241,14 @@ export function createBootstrapDependencies(
       );
     },
     serverLog: async (event: ExternalEvent, result: ExternalEventResult) => {
-      const labels: Record<ExternalEvent['kind'], string> = {
+      const labels: Record<string, string> = {
         MEMBER_REMOVE: 'メンバー退出',
         BAN_ADD: 'BANイベント',
         BAN_REMOVE: 'UNBANイベント',
-        MUTED_ROLE_UPDATE: 'Mutedロール変更',
       };
+      // Phase 3: MUTED_ROLE_UPDATE server logs are handled by the generic
+      // role-change lane; skip the old Mutedロール変更 presentation.
+      if (event.kind === 'MUTED_ROLE_UPDATE') return;
       const snapshot = event.snapshot;
       const displayName =
         event.memberDisplayName?.trim() ||
@@ -1230,7 +1256,9 @@ export function createBootstrapDependencies(
         snapshot?.globalName ||
         snapshot?.username ||
         '不明なユーザー';
-      await logging.server(event.guildId, labels[event.kind], [
+      const label = labels[event.kind];
+      if (!label) return;
+      await logging.server(event.guildId, label, [
         {
           name: 'User',
           value: `${displayName} (${event.targetUserId})`,
@@ -1249,6 +1277,41 @@ export function createBootstrapDependencies(
             ]),
       ]);
     },
+  });
+  const memberRoleChange = new MemberRoleChangeService({
+    delivery: new LogDeliveryService(logSender, logSettings, caseService),
+    timezone: async (guildId) => {
+      const result = await configuration.getWithTimezoneRepair(guildId);
+      return result.ok ? result.value.timezone : 'UTC';
+    },
+    resolver: new RoleBatchResolver(externalAuditReader),
+    roleCorrelation,
+    botUserId: () => rawClient.user?.id ?? null,
+    onOperationalError: (error) => {
+      logger.error(
+        {
+          event: 'role_change.audit_resolver_failed',
+          errorName: error instanceof Error ? error.name : 'unknown',
+        },
+        'Role change audit resolution failed',
+      );
+    },
+    fatal: (error) => {
+      logger.fatal(
+        { error, event: 'role_change.fatal_401' },
+        'Fatal 401 in role change processing',
+      );
+      process.exitCode = 1;
+      void stopLifecycle?.();
+    },
+    resolveExecutorDisplay: async (guildId, userId) => {
+      const identity = await targetIdentityResolver.resolve(guildId, userId);
+      // Fallback display must be bare userId, not TargetIdentity's fallback string.
+      return identity.displayName === '不明なユーザー'
+        ? null
+        : identity.displayName;
+    },
+    logger,
   });
   return {
     commandDefinitions: commands,
@@ -1317,12 +1380,23 @@ export function createBootstrapDependencies(
         configuration,
         ignoreService,
         correlation,
+        roleCorrelation,
         caseService,
         moderationLog,
         externalEvents,
+        memberRoleChange,
         raid,
         automod,
         logger,
+        (error) => {
+          logger.fatal(
+            { error, event: 'gateway.role_401' },
+            'Fatal 401 in role change lanes',
+          );
+          process.exitCode = 1;
+          void stopLifecycle?.();
+        },
+        targetIdentityResolver,
       );
       rawClient.on('voiceStateUpdate', (oldState, newState) => {
         if (newState.id !== rawClient.user?.id) return;
@@ -1393,6 +1467,39 @@ function addVoiceStopAuthorization(
       },
     };
   });
+}
+
+/**
+ * Minimal testable coordinator seam: extracts plain DTOs from discord.js
+ * GuildMember pair so the handler stays Discord-I/O-only.
+ */
+export function buildRoleChangeInput(
+  before: {
+    guild: { id: string };
+    id: string;
+    displayName: string;
+    roles: { cache: Map<string, { name: string }> };
+  },
+  after: {
+    guild: { id: string };
+    id: string;
+    displayName: string;
+    roles: { cache: Map<string, { name: string }> };
+  },
+  roleNames: ReadonlyMap<string, string>,
+  mutedRoleId: string | null,
+  occurredAt: Date,
+): import('./services/member-role-change-service.js').RoleChangeInput {
+  return {
+    guildId: after.guild.id,
+    targetUserId: after.id,
+    targetDisplay: after.displayName,
+    beforeRoleIds: [...before.roles.cache.keys()],
+    afterRoleIds: [...after.roles.cache.keys()],
+    roleNames,
+    mutedRoleId,
+    occurredAt,
+  };
 }
 
 function messageView(message: Message): MessageView | null {
@@ -1571,15 +1678,31 @@ function installGatewayListeners(
   configuration: ConfigurationService,
   ignores: IgnoreConfigurationService,
   correlations: CorrelationCache,
+  roleCorrelation: RoleCorrelationCache,
   cases: CaseService,
   moderationLog: ModerationLogService,
   externalEvents: ExternalEventService,
+  memberRoleChange: MemberRoleChangeService,
   raid: RaidService,
   automod: AutomodService,
   logger: ReturnType<typeof createLogger>,
+  fatal: (error: unknown) => void,
+  targetIdentityResolver: TargetIdentityResolver,
 ): void {
   const report = (event: string, operation: Promise<void>): void => {
     void operation.catch((error: unknown) => {
+      const status =
+        typeof error === 'object' && error !== null && 'status' in error
+          ? (error as { status?: unknown }).status
+          : undefined;
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (status === 401 || code === 401) {
+        fatal(error);
+        return;
+      }
       logger.error(
         { event, errorName: error instanceof Error ? error.name : 'unknown' },
         'Gateway event failed',
@@ -1656,17 +1779,38 @@ function installGatewayListeners(
               guildSettings.ok &&
               guildSettings.value.mutedRoleId
             ) {
-              correlations.put(
-                'moderation',
-                `${member.guild.id}:${member.id}:MUTE`,
-                { caseId: mute.caseId },
-              );
-              await moderationDiscord.addRoleUnlocked(
+              const mutedRoleId = guildSettings.value.mutedRoleId;
+              // Check actual role presence; no-op if already present.
+              if (
+                await moderationDiscord.hasRole(
+                  member.guild.id,
+                  member.id,
+                  mutedRoleId,
+                )
+              )
+                return;
+              roleCorrelation.put(
                 member.guild.id,
                 member.id,
-                guildSettings.value.mutedRoleId,
-                'mute restore',
+                mutedRoleId,
+                'ADD',
               );
+              try {
+                await moderationDiscord.addRoleUnlocked(
+                  member.guild.id,
+                  member.id,
+                  mutedRoleId,
+                  'mute restore',
+                );
+              } catch (error) {
+                roleCorrelation.remove(
+                  member.guild.id,
+                  member.id,
+                  mutedRoleId,
+                  'ADD',
+                );
+                throw error;
+              }
             }
           },
         );
@@ -1710,25 +1854,131 @@ function installGatewayListeners(
           .autoDehoist(after.guild.id, after.id, after.displayName)
           .then(() => undefined),
       );
+    // — Synchronous capture of ALL gateway role state before any await —
+    const occurredAt = new Date();
+    const targetDisplay = after.displayName;
+    const beforeRoleIds: string[] = [...before.roles.cache.keys()];
+    const afterRoleIds: string[] = [...after.roles.cache.keys()];
+    const roleNames = new Map<string, string>();
+    for (const [id, role] of before.roles.cache) roleNames.set(id, role.name);
+    for (const [id, role] of after.roles.cache) roleNames.set(id, role.name);
+    // — Single coordinator: serial lanes with shared settings & audit results —
     report(
-      'gateway.external_muted_transition_failed',
+      'gateway.member_update_role_coordinator_failed',
       (async () => {
         const configured = await settings.get(after.guild.id);
-        const mutedRoleId = configured.ok ? configured.value.mutedRoleId : null;
-        if (!mutedRoleId) return;
-        const beforeHas = before.roles.cache.has(mutedRoleId);
-        const afterHas = after.roles.cache.has(mutedRoleId);
-        if (beforeHas === afterHas) return;
-        const result = await externalEvents.process({
+        const mutedRoleId =
+          (configured.ok ? configured.value.mutedRoleId : null) ?? null;
+        // Construct input from pre-await captured values; never re-read live caches.
+        const input = {
           guildId: after.guild.id,
           targetUserId: after.id,
-          kind: 'MUTED_ROLE_UPDATE',
+          targetDisplay,
+          beforeRoleIds,
+          afterRoleIds,
+          roleNames,
           mutedRoleId,
-          mutedRoleChange: afterHas ? 'ADD' : 'REMOVE',
-          occurredAt: new Date(),
-          memberDisplayName: after.displayName,
-        });
-        await deliverExternalCase(after.guild.id, result);
+          occurredAt,
+        } satisfies import('./services/member-role-change-service.js').RoleChangeInput;
+        // Lane 1: generic per-role server logging (includes Muted).
+        let shared:
+          Awaited<ReturnType<typeof memberRoleChange.process>> | undefined;
+        try {
+          shared = await memberRoleChange.process(input);
+        } catch (error: unknown) {
+          const status =
+            typeof error === 'object' && error !== null && 'status' in error
+              ? (error as { status?: unknown }).status
+              : undefined;
+          const code =
+            typeof error === 'object' && error !== null && 'code' in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+          if (status === 401 || code === 401) throw error;
+          logger.error(
+            {
+              event: 'role_change.generic_lane_failed',
+              guildId: after.guild.id,
+              errorName: error instanceof Error ? error.name : 'unknown',
+            },
+            'Generic role-change lane failed',
+          );
+        }
+        // Lane 2: Muted external case/dedupe/modlog (failure-isolated from generic).
+        if (!mutedRoleId) return;
+        const mutedAdded =
+          !beforeRoleIds.includes(mutedRoleId) &&
+          afterRoleIds.includes(mutedRoleId);
+        const mutedRemoved =
+          beforeRoleIds.includes(mutedRoleId) &&
+          !afterRoleIds.includes(mutedRoleId);
+        if (!mutedAdded && !mutedRemoved) return;
+        const mutedDirection = mutedAdded ? 'ADD' : 'REMOVE';
+        const mutedKey = `${mutedRoleId}:${mutedDirection}`;
+        try {
+          // Dedupe: Bot-initiated via roleCorrelation → already covered by generic log.
+          if (shared?.correlatedKeys.has(mutedKey)) return;
+          // Resolve executor from shared audit results.
+          const resolution = shared?.auditResults.get(mutedKey);
+          const executorUserId =
+            resolution?.status === 'matched' &&
+            resolution.executorUserId !== null
+              ? resolution.executorUserId
+              : null;
+          const auditEntryId =
+            resolution?.status === 'matched' ? resolution.auditEntryId : null;
+          if (!executorUserId || !auditEntryId) return;
+          // Self-Bot → skip external case (generic log already Bot-attributed).
+          const botUserId = await moderationDiscord.getBotUserId(
+            after.guild.id,
+          );
+          if (executorUserId === botUserId) return;
+          // Resolve target identity through canonical resolver for proper
+          // display fallback/normalization before creating external case.
+          const identity = await targetIdentityResolver.resolve(
+            after.guild.id,
+            after.id,
+            { member: { displayName: targetDisplay } },
+          );
+          // Create external case + deliver modlog (only if actually created).
+          const caseAction: 'MUTE' | 'UNMUTE' =
+            mutedDirection === 'ADD' ? 'MUTE' : 'UNMUTE';
+          const created = await cases.createExternalCaseResult({
+            guildId: after.guild.id,
+            action: caseAction,
+            targetUserId: identity.userId,
+            targetDisplay: identity.displayName,
+            moderatorUserId: executorUserId,
+            source: 'EXTERNAL',
+            status: 'COMPLETED',
+            reason: '外部操作',
+            discordAuditLogEntryId: auditEntryId,
+          });
+          if (created.ok && created.value.created) {
+            await moderationLog.writeCase(
+              after.guild.id,
+              created.value.case.id,
+            );
+          }
+        } catch (error: unknown) {
+          const status =
+            typeof error === 'object' && error !== null && 'status' in error
+              ? (error as { status?: unknown }).status
+              : undefined;
+          const code =
+            typeof error === 'object' && error !== null && 'code' in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+          if (status === 401 || code === 401) throw error;
+          logger.error(
+            {
+              event: 'role_change.muted_lane_failed',
+              guildId: after.guild.id,
+              errorName: error instanceof Error ? error.name : 'unknown',
+            },
+            'Muted external-case lane failed',
+          );
+        }
       })(),
     );
     if (before.displayName === after.displayName) return;

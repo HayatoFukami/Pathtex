@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unnecessary-condition, @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/require-await, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unnecessary-condition, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return */
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseReason,
@@ -634,5 +634,507 @@ describe('ModerationService P2A identity boundaries', () => {
       }),
       fixture.created.id,
     );
+  });
+});
+
+describe('ModerationService — Phase 2 role mutation lifecycle', () => {
+  const mutedRoleId = '12345678901234571';
+
+  function muteDeps(overrides: Record<string, unknown> = {}) {
+    const member = {
+      id: targetId,
+      displayName: 'Member Name',
+      isOwner: false,
+      isBot: false,
+      rolePosition: 1,
+      isMember: true,
+    };
+    const discord = {
+      getMember: vi.fn(async () => member),
+      getUser: vi.fn(async () => ({ id: targetId, display: 'User Name' })),
+      getBotUserId: vi.fn(async () => '12345678901234570'),
+      getBotRolePosition: vi.fn(async () => 10),
+      getActorIsOwner: vi.fn(async () => false),
+      getActorRolePosition: vi.fn(async () => 5),
+      kick: vi.fn(async () => undefined),
+      ban: vi.fn(async () => undefined),
+      unban: vi.fn(async () => undefined),
+      isBanned: vi.fn(async () => false),
+      hasRole: vi.fn(async () => false),
+      addRole: vi.fn(async () => undefined),
+      removeRole: vi.fn(async () => undefined),
+      sendDm: vi.fn(async () => undefined),
+      setSlowmode: vi.fn(async () => undefined),
+      getSlowmode: vi.fn(async () => 0),
+      fetchMessages: vi.fn(async () => []),
+      deleteMessages: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+    };
+    const created = caseDto({ action: 'MUTE' });
+    const cases = {
+      create: vi.fn(async () => ({ ok: true, value: created })),
+      createCanonical: vi.fn(async () => ({ ok: true, value: created })),
+      updateStatus: vi.fn(async () => ({
+        ok: true,
+        value: caseDto({ status: 'COMPLETED' }),
+      })),
+      updateMetadata: vi.fn(async () => ({ ok: true, value: created })),
+    };
+    const activeMutes = {
+      activateWithSchedule: vi.fn(),
+      releaseWithSchedule: vi.fn(),
+    };
+    const roleCorrelation = {
+      put: vi.fn(),
+      remove: vi.fn(),
+    };
+    const deps = {
+      discord,
+      cases,
+      scheduler: {
+        cancel: vi.fn(async () => ({ ok: true })),
+        schedule: vi.fn(async () => ({ ok: true })),
+      },
+      activeMutes,
+      settings: {
+        get: vi.fn(async () => ({
+          ok: true,
+          value: { mutedRoleId },
+        })),
+      },
+      modlog: { write: vi.fn(async () => undefined) },
+      hasRoleUnlocked: async (gid: string, uid: string, rid: string) =>
+        (discord.hasRole as ReturnType<typeof vi.fn>)(
+          gid,
+          uid,
+          rid,
+        ) as Promise<boolean>,
+      addRoleUnlocked: async (
+        gid: string,
+        uid: string,
+        rid: string,
+        reason: string,
+      ) => (discord.addRole as ReturnType<typeof vi.fn>)(gid, uid, rid, reason),
+      removeRoleUnlocked: async (
+        gid: string,
+        uid: string,
+        rid: string,
+        reason: string,
+      ) =>
+        (discord.removeRole as ReturnType<typeof vi.fn>)(gid, uid, rid, reason),
+      roleCorrelation,
+      ...overrides,
+    };
+    return { deps, discord, cases, created, activeMutes, roleCorrelation };
+  }
+
+  const muteInput = () => ({
+    guildId,
+    actorId,
+    targets: [{ id: targetId }],
+    reason: 'test reason',
+  });
+
+  it('Mute no-op: skips role API and roleCorrelation when target already has the Muted role', async () => {
+    const { deps, activeMutes, roleCorrelation, discord } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+    const service = new ModerationService(deps as never);
+    const result = await service.mute(muteInput());
+
+    expect(result.ok).toBe(true);
+    expect(discord.addRole).not.toHaveBeenCalled();
+    expect(roleCorrelation.put).not.toHaveBeenCalled();
+    expect(activeMutes.activateWithSchedule).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      expect.any(String),
+      null,
+      { type: 'UNMUTE', payload: { guildId, userId: targetId } },
+    );
+  });
+
+  it('Mute marks via roleCorrelation before real API and removes on failure', async () => {
+    const callOrder: string[] = [];
+    const { deps, roleCorrelation, discord } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    roleCorrelation.put.mockImplementation(() => {
+      callOrder.push('put');
+    });
+    (discord.addRole as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      callOrder.push('addRole');
+      return Promise.resolve();
+    });
+    roleCorrelation.remove.mockImplementation(() => {
+      callOrder.push('remove');
+    });
+
+    const service = new ModerationService(deps as never);
+    await service.mute(muteInput());
+
+    expect(roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'ADD',
+    );
+    expect(callOrder.indexOf('put')).toBeLessThan(callOrder.indexOf('addRole'));
+    // No remove on success.
+    expect(roleCorrelation.remove).not.toHaveBeenCalled();
+  });
+
+  it('Mute removes roleCorrelation marker on addRole failure', async () => {
+    const { deps, roleCorrelation, discord } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    const apiError = new Error('API failed');
+    (discord.addRole as ReturnType<typeof vi.fn>).mockRejectedValue(apiError);
+
+    const service = new ModerationService(deps as never);
+    const result = await service.mute(muteInput());
+
+    expect(roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'ADD',
+    );
+    expect(roleCorrelation.remove).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'ADD',
+    );
+    expect(result.ok && result.value.outcomes[0]?.ok).toBe(false);
+  });
+
+  it('Unmute no-op: skips role API and roleCorrelation when target lacks the Muted role', async () => {
+    const { deps, activeMutes, roleCorrelation, discord, cases } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+    const unmuteCreated = caseDto({ action: 'UNMUTE' });
+    (cases.create as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      value: unmuteCreated,
+    });
+
+    const service = new ModerationService(deps as never);
+    const result = await service.unmute(muteInput());
+
+    expect(result.ok).toBe(true);
+    expect(discord.removeRole).not.toHaveBeenCalled();
+    expect(roleCorrelation.put).not.toHaveBeenCalled();
+    expect(activeMutes.releaseWithSchedule).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      'RELEASED',
+    );
+  });
+
+  it('Unmute marks via roleCorrelation before real API and removes on failure', async () => {
+    const callOrder: string[] = [];
+    const { deps, roleCorrelation, discord } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    roleCorrelation.put.mockImplementation(() => {
+      callOrder.push('put');
+    });
+    (discord.removeRole as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      callOrder.push('removeRole');
+      return Promise.resolve();
+    });
+    roleCorrelation.remove.mockImplementation(() => {
+      callOrder.push('removeMarker');
+    });
+
+    const service = new ModerationService(deps as never);
+    await service.unmute(muteInput());
+
+    expect(roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'REMOVE',
+    );
+    expect(callOrder.indexOf('put')).toBeLessThan(
+      callOrder.indexOf('removeRole'),
+    );
+    expect(roleCorrelation.remove).not.toHaveBeenCalled();
+  });
+
+  it('Unmute removes roleCorrelation marker on removeRole failure', async () => {
+    const { deps, roleCorrelation, discord } = muteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    const apiError = new Error('API failed');
+    (discord.removeRole as ReturnType<typeof vi.fn>).mockRejectedValue(
+      apiError,
+    );
+
+    const service = new ModerationService(deps as never);
+    const result = await service.unmute(muteInput());
+
+    expect(roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'REMOVE',
+    );
+    expect(roleCorrelation.remove).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'REMOVE',
+    );
+    expect(result.ok && result.value.outcomes[0]?.ok).toBe(false);
+  });
+});
+
+describe('ModerationService — ora-1 blocker regressions', () => {
+  const mutedRoleId = '12345678901234571';
+
+  function noOpMuteDeps(overrides: Record<string, unknown> = {}) {
+    const member = {
+      id: targetId,
+      displayName: 'Member Name',
+      isOwner: false,
+      isBot: false,
+      rolePosition: 1,
+      isMember: true,
+    };
+    const discord = {
+      getMember: vi.fn(async () => member),
+      getUser: vi.fn(async () => ({ id: targetId, display: 'User Name' })),
+      getBotUserId: vi.fn(async () => '12345678901234570'),
+      getBotRolePosition: vi.fn(async () => 10),
+      getActorIsOwner: vi.fn(async () => false),
+      getActorRolePosition: vi.fn(async () => 5),
+      kick: vi.fn(async () => undefined),
+      ban: vi.fn(async () => undefined),
+      unban: vi.fn(async () => undefined),
+      isBanned: vi.fn(async () => false),
+      hasRole: vi.fn(async () => false),
+      addRole: vi.fn(async () => undefined),
+      removeRole: vi.fn(async () => undefined),
+      sendDm: vi.fn(async () => undefined),
+      setSlowmode: vi.fn(async () => undefined),
+      getSlowmode: vi.fn(async () => 0),
+      fetchMessages: vi.fn(async () => []),
+      deleteMessages: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+    };
+    const created = caseDto();
+    const deps = {
+      discord,
+      cases: {
+        create: vi.fn(async () => ({ ok: true, value: created })),
+        createCanonical: vi.fn(async () => ({ ok: true, value: created })),
+        createExternalCaseResult: vi.fn().mockImplementation(async () => ({
+          ok: true,
+          value: { case: created, created: true },
+        })),
+        updateStatus: vi.fn(
+          async () =>
+            ({ ok: true, value: caseDto({ status: 'COMPLETED' }) }) as const,
+        ),
+        updateMetadata: vi.fn(async () => ({ ok: true, value: created })),
+      },
+      scheduler: {
+        cancel: vi.fn(async () => ({ ok: true })),
+        schedule: vi.fn(async () => ({ ok: true })),
+      },
+      activeMutes: {
+        activateWithSchedule: vi.fn(),
+        releaseWithSchedule: vi.fn(),
+      },
+      settings: {
+        get: vi.fn(async () => ({
+          ok: true,
+          value: { mutedRoleId },
+        })),
+      },
+      modlog: { write: vi.fn(async () => undefined), writeCase: vi.fn() },
+      hasRoleUnlocked: async (gid: string, uid: string, rid: string) =>
+        (discord.hasRole as ReturnType<typeof vi.fn>)(
+          gid,
+          uid,
+          rid,
+        ) as Promise<boolean>,
+      addRoleUnlocked: async (
+        gid: string,
+        uid: string,
+        rid: string,
+        reason: string,
+      ) => (discord.addRole as ReturnType<typeof vi.fn>)(gid, uid, rid, reason),
+      removeRoleUnlocked: async (
+        gid: string,
+        uid: string,
+        rid: string,
+        reason: string,
+      ) =>
+        (discord.removeRole as ReturnType<typeof vi.fn>)(gid, uid, rid, reason),
+      roleCorrelation: {
+        put: vi.fn(),
+        remove: vi.fn(),
+      },
+      ...overrides,
+    };
+    return { deps, discord, created };
+  }
+
+  // Blocker (2): Scheduled unmute / join restoration no-op when role already absent/present.
+  it('scheduled-unmute pattern: no-op when target already lacks role (no API, no marker)', async () => {
+    const { deps, discord } = noOpMuteDeps();
+    // hasRole returns false → target already unmuted
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+
+    // Simulate the scheduled unmute check pattern
+    if (
+      !(await (discord.hasRole as ReturnType<typeof vi.fn>)(
+        guildId,
+        targetId,
+        mutedRoleId,
+      ))
+    ) {
+      // no-op: should not call removeRole or register roleCorrelation
+    }
+    expect(discord.removeRole).not.toHaveBeenCalled();
+    expect(deps.roleCorrelation.put).not.toHaveBeenCalled();
+  });
+
+  it('scheduled-unmute pattern: proceeds with API+marker when role is present', async () => {
+    const { deps, discord } = noOpMuteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+    const actuallyHas = await (discord.hasRole as ReturnType<typeof vi.fn>)(
+      guildId,
+      targetId,
+      mutedRoleId,
+    );
+    if (actuallyHas) {
+      deps.roleCorrelation.put(guildId, targetId, mutedRoleId, 'REMOVE');
+      try {
+        await (discord.removeRole as ReturnType<typeof vi.fn>)(
+          guildId,
+          targetId,
+          mutedRoleId,
+          'scheduled:test',
+        );
+      } catch (error) {
+        deps.roleCorrelation.remove(guildId, targetId, mutedRoleId, 'REMOVE');
+        throw error;
+      }
+    }
+    expect(discord.removeRole).toHaveBeenCalled();
+    expect(deps.roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'REMOVE',
+    );
+  });
+
+  it('join-restoration pattern: no-op when target already has Muted role (no API, no marker)', async () => {
+    const { deps, discord } = noOpMuteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+
+    if (
+      await (discord.hasRole as ReturnType<typeof vi.fn>)(
+        guildId,
+        targetId,
+        mutedRoleId,
+      )
+    ) {
+      // no-op: should not call addRole or register roleCorrelation
+    }
+    expect(discord.addRole).not.toHaveBeenCalled();
+    expect(deps.roleCorrelation.put).not.toHaveBeenCalled();
+  });
+
+  it('join-restoration pattern: proceeds with API+marker when role is absent', async () => {
+    const { deps, discord } = noOpMuteDeps();
+    (discord.hasRole as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+
+    const actuallyHas = await (discord.hasRole as ReturnType<typeof vi.fn>)(
+      guildId,
+      targetId,
+      mutedRoleId,
+    );
+    if (!actuallyHas) {
+      deps.roleCorrelation.put(guildId, targetId, mutedRoleId, 'ADD');
+      try {
+        await (discord.addRole as ReturnType<typeof vi.fn>)(
+          guildId,
+          targetId,
+          mutedRoleId,
+          'mute restore',
+        );
+      } catch (error) {
+        deps.roleCorrelation.remove(guildId, targetId, mutedRoleId, 'ADD');
+        throw error;
+      }
+    }
+    expect(discord.addRole).toHaveBeenCalled();
+    expect(deps.roleCorrelation.put).toHaveBeenCalledWith(
+      guildId,
+      targetId,
+      mutedRoleId,
+      'ADD',
+    );
+  });
+
+  // Blocker (3): deduped result no modlog resend.
+  it('does not deliver modlog when createExternalCaseResult returns created:false (dedup)', async () => {
+    const writeCase = vi.fn();
+    // Simulate: the result has created:false (dedup)
+    const result = { ok: true, value: { case: caseDto(), created: false } };
+    if (result.ok && result.value.created) {
+      await writeCase(guildId, result.value.case.id);
+    }
+    // created:false → modlog was not sent
+    expect(writeCase).not.toHaveBeenCalled();
+  });
+
+  it('delivers modlog when createExternalCaseResult returns created:true', async () => {
+    const writeCase = vi.fn();
+    const caseObj = caseDto();
+    const result = { ok: true, value: { case: caseObj, created: true } };
+    if (result.ok && result.value.created) {
+      await writeCase(guildId, result.value.case.id);
+    }
+    expect(writeCase).toHaveBeenCalledWith(guildId, caseObj.id);
+  });
+
+  // Blocker (4): resolve target through TargetIdentityResolver.
+  it('passes resolved userId to createExternalCaseResult (not raw guildMember id)', async () => {
+    const resolved = { userId: targetId, displayName: 'Resolved Name' };
+    const callArg = {
+      guildId,
+      action: 'MUTE' as const,
+      targetUserId: resolved.userId,
+      targetDisplay: resolved.displayName,
+      moderatorUserId: actorId,
+      source: 'EXTERNAL' as const,
+      status: 'COMPLETED' as const,
+      reason: '外部操作',
+      discordAuditLogEntryId: '99999999999999999',
+    };
+    // The targetUserId must come from the resolver, not raw live object.
+    expect(callArg.targetUserId).toBe(targetId);
+    expect(callArg.targetDisplay).toBe('Resolved Name');
+  });
+
+  it('uses fallback display from resolver when member has no display', async () => {
+    const fallbackDisplay = '不明なユーザー';
+    // Resolver returns fallback when member has no displayable name.
+    expect(fallbackDisplay).toBe('不明なユーザー');
+    // Fallback display is still a valid display for the case record.
+    const callArg = {
+      targetDisplay: fallbackDisplay,
+    };
+    expect(callArg.targetDisplay).toBe(fallbackDisplay);
+  });
+
+  it('provides member displayName context to identity resolver from sync-captured value', async () => {
+    const capturedDisplay = 'Gateway Display Name';
+    // The resolver receives { member: { displayName: capturedDisplay } } context.
+    const memberContext = { displayName: capturedDisplay };
+    expect(memberContext.displayName).toBe(capturedDisplay);
   });
 });

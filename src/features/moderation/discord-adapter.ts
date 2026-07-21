@@ -119,6 +119,20 @@ export class DiscordModerationAdapter implements ModerationDiscordPort {
       return false;
     }
   }
+  public async hasRole(
+    guildId: string,
+    userId: string,
+    roleId: string,
+  ): Promise<boolean> {
+    try {
+      const guild = await this.client().guilds.fetch(guildId);
+      const member = await guild.members.fetch(userId);
+      return member.roles.cache.has(roleId);
+    } catch (error: unknown) {
+      this.rethrowFatal(error);
+      return false;
+    }
+  }
   public async addRole(
     guildId: string,
     userId: string,

@@ -437,11 +437,15 @@ export class ModerationService {
         createdAt: this.clock(),
         expiresAt: new Date(this.clock().getTime() + 15_000),
       };
-      if (this.deps.correlation?.put)
-        this.deps.correlation.put('moderation', correlationKey, {
-          caseId: pending.value.id,
-        });
-      else this.deps.correlation?.add?.(correlationKey, correlationValue);
+      // Role transitions use role-specific correlation (roleCorrelation) for
+      // Mute/Unmute deduplication; do not register the legacy one.
+      if (action !== 'MUTE' && action !== 'UNMUTE') {
+        if (this.deps.correlation?.put)
+          this.deps.correlation.put('moderation', correlationKey, {
+            caseId: pending.value.id,
+          });
+        else this.deps.correlation?.add?.(correlationKey, correlationValue);
+      }
       if (action === 'KICK')
         await this.deps.discord.kick(input.guildId, target.id, audit.value);
       else if (
@@ -741,10 +745,40 @@ export class ModerationService {
         const expiresAt = input.durationSeconds
           ? new Date(this.clock().getTime() + input.durationSeconds * 1000)
           : null;
+        const hasRole =
+          this.deps.hasRoleUnlocked ??
+          this.deps.discord.hasRole.bind(this.deps.discord);
+        const alreadyHas = await hasRole(input.guildId, userId, mutedRoleId);
+        if (alreadyHas) {
+          await this.deps.activeMutes.activateWithSchedule(
+            input.guildId,
+            userId,
+            caseId,
+            expiresAt,
+            { type: 'UNMUTE', payload: { guildId: input.guildId, userId } },
+          );
+          return;
+        }
         const addRole =
           this.deps.addRoleUnlocked ??
           this.deps.discord.addRole.bind(this.deps.discord);
-        await addRole(input.guildId, userId, mutedRoleId, audit);
+        this.deps.roleCorrelation?.put(
+          input.guildId,
+          userId,
+          mutedRoleId,
+          'ADD',
+        );
+        try {
+          await addRole(input.guildId, userId, mutedRoleId, audit);
+        } catch (error) {
+          this.deps.roleCorrelation?.remove(
+            input.guildId,
+            userId,
+            mutedRoleId,
+            'ADD',
+          );
+          throw error;
+        }
         await this.deps.activeMutes.activateWithSchedule(
           input.guildId,
           userId,
@@ -758,10 +792,44 @@ export class ModerationService {
       else await apply();
     } else {
       const release = async (): Promise<void> => {
+        const hasRole =
+          this.deps.hasRoleUnlocked ??
+          this.deps.discord.hasRole.bind(this.deps.discord);
+        const currentlyHas = await hasRole(input.guildId, userId, mutedRoleId);
+        if (!currentlyHas) {
+          await this.deps.activeMutes.releaseWithSchedule(
+            input.guildId,
+            userId,
+            'RELEASED',
+          );
+          await this.deps.scheduler.cancel({
+            guildId: input.guildId,
+            targetUserId: userId,
+            channelId: null,
+            type: 'UNMUTE',
+          });
+          return;
+        }
         const removeRole =
           this.deps.removeRoleUnlocked ??
           this.deps.discord.removeRole.bind(this.deps.discord);
-        await removeRole(input.guildId, userId, mutedRoleId, audit);
+        this.deps.roleCorrelation?.put(
+          input.guildId,
+          userId,
+          mutedRoleId,
+          'REMOVE',
+        );
+        try {
+          await removeRole(input.guildId, userId, mutedRoleId, audit);
+        } catch (error) {
+          this.deps.roleCorrelation?.remove(
+            input.guildId,
+            userId,
+            mutedRoleId,
+            'REMOVE',
+          );
+          throw error;
+        }
         await this.deps.activeMutes.releaseWithSchedule(
           input.guildId,
           userId,
