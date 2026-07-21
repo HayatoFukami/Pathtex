@@ -7,10 +7,10 @@
       "model": "deepseek/deepseek-v4-flash"
     },
     "designer": {
-      "model": "alibaba-token-plan/qwen3.7-max"
+      "model": "deepseek/deepseek-v4-pro"
     },
     "fixer": {
-      "model": "alibaba-token-plan/qwen3.7-max"
+      "model": "deepseek/deepseek-v4-pro"
     }
   }
 }
