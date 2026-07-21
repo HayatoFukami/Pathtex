@@ -7,6 +7,11 @@ import {
   uniqueExternalAuditMatch,
 } from '../src/services/external-event-service.js';
 import { CorrelationCache } from '../src/services/correlation-cache.js';
+import {
+  RoleBatchResolver,
+  type RoleAuditEntry,
+  type RoleTransition,
+} from '../src/services/role-audit-resolver.js';
 
 const guildId = '12345678901234567';
 const targetUserId = '12345678901234568';
@@ -790,5 +795,283 @@ describe('external audit and snapshot lane', () => {
       created: false,
       deliveryEligible: false,
     });
+  });
+});
+
+describe('RoleBatchResolver', () => {
+  const botUserId = '12345678901234599';
+  const roleA = '12345678901234580';
+  const roleB = '12345678901234581';
+  const transitions: readonly RoleTransition[] = [
+    { roleId: roleA, direction: 'ADD' },
+    { roleId: roleB, direction: 'REMOVE' },
+  ];
+
+  const entry = (
+    overrides: Partial<RoleAuditEntry> & { id: string },
+  ): RoleAuditEntry => ({
+    targetUserId,
+    executorUserId,
+    createdAt: at,
+    transitions: [
+      { roleId: roleA, direction: 'ADD' },
+      { roleId: roleB, direction: 'REMOVE' },
+    ],
+    ...overrides,
+  });
+
+  const makeResolver = (
+    fetchResults: readonly (readonly RoleAuditEntry[])[],
+  ) => {
+    let now = 0;
+    const sleeps: number[] = [];
+    const listRoleUpdates = vi.fn();
+    for (const result of fetchResults) {
+      listRoleUpdates.mockResolvedValueOnce(result);
+    }
+    // Pad remaining retries with empty results so the resolver never gets undefined.
+    listRoleUpdates.mockResolvedValue([]);
+    const resolver = new RoleBatchResolver(
+      { listRoleUpdates },
+      (ms) => {
+        sleeps.push(ms);
+        now += ms;
+        return Promise.resolve();
+      },
+      () => now,
+    );
+    return { resolver, listRoleUpdates, sleeps };
+  };
+
+  it('resolves multiple roles from a single logical audit entry', async () => {
+    const { resolver, listRoleUpdates } = makeResolver([
+      [entry({ id: auditId })],
+    ]);
+    const results = await resolver.resolve(
+      guildId,
+      targetUserId,
+      at,
+      transitions,
+    );
+    expect(listRoleUpdates).toHaveBeenCalledOnce();
+    expect(results.get(`${roleA}:ADD`)).toEqual({
+      status: 'matched',
+      executorUserId,
+      auditEntryId: auditId,
+    });
+    expect(results.get(`${roleB}:REMOVE`)).toEqual({
+      status: 'matched',
+      executorUserId,
+      auditEntryId: auditId,
+    });
+  });
+
+  it('preserves self-Bot executor identity for later classification', async () => {
+    const { resolver } = makeResolver([
+      [entry({ id: auditId, executorUserId: botUserId })],
+    ]);
+    const results = await resolver.resolve(
+      guildId,
+      targetUserId,
+      at,
+      transitions,
+    );
+    expect(results.get(`${roleA}:ADD`)).toMatchObject({
+      status: 'matched',
+      executorUserId: botUserId,
+    });
+  });
+
+  it('marks a transition ambiguous when two distinct audit entries match across all retries', async () => {
+    const ambiguousEntries = [
+      entry({
+        id: auditId,
+        transitions: [{ roleId: roleA, direction: 'ADD' }],
+      }),
+      entry({
+        id: '12345678901234571',
+        transitions: [{ roleId: roleA, direction: 'ADD' }],
+      }),
+    ];
+    // Ambiguous on every retry → final result is ambiguous.
+    const { resolver, listRoleUpdates } = makeResolver([
+      ambiguousEntries,
+      ambiguousEntries,
+      ambiguousEntries,
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(listRoleUpdates).toHaveBeenCalledTimes(3);
+    expect(results.get(`${roleA}:ADD`)).toEqual({
+      status: 'ambiguous',
+      executorUserId: null,
+      auditEntryId: null,
+    });
+  });
+
+  it('resolves an ambiguous-first transition when a unique match appears at a later offset', async () => {
+    const ambiguousEntries = [
+      entry({
+        id: auditId,
+        transitions: [{ roleId: roleA, direction: 'ADD' }],
+      }),
+      entry({
+        id: '12345678901234571',
+        transitions: [{ roleId: roleA, direction: 'ADD' }],
+      }),
+    ];
+    const uniqueEntries = [
+      entry({
+        id: auditId,
+        transitions: [{ roleId: roleA, direction: 'ADD' }],
+      }),
+    ];
+    // First fetch: ambiguous. Second fetch (500ms): unique → matched.
+    const { resolver, listRoleUpdates, sleeps } = makeResolver([
+      ambiguousEntries,
+      uniqueEntries,
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(listRoleUpdates).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([500]);
+    expect(results.get(`${roleA}:ADD`)).toEqual({
+      status: 'matched',
+      executorUserId,
+      auditEntryId: auditId,
+    });
+  });
+
+  it('returns missing for wrong target user', async () => {
+    const { resolver } = makeResolver([
+      [entry({ id: auditId, targetUserId: '12345678901234571' })],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('missing');
+  });
+
+  it('returns missing for wrong direction', async () => {
+    const { resolver } = makeResolver([
+      [
+        entry({
+          id: auditId,
+          transitions: [{ roleId: roleA, direction: 'REMOVE' }],
+        }),
+      ],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('missing');
+  });
+
+  it('returns missing for wrong role', async () => {
+    const { resolver } = makeResolver([
+      [
+        entry({
+          id: auditId,
+          transitions: [{ roleId: '12345678901234571', direction: 'ADD' }],
+        }),
+      ],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('missing');
+  });
+
+  it('returns missing for entries outside the ±5s window', async () => {
+    const { resolver } = makeResolver([
+      [
+        entry({
+          id: auditId,
+          createdAt: new Date(at.getTime() + 5001),
+        }),
+      ],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('missing');
+  });
+
+  it('returns missing for null executor', async () => {
+    const { resolver } = makeResolver([
+      [entry({ id: auditId, executorUserId: null })],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('missing');
+  });
+
+  it('performs exactly three fetches with correct sleep offsets when nothing resolves', async () => {
+    const { resolver, listRoleUpdates, sleeps } = makeResolver([[], [], []]);
+    await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(listRoleUpdates).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([500, 1000]);
+    for (const call of listRoleUpdates.mock.calls) {
+      expect(call[1]).toEqual({
+        limit: 25,
+        after: new Date(at.getTime() - 5000),
+        before: new Date(at.getTime() + 5000),
+      });
+    }
+  });
+
+  it('shares one fetch across all unresolved transitions per retry', async () => {
+    // First fetch resolves roleA only; second fetch resolves roleB.
+    const { resolver, listRoleUpdates } = makeResolver([
+      [
+        entry({
+          id: auditId,
+          transitions: [{ roleId: roleA, direction: 'ADD' }],
+        }),
+      ],
+      [
+        entry({
+          id: '12345678901234571',
+          transitions: [{ roleId: roleB, direction: 'REMOVE' }],
+        }),
+      ],
+    ]);
+    const results = await resolver.resolve(
+      guildId,
+      targetUserId,
+      at,
+      transitions,
+    );
+    // Two fetches total: one per retry round, not one per transition.
+    expect(listRoleUpdates).toHaveBeenCalledTimes(2);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('matched');
+    expect(results.get(`${roleB}:REMOVE`)?.status).toBe('matched');
+  });
+
+  it('stops fetching once all transitions are resolved', async () => {
+    const { resolver, listRoleUpdates } = makeResolver([
+      [entry({ id: auditId })],
+    ]);
+    await resolver.resolve(guildId, targetUserId, at, transitions);
+    expect(listRoleUpdates).toHaveBeenCalledOnce();
+  });
+
+  it('ignores malformed entries that fail schema validation', async () => {
+    const { resolver } = makeResolver([
+      [
+        // Missing required fields — will fail RoleAuditEntrySchema.safeParse
+        { id: 'bad' } as unknown as RoleAuditEntry,
+        entry({ id: auditId }),
+      ],
+    ]);
+    const results = await resolver.resolve(guildId, targetUserId, at, [
+      { roleId: roleA, direction: 'ADD' },
+    ]);
+    expect(results.get(`${roleA}:ADD`)?.status).toBe('matched');
   });
 });

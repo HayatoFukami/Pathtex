@@ -1110,6 +1110,87 @@ export function createBootstrapDependencies(
         throw error;
       }
     },
+    listRoleUpdates: async (
+      guildId: string,
+      query: import('./services/external-event-service.js').AuditQuery,
+    ): Promise<
+      readonly import('./services/role-audit-resolver.js').RoleAuditEntry[]
+    > => {
+      try {
+        const guild = await rawClient.guilds.fetch(guildId);
+        const logs = await guild.fetchAuditLogs({
+          limit: query.limit,
+          type: AuditLogEvent.MemberRoleUpdate,
+        });
+        const entries: import('./services/role-audit-resolver.js').RoleAuditEntry[] =
+          [];
+        for (const entry of logs.entries.values()) {
+          const createdAt = new Date(entry.createdTimestamp);
+          if (createdAt < query.after || createdAt > query.before) continue;
+          const targetUserId = (entry.target as { id?: unknown } | null)?.id;
+          const executorUserId = entry.executorId;
+          if (
+            typeof targetUserId !== 'string' ||
+            typeof executorUserId !== 'string'
+          )
+            continue;
+          const changes = (
+            (Array.isArray(entry.changes) ? entry.changes : []) as readonly {
+              key?: unknown;
+              new?: unknown;
+              old?: unknown;
+            }[]
+          ).filter(
+            (change) => change.key === '$add' || change.key === '$remove',
+          );
+          const transitions: import('./services/role-audit-resolver.js').RoleTransition[] =
+            [];
+          for (const change of changes) {
+            const direction = change.key === '$add' ? 'ADD' : 'REMOVE';
+            const roleValues: readonly unknown[] = Array.isArray(
+              change.new ?? change.old,
+            )
+              ? ((change.new ?? change.old) as readonly unknown[])
+              : [];
+            for (const role of roleValues) {
+              const roleId =
+                typeof role === 'object' && role !== null && 'id' in role
+                  ? role.id
+                  : undefined;
+              if (typeof roleId === 'string')
+                transitions.push({ roleId, direction });
+            }
+          }
+          if (transitions.length > 0)
+            entries.push({
+              id: entry.id,
+              targetUserId,
+              executorUserId,
+              createdAt,
+              transitions,
+            });
+        }
+        return entries;
+      } catch (error: unknown) {
+        const status =
+          typeof error === 'object' && error !== null && 'status' in error
+            ? (error as { status?: unknown }).status
+            : undefined;
+        const code =
+          typeof error === 'object' && error !== null && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (status === 401 || code === 401) {
+          logger.fatal(
+            { event: 'gateway.audit_auth_failed', discordCode: 401 },
+            'Discord audit-log authentication failed',
+          );
+          process.exitCode = 1;
+          void stopLifecycle?.();
+        }
+        throw error;
+      }
+    },
   };
   const externalEvents = new ExternalEventService({
     cases: caseService,
