@@ -188,17 +188,11 @@ export class VoiceService {
     const allOutcomes = [...result.value.outcomes, ...missingOutcomes];
     await Promise.all(
       missingOutcomes.map((outcome) =>
-        Promise.resolve(
-          this.port.modlog?.(
-            guildId,
-            {
-              action: 'VOICEKICK_TARGET',
-              moderatorUserId: actorId,
-              ...outcome,
-            },
-            outcome.caseId,
-          ),
-        ).catch(() => undefined),
+        outcome.caseId
+          ? Promise.resolve(this.port.writeCase(guildId, outcome.caseId)).catch(
+              () => undefined,
+            )
+          : Promise.resolve(),
       ),
     );
     return ok({
@@ -398,17 +392,11 @@ export class VoiceService {
       ).catch(() => undefined);
       await Promise.all(
         outcomes.map((outcome) =>
-          Promise.resolve(
-            this.port.modlog?.(
-              guildId,
-              {
-                action: 'VOICEKICK_TARGET',
-                moderatorUserId: actorId,
-                ...outcome,
-              },
-              outcome.caseId,
-            ),
-          ).catch(() => undefined),
+          outcome.caseId
+            ? Promise.resolve(
+                this.port.writeCase(guildId, outcome.caseId),
+              ).catch(() => undefined)
+            : Promise.resolve(),
         ),
       );
       return ok({ success, failed, outcomes });

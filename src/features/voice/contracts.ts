@@ -57,7 +57,7 @@ export interface VoicePort {
   isModerator?(guildId: string, userId: string): Promise<boolean>;
   dm(userId: string, content: string): Promise<void>;
   log?(guildId: string, event: unknown): Promise<void>;
-  modlog?(guildId: string, event: unknown, caseId?: string): Promise<void>;
+  writeCase(guildId: string, caseId: string): Promise<void>;
 }
 export interface VoiceCasePort {
   create(input: {

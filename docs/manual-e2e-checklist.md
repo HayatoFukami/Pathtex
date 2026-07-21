@@ -58,9 +58,9 @@
 
 ## 5. モデレーション・ケース
 
-各操作で、実行結果が対象ごとの成功/失敗、ケース番号、理由、DM結果を含み、modlogに`Case #N`が一度だけ記録されることを確認する。
+各操作で、実行結果が対象ごとの成功/失敗、ケース番号、理由、DM結果を含み、modlogに`ケース #N`が一度だけ記録されることを確認する。
 
-- [ ] `/kick target:<テスト対象> reason:手動テスト` — DM後にKickされ、ケースとmodlogがCompletedになる
+- [ ] `/kick target:<テスト対象> reason:手動テスト` — DM後にKickされ、ケースとmodlogの状態が「成功」になる
 - [ ] `/ban target:<対象> duration:10s delete_messages:0 reason:時限BAN` — BAN、UNBAN予約、DM、ケースを確認する
 - [ ] 予約中に同じ対象を期間なしで`/ban` — 解除予約が取消される
 - [ ] `/silentban` — BANされるがメッセージ削除日数は常に0である
@@ -69,7 +69,7 @@
 - [ ] `/unban user_ids:<BANされていないID>` — `NOT_APPLIED`として対象だけ失敗する
 - [ ] `/mute target:<対象> duration:10s reason:Muteテスト` — Mutedロール、UNMUTE予約、DM、ケースを確認する
 - [ ] `/unmute target:<対象>` — ロールが外れ、予約が取消される。未Muteでも冪等成功する
-- [ ] `/reason case_number:<直前の番号> reason:更新後の理由` — DBとmodlogのReasonが更新される
+- [ ] `/reason case_number:<直前の番号> reason:更新後の理由` — DBとmodlogの「理由」フィールドが更新される
 - [ ] `/reason reason:最新ケースの理由` — ケース番号省略でも対象を正しく選ぶ
 - [ ] `/slowmode set interval:5 duration:10s` → `status` — 現在値、復元日時、復元値が表示される
 - [ ] 予約後に`/slowmode status`を確認し、時間到達後に元の値へ復元される
@@ -143,15 +143,15 @@
 
 ## 10. イベント・ログ確認
 
-- [ ] メッセージ送信後に編集 — `メッセージ編集`へBefore/After、投稿者、チャンネル、Jump URL、Timezone時刻が出る
-- [ ] メッセージ削除 — `メッセージ削除`へ本文、添付、ID、実行者、理由、作成/検知時刻が出る。キャッシュなしは取得不能表示になる
-- [ ] 複数メッセージを一括削除 — 1件の概要Embed、件数、キャッシュ取得数、投稿者別件数、最大10件のプレビューになる
-- [ ] メンバー参加・退出 — serverlogへアカウント年齢、参加日時、ロール、退出理由推定が出る
-- [ ] username、global name、nicknameを変更 — Before/Afterがserverlogへ出る
+- [ ] メッセージ送信後に編集 — `メッセージ編集`Embedへ変更前/変更後、投稿者、チャンネル、Jump URLが出る。人間可読の日時フィールドはなく、footer timestampのみである
+- [ ] メッセージ削除 — `メッセージ削除`Embedへ本文、添付、メッセージID、削除実行者、理由が出る。キャッシュなしは取得不能表示になる。人間可読の日時フィールドはない
+- [ ] 複数メッセージを一括削除 — `メッセージ一括削除`Embed、削除件数、チャンネル、キャッシュ取得数、投稿者別件数、最大10件のプレビューになる。footer timestampのみで人間可読の日時はない
+- [ ] メンバー参加・退出 — serverlogへアカウント年齢、在籍期間、ロール、退出理由推定が出る。人間可読の参加日時・退出日時はなく、footer timestampのみである
+- [ ] username、global name、nicknameを変更 — 「変更前」「変更後」がserverlogへ出る
 - [ ] VCへJoin、Leave、AからBへのMove — それぞれ対応するvoicelogが出る。同一VC内のMute/Deafen等は出ない
 - [ ] 外部BAN/Unban/KickをDiscord UIから実施 — Audit Log照合でExternalケースが作られ、内部操作と二重記録されない
 - [ ] modlog未設定でもケースが保存され、ログチャンネルを削除・権限不足にした場合は業務操作成功とログ送信失敗が分離される
-- [ ] 全ログの時刻が設定Timezone表示で、DBのUTC時刻と矛盾しない
+- [ ] 全ログEmbedがfooter timestampのみで時刻を表示し、人間可読の日時フィールドやギルドタイムゾーンに依存した表示がない。ギルドタイムゾーン設定（`/timezone`）はログEmbedに影響しない（§8.13）
 - [ ] アプリログにtimestamp、level、event、correlationId、interactionId、guildId等があり、Token・パスワード・本文全文・reason全文がない
 
 ## 11. 予約処理・再起動

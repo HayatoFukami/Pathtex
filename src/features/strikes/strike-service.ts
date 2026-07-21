@@ -166,11 +166,7 @@ export class StrikeService {
         dmDelivered,
       });
       try {
-        await this.deps.modlog?.write(
-          input.guildId,
-          { type: action, after: result.afterCount, reason, dmDelivered },
-          caseId,
-        );
+        await this.deps.modlog?.writeCase(input.guildId, caseId);
       } catch {
         /* non-fatal */
       }
@@ -240,13 +236,8 @@ export class StrikeService {
         );
         if (failedCase.ok) {
           try {
-            await this.deps.modlog?.write(
+            await this.deps.modlog?.writeCase(
               input.guildId,
-              {
-                type: 'AUTO_PUNISHMENT',
-                status: 'FAILED',
-                error: failedOutcome.code ?? 'DISCORD_API_ERROR',
-              },
               failedCase.value.id,
             );
           } catch {

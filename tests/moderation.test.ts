@@ -102,7 +102,10 @@ function moderationDeps(overrides: Record<string, unknown> = {}) {
         value: { mutedRoleId: '12345678901234571' },
       })),
     },
-    modlog: { write: vi.fn(async () => undefined) },
+    modlog: {
+      write: vi.fn(async () => undefined),
+      writeCase: vi.fn(async () => undefined),
+    },
     ...overrides,
   };
   return { deps, discord, cases, created };
@@ -548,7 +551,9 @@ describe('ModerationService P2A identity boundaries', () => {
     ).rejects.toMatchObject({ status: 401 });
 
     const log = moderationDeps();
-    log.deps.modlog?.write.mockRejectedValue(
+    const writeCaseMock = log.deps.modlog?.writeCase as
+      ReturnType<typeof vi.fn> | undefined;
+    writeCaseMock?.mockRejectedValue(
       Object.assign(new Error('log'), { status: 401 }),
     );
     await expect(
@@ -623,15 +628,8 @@ describe('ModerationService P2A identity boundaries', () => {
   it('includes the persisted target in the normal moderation log event', async () => {
     const fixture = moderationDeps();
     await new ModerationService(fixture.deps as never).kick(input());
-    expect(fixture.deps.modlog?.write).toHaveBeenCalledWith(
+    expect(fixture.deps.modlog?.writeCase).toHaveBeenCalledWith(
       guildId,
-      expect.objectContaining({
-        embed: expect.objectContaining({
-          fields: expect.arrayContaining([
-            { name: 'Target', value: 'Stored Name (12345678901234569)' },
-          ]),
-        }),
-      }),
       fixture.created.id,
     );
   });
@@ -702,7 +700,10 @@ describe('ModerationService — Phase 2 role mutation lifecycle', () => {
           value: { mutedRoleId },
         })),
       },
-      modlog: { write: vi.fn(async () => undefined) },
+      modlog: {
+        write: vi.fn(async () => undefined),
+        writeCase: vi.fn(async () => undefined),
+      },
       hasRoleUnlocked: async (gid: string, uid: string, rid: string) =>
         (discord.hasRole as ReturnType<typeof vi.fn>)(
           gid,

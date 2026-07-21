@@ -159,27 +159,62 @@ describe('target identity foundation', () => {
       createdAt: new Date('2026-01-01T00:00:00Z'),
       updatedAt: new Date('2026-01-01T00:00:00Z'),
     } as never;
-    const service = new ModerationLogService(
-      sender,
-      settings,
-      { get: vi.fn().mockResolvedValue({ ok: true, value: dto }) } as never,
-      { getTimezone: vi.fn().mockResolvedValue('Asia/Tokyo') },
-    );
+    const service = new ModerationLogService(sender, settings, {
+      get: vi.fn().mockResolvedValue({ ok: true, value: dto }),
+    } as never);
     await expect(
       service.writeCase(guildId, '123e4567-e89b-12d3-a456-426614174000'),
     ).resolves.toEqual({ status: 'delivered' });
     const event = sender.send.mock.calls[0]?.[1] as LogEvent;
-    expect(event.embed.description).toContain('2026-01-01 09:00:00');
+    expect(event.embed.description).toBeUndefined();
     expect(event.embed.fields).toEqual(
       expect.arrayContaining([
-        { name: 'Action', value: 'BAN' },
-        { name: 'Source', value: 'EXTERNAL' },
-        { name: 'Status', value: 'FAILED' },
-        { name: 'Reason', value: 'test' },
-        { name: 'Duration', value: 'Permanent' },
-        { name: 'Moderator', value: guildId },
-        { name: 'DM', value: '対象外' },
+        { name: '対象', value: `名前 (${userId})`, inline: true },
+        { name: '実行者', value: guildId, inline: true },
+        { name: '理由', value: 'test', inline: false },
+        { name: '期間', value: '永続', inline: true },
+        { name: '発生元', value: '外部', inline: true },
+        { name: '状態', value: '失敗', inline: true },
+        { name: 'DM', value: '対象外', inline: true },
       ]),
     );
+  });
+
+  it('writeCase timestamp is exactly moderation_cases.created_at ISO string', async () => {
+    const createdAt = new Date('2026-07-15T08:30:00.123Z');
+    const dto = {
+      id: '123e4567-e89b-12d3-a456-426614174000',
+      guildId,
+      caseNumber: 10,
+      action: 'KICK',
+      targetUserId: userId,
+      targetDisplay: 'User',
+      moderatorUserId: guildId,
+      reason: '理由',
+      durationSeconds: null,
+      source: 'COMMAND',
+      status: 'COMPLETED',
+      errorCode: null,
+      logMessageId: null,
+      logChannelId: null,
+      discordAuditLogEntryId: null,
+      metadata: {},
+      createdAt,
+      updatedAt: createdAt,
+    } as never;
+    const sender = { send: vi.fn().mockResolvedValue(undefined) };
+    const settings = {
+      getChannel: vi.fn().mockResolvedValue(guildId),
+      clearChannel: vi.fn(),
+    };
+    const service = new ModerationLogService(sender, settings, {
+      get: vi.fn().mockResolvedValue({ ok: true, value: dto }),
+    } as never);
+    await service.writeCase(guildId, '123e4567-e89b-12d3-a456-426614174000');
+    const event = sender.send.mock.calls[0]?.[1] as LogEvent;
+    // occurredAt must be the exact DB createdAt, not a new Date() or guild-timezone-adjusted value
+    expect(event.occurredAt).toEqual(createdAt);
+    // timezone must be UTC (not guild-configured timezone)
+    expect(event.timezone).toBe('UTC');
   });
 });

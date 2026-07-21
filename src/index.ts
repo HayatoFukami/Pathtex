@@ -321,13 +321,6 @@ export function createBootstrapDependencies(
     logSender,
     logSettings,
     caseService,
-    {
-      getTimezone: async (guildId) => {
-        const result = await configuration.getWithTimezoneRepair(guildId);
-        if (!result.ok) throw result.error;
-        return result.value.timezone;
-      },
-    },
   );
   const moderation = new ModerationService({
     discord: moderationDiscord,
@@ -774,37 +767,8 @@ export function createBootstrapDependencies(
       );
       return Promise.resolve();
     },
-    modlog: async (
-      guildId: string,
-      event: unknown,
-      caseId?: string,
-    ): Promise<void> => {
-      const details = event as {
-        action?: string;
-        userId?: string;
-        moderatorUserId?: string;
-        ok?: boolean;
-        code?: string;
-        caseNumber?: number;
-        identity?: { displayName?: string; userId?: string };
-      };
-      await moderationLog.write(
-        guildId,
-        {
-          type: details.action ?? 'VOICEKICK_TARGET',
-          guildId,
-          occurredAt: new Date(),
-          timezone: 'UTC',
-          embed: {
-            title: 'VoiceKick',
-            description: `対象: ${details.identity?.displayName ?? '不明'} (${details.identity?.userId ?? details.userId ?? '不明'})\n結果: ${details.ok ? '成功' : (details.code ?? '失敗')}${details.caseNumber === undefined ? '' : `\nCase #${String(details.caseNumber)}`}`,
-            fields: [
-              { name: '実行者', value: details.moderatorUserId ?? '不明' },
-            ],
-          },
-        },
-        caseId,
-      );
+    writeCase: async (guildId: string, caseId: string): Promise<void> => {
+      await moderationLog.writeCase(guildId, caseId);
     },
   });
   const voice = new VoiceService(
@@ -1243,11 +1207,9 @@ export function createBootstrapDependencies(
     serverLog: async (event: ExternalEvent, result: ExternalEventResult) => {
       const labels: Record<string, string> = {
         MEMBER_REMOVE: 'メンバー退出',
-        BAN_ADD: 'BANイベント',
-        BAN_REMOVE: 'UNBANイベント',
+        BAN_ADD: 'BAN追加',
+        BAN_REMOVE: 'BAN解除',
       };
-      // Phase 3: MUTED_ROLE_UPDATE server logs are handled by the generic
-      // role-change lane; skip the old Mutedロール変更 presentation.
       if (event.kind === 'MUTED_ROLE_UPDATE') return;
       const snapshot = event.snapshot;
       const displayName =
@@ -1258,24 +1220,34 @@ export function createBootstrapDependencies(
         '不明なユーザー';
       const label = labels[event.kind];
       if (!label) return;
-      await logging.server(event.guildId, label, [
-        {
-          name: 'User',
-          value: `${displayName} (${event.targetUserId})`,
-        },
-        ...(event.kind === 'MEMBER_REMOVE'
-          ? []
-          : [
-              {
-                name: '判定',
-                value: result.correlated
-                  ? '内部操作（Bot起因）'
-                  : result.auditEntryId
-                    ? 'Audit Log照合済み'
-                    : 'Audit Log照合不可',
-              },
-            ]),
-      ]);
+      await logging.server(
+        event.guildId,
+        label,
+        [
+          {
+            name: 'ユーザー',
+            value: `${displayName} (${event.targetUserId})`,
+          },
+          ...(event.kind === 'MEMBER_REMOVE'
+            ? []
+            : [
+                {
+                  name: '判定',
+                  value: result.correlated
+                    ? '内部操作（Bot起因）'
+                    : result.auditEntryId
+                      ? 'Audit Log照合済み'
+                      : 'Audit Log照合不可',
+                },
+              ]),
+        ],
+        event.occurredAt,
+        event.kind === 'MEMBER_REMOVE'
+          ? 0x95a5a6
+          : event.kind === 'BAN_ADD'
+            ? 0xe74c3c
+            : 0x2ecc71,
+      );
     },
   });
   const memberRoleChange = new MemberRoleChangeService({
@@ -1511,6 +1483,12 @@ function messageView(message: Message): MessageView | null {
     messageId: message.id,
     author: author.tag,
     authorId: author.id,
+    ...(typeof author.avatarURL === 'function'
+      ? (() => {
+          const url = author.avatarURL();
+          return url ? { avatarUrl: url } : {};
+        })()
+      : {}),
     content: message.content,
     authorIsBot: author.bot,
     webhook: message.webhookId !== null,
@@ -1599,6 +1577,7 @@ export function installMessageLoggingListeners(
     );
   });
   client.on('messageUpdate', (before, after) => {
+    const occurredAt = new Date();
     report(
       'gateway.message_update_failed',
       (async () => {
@@ -1609,11 +1588,12 @@ export function installMessageLoggingListeners(
         const fullAfter = await (after as Message).fetch();
         const oldView = messageView(before as Message);
         const newView = messageView(fullAfter);
-        if (newView) await logging.messageUpdate(oldView, newView);
+        if (newView) await logging.messageUpdate(oldView, newView, occurredAt);
       })(),
     );
   });
   client.on('messageDelete', (message) => {
+    const occurredAt = new Date();
     report(
       'gateway.message_delete_failed',
       (async () => {
@@ -1623,11 +1603,17 @@ export function installMessageLoggingListeners(
           return;
         }
         const view = messageView(message as Message);
-        await logging.messageDelete(view, message.guildId, message.id);
+        await logging.messageDelete(
+          view,
+          message.guildId,
+          message.id,
+          occurredAt,
+        );
       })(),
     );
   });
   client.on('messageDeleteBulk', (messages) => {
+    const occurredAt = new Date();
     const first = messages.first();
     if (!first?.guildId) return;
     report(
@@ -1660,6 +1646,7 @@ export function installMessageLoggingListeners(
           first.channelId,
           ids,
           cached,
+          occurredAt,
         );
       })(),
     );
@@ -1726,6 +1713,7 @@ function installGatewayListeners(
     'voiceStateUpdate',
     (oldState: VoiceState, newState: VoiceState) => {
       if (!newState.member) return;
+      const voiceOccurredAt = new Date();
       report(
         'gateway.voice_update_failed',
         logging.voice(
@@ -1734,11 +1722,13 @@ function installGatewayListeners(
           newState.id,
           oldState.channelId,
           newState.channelId,
+          voiceOccurredAt,
         ),
       );
     },
   );
   client.on('guildMemberAdd', (member) => {
+    const joinOccurredAt = new Date();
     report(
       'gateway.member_add_failed',
       (async () => {
@@ -1750,9 +1740,13 @@ function installGatewayListeners(
           nickname: member.nickname,
           joinedAt: member.joinedAt,
         });
-        await logging.server(member.guild.id, 'メンバー参加', [
-          { name: 'User', value: `${member.user.tag} (${member.id})` },
-        ]);
+        await logging.server(
+          member.guild.id,
+          'メンバー参加',
+          [{ name: 'ユーザー', value: `${member.user.tag} (${member.id})` }],
+          joinOccurredAt,
+          0x3498db,
+        );
         await raid.memberAdd({
           guildId: member.guild.id,
           userId: member.id,
@@ -1984,11 +1978,17 @@ function installGatewayListeners(
     if (before.displayName === after.displayName) return;
     report(
       'gateway.member_update_failed',
-      logging.server(after.guild.id, 'メンバー更新', [
-        { name: 'User', value: `${after.user.tag} (${after.id})` },
-        { name: 'Before', value: before.displayName },
-        { name: 'After', value: after.displayName },
-      ]),
+      logging.server(
+        after.guild.id,
+        'メンバー更新',
+        [
+          { name: 'ユーザー', value: `${after.user.tag} (${after.id})` },
+          { name: '変更前', value: before.displayName },
+          { name: '変更後', value: after.displayName },
+        ],
+        occurredAt,
+        0x3498db,
+      ),
     );
   });
   client.on('userUpdate', (before, after) => {
@@ -1997,13 +1997,18 @@ function installGatewayListeners(
       before.globalName === after.globalName
     )
       return;
+    const userUpdateOccurredAt = new Date();
     for (const guild of after.client.guilds.cache.values())
       if (guild.members.cache.has(after.id))
         report(
           'gateway.user_update_failed',
-          logging.server(guild.id, 'ユーザー更新', [
-            { name: 'User', value: `${after.tag} (${after.id})` },
-          ]),
+          logging.server(
+            guild.id,
+            'ユーザー更新',
+            [{ name: 'ユーザー', value: `${after.tag} (${after.id})` }],
+            userUpdateOccurredAt,
+            0x3498db,
+          ),
         );
   });
   client.on('guildBanAdd', (ban) => {
@@ -2035,6 +2040,7 @@ function installGatewayListeners(
     );
   });
   client.on('channelCreate', (channel) => {
+    const channelCreateOccurredAt = new Date();
     void (async () => {
       const guild = channel.guild;
       const role = guild.roles.cache.find((item) => item.name === 'Muted');
@@ -2062,21 +2068,30 @@ function installGatewayListeners(
     });
     report(
       'gateway.channel_create_failed',
-      logging.server(channel.guild.id, 'チャンネル作成', [
-        { name: 'Channel', value: `${channel.name} (${channel.id})` },
-      ]),
+      logging.server(
+        channel.guild.id,
+        'チャンネル作成',
+        [{ name: 'チャンネル', value: `${channel.name} (${channel.id})` }],
+        channelCreateOccurredAt,
+        0x3498db,
+      ),
     );
   });
   client.on('channelUpdate', (_before, after) => {
+    const channelUpdateOccurredAt = new Date();
     const guildChannel = after as unknown as {
       guild: { id: string };
       id: string;
     };
     report(
       'gateway.channel_update_failed',
-      logging.server(guildChannel.guild.id, 'チャンネル更新', [
-        { name: 'Channel', value: guildChannel.id },
-      ]),
+      logging.server(
+        guildChannel.guild.id,
+        'チャンネル更新',
+        [{ name: 'チャンネル', value: guildChannel.id }],
+        channelUpdateOccurredAt,
+        0x3498db,
+      ),
     );
     const internalSlowmode = correlations.consume(
       'slowmode',

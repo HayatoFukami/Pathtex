@@ -563,6 +563,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn(),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     };
     const service = new VoiceService(port);
     await service.start('g', 'u', 'v');
@@ -584,7 +585,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockResolvedValue(null),
       dm: vi.fn(),
-      modlog,
+      writeCase: modlog,
     };
     const result = await new VoiceService(port, { create }).voiceKickTargets(
       'g',
@@ -600,11 +601,7 @@ describe('tools and voice services', () => {
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ errorCode: 'MEMBER_NOT_FOUND' }),
     );
-    expect(modlog).toHaveBeenCalledWith(
-      'g',
-      expect.objectContaining({ userId: '12345678901234567' }),
-      'case-1',
-    );
+    expect(modlog).toHaveBeenCalledWith('g', 'case-1');
   });
   it('writes only one modlog entry for duplicate VoiceKick targets', async () => {
     const modlog = vi.fn();
@@ -618,7 +615,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockResolvedValue(null),
       dm: vi.fn(),
-      modlog,
+      writeCase: modlog,
     };
     const result = await new VoiceService(port, { create }).voiceKickTargets(
       'g',
@@ -629,11 +626,7 @@ describe('tools and voice services', () => {
     expect(result.value.outcomes).toHaveLength(1);
     expect(create).toHaveBeenCalledTimes(1);
     expect(modlog).toHaveBeenCalledTimes(1);
-    expect(modlog).toHaveBeenCalledWith(
-      'g',
-      expect.objectContaining({ userId: '12345678901234567' }),
-      'case-duplicate',
-    );
+    expect(modlog).toHaveBeenCalledWith('g', 'case-duplicate');
   });
   it('writes one modlog entry for a resolved member through voiceKickTargets', async () => {
     const modlog = vi.fn();
@@ -653,7 +646,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockResolvedValue(member),
       dm: vi.fn(),
-      modlog,
+      writeCase: modlog,
     };
     const result = await new VoiceService(port).voiceKickTargets('g', 'actor', [
       member.id,
@@ -665,12 +658,8 @@ describe('tools and voice services', () => {
       displayName: 'Resolved Member',
     });
     expect(result.value.outcomes).toHaveLength(1);
-    expect(modlog).toHaveBeenCalledTimes(1);
-    expect(modlog).toHaveBeenCalledWith(
-      'g',
-      expect.objectContaining({ userId: member.id, ok: true }),
-      undefined,
-    );
+    // writeCase is only called when caseId is available; without a case port it is not.
+    expect(modlog).toHaveBeenCalledTimes(0);
   });
   it('retains fallback identity when VoiceKick member lookup fails', async () => {
     const port: VoicePort = {
@@ -682,6 +671,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockRejectedValue(new Error('discord unavailable')),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     };
     const result = await new VoiceService(port).voiceKickTargets('g', 'actor', [
       '12345678901234567',
@@ -710,6 +700,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockResolvedValue(null),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     } satisfies VoicePort;
     const result = await new VoiceService(
       port,
@@ -750,7 +741,7 @@ describe('tools and voice services', () => {
         displayName: '12345678901234567',
       }),
       dm: vi.fn(),
-      modlog,
+      writeCase: modlog,
     };
     const result = await new VoiceService(
       port,
@@ -762,11 +753,7 @@ describe('tools and voice services', () => {
     expect(resolver.resolve).toHaveBeenCalledTimes(1);
     expect(result.value.outcomes[0]?.identity).toBe(identity);
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ identity }));
-    expect(modlog).toHaveBeenCalledWith(
-      'guild',
-      expect.objectContaining({ identity }),
-      'case',
-    );
+    expect(modlog).toHaveBeenCalledWith('guild', 'case');
   });
   it('propagates fatal Discord 401 errors from VoiceKick resolution', async () => {
     const port = {
@@ -778,6 +765,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn().mockRejectedValue({ status: 401 }),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     } satisfies VoicePort;
     await expect(
       new VoiceService(port).voiceKickTargets('guild', 'actor', [
@@ -795,6 +783,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn(),
       dm: vi.fn(),
+      writeCase: vi.fn(),
       actorChannel: vi.fn().mockResolvedValue({ id: 'v' }),
       canViewChannel: vi.fn().mockResolvedValue(false),
     };
@@ -812,6 +801,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn(),
       dm: vi.fn(),
+      writeCase: vi.fn(),
       canKickFromChannel: vi.fn().mockResolvedValue(true),
       canCreateTemporaryChannel: vi.fn().mockResolvedValue(false),
     };
@@ -846,6 +836,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn(),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     };
     const service = new VoiceService(port);
     const result = await service.voiceKick('g', 'actor', [
@@ -866,6 +857,7 @@ describe('tools and voice services', () => {
       members: vi.fn(),
       member: vi.fn(),
       dm: vi.fn(),
+      writeCase: vi.fn(),
     };
     const now = new Date('2026-01-01T00:00:00Z');
     const service = new VoiceService(port, undefined, () => now);

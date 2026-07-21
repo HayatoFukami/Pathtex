@@ -19,6 +19,18 @@ export const LogEmbedSchema = z.object({
     )
     .max(25),
   timestamp: z.iso.datetime({ offset: true }).optional(),
+  color: z.number().int().min(0).max(0xffffff).optional(),
+  author: z
+    .object({
+      name: z.string().max(256),
+      icon_url: z.string().optional(),
+    })
+    .optional(),
+  footer: z
+    .object({
+      text: z.string().max(2048),
+    })
+    .optional(),
 });
 export type LogEmbed = z.infer<typeof LogEmbedSchema>;
 const EMBED_CHARACTER_LIMIT = 6000;

@@ -133,11 +133,36 @@ describe('roleChangeEmbed', () => {
     expect(remove.title).toBe('ロール除去');
     expect(add.fields).toEqual(
       expect.arrayContaining([
-        { name: 'User', value: `User (${targetUserId})` },
-        { name: 'Role', value: `RoleA (${roleA})` },
-        { name: 'Executor', value: 'Bot' },
+        { name: 'ユーザー', value: `User (${targetUserId})`, inline: true },
+        { name: 'ロール', value: `RoleA (${roleA})`, inline: true },
+        { name: '実行者', value: 'Bot', inline: true },
       ]),
     );
+  });
+
+  it('has green color for 追加 and grey for 削除', () => {
+    const add = roleChangeEmbed({
+      targetDisplay: 'User',
+      targetUserId,
+      roleName: 'RoleA',
+      roleId: roleA,
+      operation: '追加',
+      executor: 'Bot',
+      date: at,
+      zone: 'UTC',
+    });
+    const remove = roleChangeEmbed({
+      targetDisplay: 'User',
+      targetUserId,
+      roleName: 'RoleA',
+      roleId: roleA,
+      operation: '削除',
+      executor: 'Bot',
+      date: at,
+      zone: 'UTC',
+    });
+    expect(add.color).toBe(0x2ecc71);
+    expect(remove.color).toBe(0x95a5a6);
   });
 });
 
@@ -171,7 +196,7 @@ describe('MemberRoleChangeService', () => {
       fields: { name: string; value: string }[];
     };
     expect(embed.title).toBe('ロール付与');
-    expect(embed.fields.find((f) => f.name === 'Role')?.value).toContain(
+    expect(embed.fields.find((f) => f.name === 'ロール')?.value).toContain(
       mutedRoleId,
     );
   });
@@ -191,7 +216,7 @@ describe('MemberRoleChangeService', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    const executorField = embed.fields.find((f) => f.name === 'Executor');
+    const executorField = embed.fields.find((f) => f.name === '実行者');
     expect(executorField?.value).toBe('Bot');
   });
 
@@ -213,7 +238,7 @@ describe('MemberRoleChangeService', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe('Bot');
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('Bot');
   });
 
   it('attributes external executor userId when matched and not Bot', async () => {
@@ -235,7 +260,7 @@ describe('MemberRoleChangeService', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       externalExecutor,
     );
   });
@@ -258,7 +283,7 @@ describe('MemberRoleChangeService', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe('不明');
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('不明');
   });
 
   it('attributes 不明 when audit result is ambiguous', async () => {
@@ -279,7 +304,7 @@ describe('MemberRoleChangeService', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe('不明');
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('不明');
   });
 
   it('isolates per-record failures and continues emitting later logs', async () => {
@@ -470,9 +495,7 @@ describe('MemberRoleChangeService — Phase 2 blocker regressions', () => {
     expect(deliver).toHaveBeenCalledTimes(2);
     for (const call of deliver.mock.calls) {
       const embed = call[2] as { fields: { name: string; value: string }[] };
-      expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
-        '不明',
-      );
+      expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('不明');
     }
   });
 
@@ -503,7 +526,7 @@ describe('MemberRoleChangeService — Phase 2 blocker regressions', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       `Moderator (${externalExecutor})`,
     );
   });
@@ -535,7 +558,7 @@ describe('MemberRoleChangeService — Phase 2 blocker regressions', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       externalExecutor,
     );
   });
@@ -569,7 +592,7 @@ describe('MemberRoleChangeService — Phase 2 blocker regressions', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       externalExecutor,
     );
   });
@@ -766,7 +789,7 @@ describe('MemberRoleChangeService — Phase 3 cutover', () => {
       fields: { name: string; value: string }[];
     };
     expect(embed.title).toBe('ロール付与');
-    expect(embed.fields.find((f) => f.name === 'Role')?.value).toContain(
+    expect(embed.fields.find((f) => f.name === 'ロール')?.value).toContain(
       'Muted',
     );
   });
@@ -808,7 +831,7 @@ describe('MemberRoleChangeService — Phase 3 cutover', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe('Bot');
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('Bot');
   });
 
   it('audit-matched Muted role with external executor gets external userId', async () => {
@@ -842,7 +865,7 @@ describe('MemberRoleChangeService — Phase 3 cutover', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       externalExecutor,
     );
   });
@@ -877,7 +900,7 @@ describe('MemberRoleChangeService — Phase 3 cutover', () => {
     const embed = deliver.mock.calls[0]?.[2] as {
       fields: { name: string; value: string }[];
     };
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe('Bot');
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe('Bot');
   });
 
   it('bare-ID executor fallback when resolveExecutorDisplay returns null', async () => {
@@ -908,7 +931,7 @@ describe('MemberRoleChangeService — Phase 3 cutover', () => {
       fields: { name: string; value: string }[];
     };
     // null display → bare userId, no (userId) suffix
-    expect(embed.fields.find((f) => f.name === 'Executor')?.value).toBe(
+    expect(embed.fields.find((f) => f.name === '実行者')?.value).toBe(
       externalExecutor,
     );
   });

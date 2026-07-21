@@ -61,6 +61,7 @@ export class LoggingEventPipeline {
   public async messageUpdate(
     before: MessageView | null,
     after: MessageView,
+    occurredAt: Date,
   ): Promise<void> {
     const old = await this.ports.snapshots.getMessage(
       before?.messageId ?? after.messageId,
@@ -98,7 +99,7 @@ export class LoggingEventPipeline {
     const embed = this.ports.events.messageEdit(
       persistedBefore,
       after,
-      await this.ports.timezone(after.guildId),
+      occurredAt,
     );
     if (embed)
       await this.ports.delivery.deliver(after.guildId, 'message', embed);
@@ -122,7 +123,8 @@ export class LoggingEventPipeline {
   public async messageDelete(
     message: MessageView | null,
     guildId: string,
-    messageId?: string,
+    messageId: string | undefined,
+    occurredAt: Date,
   ): Promise<void> {
     let persisted = message;
     if (!persisted && messageId) {
@@ -148,10 +150,7 @@ export class LoggingEventPipeline {
           createdAt: snapshot.value.createdAt,
         };
     }
-    const embed = await this.ports.events.messageDelete(
-      persisted,
-      await this.ports.timezone(guildId),
-    );
+    const embed = await this.ports.events.messageDelete(persisted, occurredAt);
     await this.ports.delivery.deliver(guildId, 'message', embed);
     const deletedId = persisted?.messageId ?? messageId;
     if (deletedId) await this.ports.snapshots.deleteMessage(deletedId);
@@ -161,6 +160,7 @@ export class LoggingEventPipeline {
     channelId: string,
     ids: readonly string[],
     cached: readonly MessageView[],
+    occurredAt: Date,
   ): Promise<void> {
     const known = new Map(
       cached.map((message) => [message.messageId, message]),
@@ -199,7 +199,7 @@ export class LoggingEventPipeline {
       channelId,
       ids,
       merged,
-      await this.ports.timezone(guildId),
+      occurredAt,
     );
     await this.ports.delivery.deliver(guildId, 'message', embed);
     await Promise.all(ids.map((id) => this.ports.snapshots.deleteMessage(id)));
@@ -208,12 +208,13 @@ export class LoggingEventPipeline {
     guildId: string,
     title: string,
     fields: ReadonlyArray<{ name: string; value: string }>,
-    date = new Date(),
+    occurredAt: Date,
+    color?: number,
   ): Promise<void> {
     await this.ports.delivery.deliver(
       guildId,
       'server',
-      serverEmbed(title, fields, date, await this.ports.timezone(guildId)),
+      serverEmbed(title, fields, occurredAt, color),
     );
   }
   public async voice(
@@ -222,15 +223,14 @@ export class LoggingEventPipeline {
     userId: string,
     oldChannel: string | null,
     newChannel: string | null,
-    date = new Date(),
+    occurredAt: Date,
   ): Promise<void> {
     const embed = this.ports.events.voice(
       user,
       userId,
       oldChannel,
       newChannel,
-      await this.ports.timezone(guildId),
-      date,
+      occurredAt,
     );
     if (embed) await this.ports.delivery.deliver(guildId, 'voice', embed);
   }

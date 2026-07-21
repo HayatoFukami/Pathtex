@@ -65,7 +65,10 @@ describe('raid sliding window', () => {
         Promise.resolve({ ok: true, value: { id: 'case-id' } }),
       ),
     };
-    const modlog = { write: vi.fn(() => Promise.resolve(undefined)) };
+    const modlog = {
+      write: vi.fn(() => Promise.resolve(undefined)),
+      writeCase: vi.fn(() => Promise.resolve(undefined)),
+    };
     const discord = {
       getVerificationLevel: vi.fn(() => Promise.resolve(3)),
       setVerificationLevel: vi.fn(() => Promise.resolve(undefined)),
@@ -95,9 +98,8 @@ describe('raid sliding window', () => {
       'AutoRaid自動解除',
     );
     expect(cases.create).toHaveBeenCalled();
-    expect(modlog.write).toHaveBeenCalledWith(
+    expect(modlog.writeCase).toHaveBeenCalledWith(
       expect.any(String),
-      expect.anything(),
       'case-id',
     );
   });

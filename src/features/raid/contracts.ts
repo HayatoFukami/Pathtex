@@ -48,6 +48,7 @@ export interface RaidDependencies {
   readonly discord: RaidDiscordPort;
   readonly modlog?: {
     write(guildId: string, event: unknown, caseId?: string): Promise<unknown>;
+    writeCase(guildId: string, caseId: string): Promise<unknown>;
   };
   readonly clock?: () => Date;
 }

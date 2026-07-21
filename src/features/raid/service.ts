@@ -291,19 +291,9 @@ export class RaidService {
     });
     return this.deps.cases.create(input);
   }
-  private async writeLog(guildId: string, title: string, caseId: string) {
+  private async writeLog(guildId: string, _title: string, caseId: string) {
     try {
-      await this.deps.modlog?.write(
-        guildId,
-        {
-          type: 'moderation',
-          guildId,
-          occurredAt: this.clock(),
-          timezone: 'UTC',
-          embed: { title },
-        },
-        caseId,
-      );
+      await this.deps.modlog?.writeCase(guildId, caseId);
     } catch {
       /* logging is non-fatal */
     }

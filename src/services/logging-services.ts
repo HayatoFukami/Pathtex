@@ -10,6 +10,87 @@ import {
 } from './target-identity.js';
 import type { CaseDto } from '../repositories/contracts.js';
 
+// ---------------------------------------------------------------
+// Japanese render helpers — maps internal enums to display labels
+// per docs/40 §8.9.0
+// ---------------------------------------------------------------
+const ACTION_JA: Record<string, string> = {
+  KICK: 'キック',
+  BAN: 'BAN',
+  SOFTBAN: 'ソフトBAN',
+  SILENTBAN: 'サイレントBAN',
+  UNBAN: 'BAN解除',
+  MUTE: 'ミュート',
+  UNMUTE: 'ミュート解除',
+  STRIKE: 'ストライク',
+  PARDON: 'ストライク取消',
+  RAIDMODE_ON: 'レイドモード有効',
+  RAIDMODE_OFF: 'レイドモード解除',
+  VOICEKICK: 'ボイスキック',
+  SLOWMODE: 'スローモード',
+  AUTO_PUNISHMENT: '自動制裁',
+};
+export function translateAction(a: string): string {
+  return ACTION_JA[a] ?? a;
+}
+
+const SOURCE_JA: Record<string, string> = {
+  COMMAND: 'コマンド',
+  AUTOMOD: 'AutoMod',
+  PUNISHMENT: '自動制裁',
+  RAIDMODE: 'レイドモード',
+  EXTERNAL: '外部',
+  SCHEDULED: '予約実行',
+};
+function translateSource(s: string): string {
+  return SOURCE_JA[s] ?? s;
+}
+
+const STATUS_JA: Record<string, string> = {
+  PENDING: '保留',
+  COMPLETED: '成功',
+  FAILED: '失敗',
+  PARTIAL: '一部失敗',
+};
+function translateStatus(s: string): string {
+  return STATUS_JA[s] ?? s;
+}
+
+const ACTION_COLOR: Record<string, number> = {
+  KICK: 0xe67e22,
+  MUTE: 0xe67e22,
+  STRIKE: 0xe67e22,
+  VOICEKICK: 0xe67e22,
+  AUTO_PUNISHMENT: 0xe67e22,
+  BAN: 0xe74c3c,
+  SOFTBAN: 0xe74c3c,
+  SILENTBAN: 0xe74c3c,
+  RAIDMODE_ON: 0xe74c3c,
+  UNBAN: 0x2ecc71,
+  UNMUTE: 0x2ecc71,
+  PARDON: 0x2ecc71,
+  RAIDMODE_OFF: 0x2ecc71,
+  SLOWMODE: 0x3498db,
+};
+const FAILED_COLOR = 0x95a5a6;
+
+function actionColor(action: string, status: string): number | undefined {
+  if (status === 'FAILED') return FAILED_COLOR;
+  return ACTION_COLOR[action];
+}
+
+function translateDm(d: string): string {
+  return d === 'true' ? '成功' : d === 'false' ? '失敗' : d;
+}
+
+function humanDuration(seconds: number): string {
+  if (seconds < 60) return `${String(seconds)}秒`;
+  if (seconds < 3600) return `${String(Math.floor(seconds / 60))}分`;
+  if (seconds < 86400)
+    return `${String(Math.floor(seconds / 3600))}時間${seconds % 3600 >= 60 ? `${String(Math.floor((seconds % 3600) / 60))}分` : ''}`;
+  return `${String(Math.floor(seconds / 86400))}日`;
+}
+
 export const LogEventSchema = z.object({
   type: z.string().min(1).max(64),
   guildId: z.string().regex(/^\d{17,20}$/u),
@@ -23,6 +104,19 @@ export const LogEventSchema = z.object({
   embed: z.object({
     title: z.string().max(256),
     description: z.string().max(4096).optional(),
+    timestamp: z.string().optional(),
+    color: z.number().int().min(0).max(0xffffff).optional(),
+    author: z
+      .object({
+        name: z.string().max(256),
+        icon_url: z.string().optional(),
+      })
+      .optional(),
+    footer: z
+      .object({
+        text: z.string().max(2048),
+      })
+      .optional(),
     fields: z
       .array(
         z.object({
@@ -126,7 +220,6 @@ export class ModerationLogService extends IsolatedLogService {
     sender: DiscordLogPort,
     settings?: LogSettings,
     cases?: CaseService,
-    private readonly timezone?: GuildTimezonePort,
   ) {
     super(sender, settings, cases);
   }
@@ -138,49 +231,51 @@ export class ModerationLogService extends IsolatedLogService {
     return this.send(guildId, 'moderation', event, caseId);
   }
   public async writeCase(guildId: string, caseId: string): Promise<LogResult> {
-    if (!this.cases || !this.timezone)
-      return { status: 'failed', errorCode: 'DISCORD_ERROR' };
+    if (!this.cases) return { status: 'failed', errorCode: 'DISCORD_ERROR' };
     const result = await this.cases.get(guildId, caseId);
     if (!result.ok || !result.value)
       return { status: 'failed', errorCode: 'DISCORD_ERROR' };
     const current = result.value;
-    const timezone = await this.timezone.getTimezone(guildId);
-    const localTime = DateTime.fromJSDate(current.createdAt)
-      .setZone(timezone)
-      .toFormat('yyyy-LL-dd HH:mm:ss ZZZZ');
     const metadata =
       current.metadata &&
       typeof current.metadata === 'object' &&
       !Array.isArray(current.metadata)
         ? (current.metadata as Record<string, unknown>)
         : {};
-    const fields = [
-      { name: 'Action', value: current.action },
-      { name: 'Source', value: current.source },
-      { name: 'Status', value: current.status },
-      { name: 'Target', value: renderCaseTarget(current) },
-      { name: 'Reason', value: current.reason ?? '理由未指定' },
+    const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+      { name: '対象', value: renderCaseTarget(current), inline: true },
+      { name: '実行者', value: current.moderatorUserId, inline: true },
       {
-        name: 'Duration',
+        name: '理由',
+        value: current.reason ?? '理由未指定',
+        inline: false,
+      },
+      {
+        name: '期間',
         value:
           current.durationSeconds === null ||
           current.durationSeconds === undefined
-            ? 'Permanent'
-            : `${String(current.durationSeconds)}秒`,
+            ? '永続'
+            : humanDuration(current.durationSeconds),
+        inline: true,
       },
-      { name: 'Moderator', value: current.moderatorUserId },
-      { name: 'Timestamp', value: localTime },
+      { name: '発生元', value: translateSource(current.source), inline: true },
+      { name: '状態', value: translateStatus(current.status), inline: true },
     ];
     fields.push({
       name: 'DM',
       value:
-        'dmDelivered' in metadata ? String(metadata.dmDelivered) : '対象外',
+        'dmDelivered' in metadata
+          ? translateDm(String(metadata.dmDelivered))
+          : '対象外',
+      inline: true,
     });
     if ('errorCode' in metadata || current.errorCode) {
       const errorValue = metadata.errorCode ?? current.errorCode;
       fields.push({
-        name: 'Error',
+        name: 'エラー',
         value: typeof errorValue === 'string' ? errorValue : 'unknown',
+        inline: true,
       });
     }
     return this.send(
@@ -190,10 +285,12 @@ export class ModerationLogService extends IsolatedLogService {
         type: `case:${current.action}`,
         guildId,
         occurredAt: current.createdAt,
-        timezone,
+        timezone: 'UTC',
         embed: {
-          title: `ケース #${String(current.caseNumber)}: ${current.action}`,
-          description: `発生時刻: ${localTime}`,
+          title: `ケース #${String(current.caseNumber)} — ${translateAction(current.action)}`,
+          timestamp: current.createdAt.toISOString(),
+          color: actionColor(current.action, current.status),
+          footer: { text: current.id },
           fields,
         },
       },

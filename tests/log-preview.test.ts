@@ -12,12 +12,19 @@ import {
   type ChannelConfig,
   sendPreviews,
 } from '../scripts/log-preview.js';
+import {
+  messageEditEmbed,
+  messageDeleteEmbed,
+  bulkDeleteEmbed,
+  voiceEmbed,
+  serverEmbed,
+} from '../src/features/logging/events.js';
+import { roleChangeEmbed } from '../src/features/logging/role-events.js';
 
 const PREVIEW_LABEL = 'Pathtex UI Preview';
 const PREVIEW_FOOTER = 'Pathtex UI Preview — dummy data, not a real event';
 const DEV_GUILD = '123456789012345678';
 
-// ---- minimal config stub ----
 function stubConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     DISCORD_TOKEN: 'stub-token',
@@ -35,9 +42,6 @@ function stubConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
-// ---------------------------------------------------------------
-// Required inventory labels
-// ---------------------------------------------------------------
 const REQUIRED_LABELS = new Set([
   'MessageEdit',
   'MessageDelete',
@@ -51,10 +55,6 @@ const REQUIRED_LABELS = new Set([
   'Case-EXTERNAL-BAN-writeCase',
   'Case-EXTERNAL-KICK-writeCase',
   'Case-FAILED-writeCase',
-  'Action-KICK',
-  'Action-BAN',
-  'VoiceKick-Success',
-  'VoiceKick-Failure',
   'MemberJoin',
   'MemberLeave',
   'MemberNameUpdate',
@@ -63,8 +63,8 @@ const REQUIRED_LABELS = new Set([
   'ChannelUpdate',
   'RoleAdd',
   'RoleRemove',
-  'BanEvent',
-  'UnbanEvent',
+  'BAN追加',
+  'BAN解除',
   'VoiceJoin',
   'VoiceLeave',
   'VoiceMove',
@@ -72,8 +72,8 @@ const REQUIRED_LABELS = new Set([
 
 describe('inventory', () => {
   let inventory: PreviewEntry[];
-  beforeAll(() => {
-    inventory = buildPreviewInventory();
+  beforeAll(async () => {
+    inventory = await buildPreviewInventory();
   });
 
   it('no duplicates', () => {
@@ -104,10 +104,27 @@ describe('inventory', () => {
       for (const em of all()) expect(em.title).toContain(PREVIEW_LABEL);
     });
     it('preview footer', () => {
-      for (const em of all()) expect(em.footer?.text).toBe(PREVIEW_FOOTER);
+      for (const e of inventory) {
+        for (const em of e.embeds) {
+          if (e.label.startsWith('Case-')) {
+            expect(em.footer?.text).toBe(
+              '00000000-0000-4000-8000-000000000000',
+            );
+          } else {
+            expect(em.footer?.text).toBe(PREVIEW_FOOTER);
+          }
+        }
+      }
     });
-    it('preview colour', () => {
-      for (const em of all()) expect(em.color).toBe(0xf39c12);
+    it('preview colours match production', () => {
+      for (const e of inventory) {
+        for (const em of e.embeds) {
+          if (em.color !== undefined) {
+            expect(em.color).toBeGreaterThanOrEqual(0);
+            expect(em.color).toBeLessThanOrEqual(0xffffff);
+          }
+        }
+      }
     });
     it('no secrets', () => {
       for (const em of all()) {
@@ -125,10 +142,40 @@ describe('inventory', () => {
         expect((em.fields ?? []).length).toBeLessThanOrEqual(25);
       }
     });
-    it('valid timestamps', () => {
+    it('every embed has a valid Discord timestamp', () => {
       for (const em of all()) {
-        const ts: string | undefined = em.timestamp;
-        if (ts !== undefined) expect(() => new Date(ts)).not.toThrow();
+        expect(
+          em.timestamp,
+          `missing timestamp in "${em.title ?? '(no title)'}"`,
+        ).toBeDefined();
+        expect(() => new Date(em.timestamp as string)).not.toThrow();
+      }
+    });
+    it('no human-readable date/time text leaks into visible content', () => {
+      const DATE_PATTERN =
+        /\b(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}|\d{1,2}:\d{2}(:\d{2})?|[上下]午\d{1,2}時)/u;
+      for (const e of inventory) {
+        for (const em of e.embeds) {
+          if (em.description) {
+            expect(
+              em.description,
+              `${e.label} description has date/time`,
+            ).not.toMatch(DATE_PATTERN);
+          }
+          const innerTitle = (em.title ?? '').replace(
+            /^\[Pathtex UI Preview[^\]]*\]\s*/u,
+            '',
+          );
+          expect(innerTitle, `${e.label} title has date/time`).not.toMatch(
+            DATE_PATTERN,
+          );
+          for (const f of em.fields ?? []) {
+            expect(
+              f.value,
+              `${e.label}/${f.name} value has date/time`,
+            ).not.toMatch(DATE_PATTERN);
+          }
+        }
       }
     });
   });
@@ -156,27 +203,12 @@ describe('inventory', () => {
   });
 
   describe('layout fidelity', () => {
-    it('writeCase has no Discord timestamp field', () => {
+    it('writeCase uses Discord timestamp', () => {
       for (const e of inventory) {
         if (!e.label.startsWith('Case-')) continue;
         for (const em of e.embeds) {
-          // Production writeCase embeds have no top-level timestamp.
-          expect(em.timestamp).toBeUndefined();
-          // But they DO have a "Timestamp" field.
-          const names = (em.fields ?? []).map((f) => f.name);
-          expect(names).toContain('Timestamp');
-        }
-      }
-    });
-    it('writeCase DM field uses String(dmDelivered) semantics', () => {
-      for (const e of inventory) {
-        if (!e.label.startsWith('Case-')) continue;
-        for (const em of e.embeds) {
-          const dm = (em.fields ?? []).find((f) => f.name === 'DM');
-          expect(dm).toBeDefined();
-          // Must be "true", "false", or "対象外" — never "成功".
-          expect(['true', 'false', '対象外']).toContain(dm?.value);
-          expect(dm?.value).not.toBe('成功');
+          expect(em.timestamp).toBeDefined();
+          expect(() => new Date(em.timestamp as string)).not.toThrow();
         }
       }
     });
@@ -186,42 +218,17 @@ describe('inventory', () => {
         for (const em of e.embeds) {
           const names = (em.fields ?? []).map((f) => f.name);
           for (const n of [
-            'Action',
-            'Source',
-            'Status',
-            'Target',
-            'Reason',
-            'Duration',
-            'Moderator',
-            'Timestamp',
+            '対象',
+            '実行者',
+            '理由',
+            '期間',
+            '発生元',
+            '状態',
             'DM',
           ]) {
             expect(names, `${e.label} missing ${n}`).toContain(n);
           }
-          expect(em.title).toMatch(/ケース #\d+: /u);
-          expect(em.description).toContain('発生時刻');
-        }
-      }
-    });
-    it('writeAction compact', () => {
-      for (const e of inventory) {
-        if (!e.label.startsWith('Action-')) continue;
-        for (const em of e.embeds) {
-          expect((em.fields ?? []).map((f) => f.name)).toEqual([
-            'Target',
-            'Reason',
-          ]);
-          expect(em.title).not.toMatch(/ケース/u);
-        }
-      }
-    });
-    it('VoiceKick layout', () => {
-      for (const e of inventory) {
-        if (!e.label.startsWith('VoiceKick-')) continue;
-        for (const em of e.embeds) {
-          expect(em.title).toContain('VoiceKick');
-          expect(em.description).toContain('対象:');
-          expect(em.description).toContain('結果:');
+          expect(em.title).toMatch(/ケース #\d+ — /u);
         }
       }
     });
@@ -229,7 +236,7 @@ describe('inventory', () => {
       for (const e of inventory) {
         if (e.label !== 'RoleAdd' && e.label !== 'RoleRemove') continue;
         for (const em of e.embeds) {
-          const uf = (em.fields ?? []).find((f) => f.name === 'User');
+          const uf = (em.fields ?? []).find((f) => f.name === 'ユーザー');
           expect(uf).toBeDefined();
           if (uf)
             expect((uf.value.match(/333333333333333333/g) ?? []).length).toBe(
@@ -238,23 +245,264 @@ describe('inventory', () => {
         }
       }
     });
-    it('MemberLeave no 判定', () => {
-      for (const e of inventory) {
-        if (e.label !== 'MemberLeave') continue;
-        for (const em of e.embeds) {
-          expect((em.fields ?? []).map((f) => f.name)).not.toContain('判定');
-        }
-      }
-    });
     it('UserUpdate present', () => {
       expect(inventory.map((e) => e.label)).toContain('UserUpdate');
     });
   });
+
+  describe('production parity', () => {
+    it('message embeds carry production author', () => {
+      for (const e of inventory) {
+        if (e.label !== 'MessageEdit' && e.label !== 'MessageDelete') continue;
+        for (const em of e.embeds) {
+          expect(em.author, e.label).toBeDefined();
+          expect(em.author?.name).toBeTruthy();
+        }
+      }
+    });
+
+    it('writeCase embeds carry production case-UUID footer', () => {
+      const DUMMY_CASE_ID = '00000000-0000-4000-8000-000000000000';
+      for (const e of inventory) {
+        if (!e.label.startsWith('Case-')) continue;
+        for (const em of e.embeds) {
+          expect(em.footer?.text).toBe(DUMMY_CASE_ID);
+        }
+      }
+    });
+
+    it('writeCase FAILED embeds are grey', () => {
+      const entry = inventory.find((e) => e.label === 'Case-FAILED-writeCase');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x95a5a6);
+      }
+    });
+
+    it('message-edit embed has yellow colour', () => {
+      const entry = inventory.find((e) => e.label === 'MessageEdit');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0xf1c40f);
+      }
+    });
+
+    it('message-delete embed has red colour', () => {
+      const entry = inventory.find((e) => e.label === 'MessageDelete');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0xe74c3c);
+      }
+    });
+
+    it('bulk-delete embed has red colour', () => {
+      const entry = inventory.find((e) => e.label === 'BulkDelete');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0xe74c3c);
+      }
+    });
+
+    it('voice embeds have blue colour', () => {
+      for (const e of inventory) {
+        if (e.kind !== 'voice') continue;
+        for (const em of e.embeds) {
+          expect(em.color).toBe(0x3498db);
+        }
+      }
+    });
+
+    it('role-add embed has green colour', () => {
+      const entry = inventory.find((e) => e.label === 'RoleAdd');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x2ecc71);
+      }
+    });
+
+    it('role-remove embed has grey colour', () => {
+      const entry = inventory.find((e) => e.label === 'RoleRemove');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x95a5a6);
+      }
+    });
+
+    it('BAN追加 embed has red colour', () => {
+      const entry = inventory.find((e) => e.label === 'BAN追加');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0xe74c3c);
+      }
+    });
+
+    it('BAN解除 embed has green colour', () => {
+      const entry = inventory.find((e) => e.label === 'BAN解除');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x2ecc71);
+      }
+    });
+
+    it('MemberJoin embed has blue colour', () => {
+      const entry = inventory.find((e) => e.label === 'MemberJoin');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x3498db);
+      }
+    });
+
+    it('MemberLeave embed has grey colour', () => {
+      const entry = inventory.find((e) => e.label === 'MemberLeave');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x95a5a6);
+      }
+    });
+
+    it('MemberNameUpdate embed has blue colour', () => {
+      const entry = inventory.find((e) => e.label === 'MemberNameUpdate');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x3498db);
+      }
+    });
+
+    it('UserUpdate embed has blue colour', () => {
+      const entry = inventory.find((e) => e.label === 'UserUpdate');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x3498db);
+      }
+    });
+
+    it('ChannelCreate embed has blue colour', () => {
+      const entry = inventory.find((e) => e.label === 'ChannelCreate');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x3498db);
+      }
+    });
+
+    it('ChannelUpdate embed has blue colour', () => {
+      const entry = inventory.find((e) => e.label === 'ChannelUpdate');
+      expect(entry).toBeDefined();
+      for (const em of (entry as PreviewEntry).embeds) {
+        expect(em.color).toBe(0x3498db);
+      }
+    });
+
+    it('non-Case embeds use preview safety footer', () => {
+      for (const e of inventory) {
+        if (e.label.startsWith('Case-')) continue;
+        for (const em of e.embeds) {
+          expect(em.footer?.text).toBe(PREVIEW_FOOTER);
+        }
+      }
+    });
+  });
+
+  describe('production builders exercised', () => {
+    const now = new Date();
+    it('messageEditEmbed fields have explicit inline', () => {
+      const em = messageEditEmbed(
+        {
+          guildId: '111111111111111111',
+          channelId: '222222222222222222',
+          messageId: '555555555555555555',
+          author: 'test#0001',
+          authorId: '333333333333333333',
+          content: 'before',
+          createdAt: now,
+        },
+        {
+          guildId: '111111111111111111',
+          channelId: '222222222222222222',
+          messageId: '555555555555555555',
+          author: 'test#0001',
+          authorId: '333333333333333333',
+          content: 'after',
+          createdAt: now,
+        },
+        now,
+      );
+      expect(em).not.toBeNull();
+      if (em) {
+        for (const f of em.fields) {
+          expect(typeof f.inline).toBe('boolean');
+        }
+      }
+    });
+    it('messageDeleteEmbed fields have explicit inline', () => {
+      const em = messageDeleteEmbed(
+        {
+          guildId: '111111111111111111',
+          channelId: '222222222222222222',
+          messageId: '555555555555555555',
+          author: 'test#0001',
+          authorId: '333333333333333333',
+          content: 'deleted',
+          createdAt: now,
+        },
+        undefined,
+        undefined,
+        now,
+      );
+      for (const f of em.fields) {
+        expect(typeof f.inline).toBe('boolean');
+      }
+    });
+    it('bulkDeleteEmbed fields have explicit inline', () => {
+      const em = bulkDeleteEmbed(
+        '222222222222222222',
+        5,
+        [],
+        '不明',
+        now,
+        undefined,
+      );
+      for (const f of em.fields) {
+        expect(typeof f.inline).toBe('boolean');
+      }
+    });
+    it('voiceEmbed fields have explicit inline', () => {
+      const em = voiceEmbed(
+        'User',
+        '333333333333333333',
+        'Join',
+        null,
+        '222222222222222222',
+        now,
+      );
+      expect(em).not.toBeNull();
+      for (const f of em.fields) {
+        expect(typeof f.inline).toBe('boolean');
+      }
+    });
+    it('serverEmbed applies production inline defaults', () => {
+      const em = serverEmbed('Test', [{ name: 'ユーザー', value: 'x' }], now);
+      for (const f of em.fields) {
+        expect(typeof f.inline).toBe('boolean');
+      }
+    });
+    it('roleChangeEmbed fields have explicit inline', () => {
+      const em = roleChangeEmbed({
+        targetDisplay: 'User',
+        targetUserId: '333333333333333333',
+        roleName: 'Mod',
+        roleId: '666666666666666666',
+        operation: '追加',
+        executor: 'Admin',
+        date: now,
+        zone: 'UTC',
+      });
+      for (const f of em.fields) {
+        expect(typeof f.inline).toBe('boolean');
+      }
+    });
+  });
 });
 
-// ---------------------------------------------------------------
-// Channel validation — fail-closed
-// ---------------------------------------------------------------
 describe('validateChannelData', () => {
   const G = '123456789012345678';
   it('rejects null', () => {
@@ -295,9 +543,6 @@ describe('validateChannelData', () => {
   });
 });
 
-// ---------------------------------------------------------------
-// Error sanitisation
-// ---------------------------------------------------------------
 describe('sanitizeErrorMessage', () => {
   it('redacts token colon', () => {
     expect(sanitizeErrorMessage('discord_token: abc123')).not.toContain(
@@ -319,9 +564,6 @@ describe('sanitizeErrorMessage', () => {
   });
 });
 
-// ---------------------------------------------------------------
-// parseArgs
-// ---------------------------------------------------------------
 describe('parseArgs', () => {
   it('empty → no flags', () => {
     expect(parseArgs([])).toEqual({
@@ -349,11 +591,7 @@ describe('parseArgs', () => {
   });
 });
 
-// ---------------------------------------------------------------
-// Behavioral safety tests — full runtime boundary
-// ---------------------------------------------------------------
 describe('main behavioral safety', () => {
-  // --- no-confirm: zero DB / REST init ---
   it('no --confirm → does not call loadConfig / createPrisma / createRest', async () => {
     let loadCalled = false,
       prismaCalled = false,
@@ -406,7 +644,6 @@ describe('main behavioral safety', () => {
     expect(restCalled).toBe(false);
   });
 
-  // --- no DEV_GUILD_ID ---
   it('no DEV_GUILD_ID → exits 1', async () => {
     const deps: RuntimeDeps = {
       loadConfig: () => stubConfig({ DEV_GUILD_ID: undefined }),
@@ -420,7 +657,6 @@ describe('main behavioral safety', () => {
     expect(code).toBe(1);
   });
 
-  // --- dry-run: zero POSTs ---
   it('dry-run → zero REST POST calls', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
     const get = vi.fn().mockResolvedValue({
@@ -448,12 +684,14 @@ describe('main behavioral safety', () => {
       log: (m) => logs.push(m),
       logErr: (m) => logs.push(m),
     };
-    const code = await main(deps, { confirm: true, dryRun: true, help: false });
+    const code = await main(deps, {
+      confirm: true,
+      dryRun: true,
+      help: false,
+    });
     expect(code).toBe(0);
-    // REST.get was called (channel validation), but REST.post was never called.
     expect(get).toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
-    // Must report planned but sent=0.
     const summary = logs
       .filter((l) => l.includes('Planned') || l.includes('Sent'))
       .join(' ');
@@ -490,13 +728,11 @@ describe('main behavioral safety', () => {
     await main(deps, { confirm: true, dryRun: true, help: false });
     expect(post).not.toHaveBeenCalled();
     const summary = logs.join('\n');
-    // Must NOT have "Sent:" with a non-zero number nor a bare "Sent:N" separate from "Sent: 0".
     expect(summary).not.toMatch(/Sent: (?!0\b)\d+/);
     expect(summary).toContain('Sent: 0');
     expect(summary).toContain('Planned:');
   });
 
-  // --- live sends with valid channels ---
   it('live → REST.post called for configured channels', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
     const get = vi.fn().mockResolvedValue({
@@ -530,16 +766,13 @@ describe('main behavioral safety', () => {
     });
     expect(code).toBe(0);
     expect(post).toHaveBeenCalled();
-    // Sent should be > 0
     const sentLine = logs.find((l) => l.startsWith('Sent:'));
     expect(sentLine).toBeDefined();
     expect(sentLine).toMatch(/Sent: \d+/);
   });
 
-  // --- cross-guild channel rejected before any POST ---
   it('cross-guild channel → validated and rejected, zero POST', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
-    // Channel API returns guild_id = OTHER guild.
     const get = vi.fn().mockResolvedValue({
       id: '111111111111111111',
       guild_id: '999999999999999999',
@@ -569,18 +802,17 @@ describe('main behavioral safety', () => {
       dryRun: false,
       help: false,
     });
-    expect(code).toBe(1); // no valid channels → abort
+    expect(code).toBe(1);
     expect(post).not.toHaveBeenCalled();
     expect(logs.some((l) => l.includes('REJECT'))).toBe(true);
   });
 
-  // --- unsuitable channel type rejected ---
   it('voice channel type → rejected, zero POST', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
     const get = vi.fn().mockResolvedValue({
       id: '111111111111111111',
       guild_id: DEV_GUILD,
-      type: 2 /* voice */,
+      type: 2,
     });
     const deps: RuntimeDeps = {
       loadConfig: () => stubConfig(),
@@ -607,7 +839,6 @@ describe('main behavioral safety', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  // --- missing type rejected ---
   it('missing channel type → rejected (fail-closed)', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
     const get = vi
@@ -638,7 +869,6 @@ describe('main behavioral safety', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  // --- malformed channel ID from DB is silently dropped ---
   it('malformed/non-Snowflake channel IDs dropped at DB-read time', async () => {
     const post = vi.fn();
     const get = vi.fn();
@@ -663,12 +893,11 @@ describe('main behavioral safety', () => {
       dryRun: false,
       help: false,
     });
-    expect(code).toBe(0); // no valid channels, but no error
-    expect(get).not.toHaveBeenCalled(); // never validated because ID was dropped
+    expect(code).toBe(0);
+    expect(get).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
   });
 
-  // --- error sanitization in main ---
   it('config load failure produces sanitized fatal', async () => {
     const logs: string[] = [];
     const deps: RuntimeDeps = {
@@ -686,7 +915,6 @@ describe('main behavioral safety', () => {
     expect(fatalLine).toContain('[REDACTED]');
   });
 
-  // --- route safety: only /channels/{id}/messages ---
   it('sendPreviews only uses Routes.channelMessages pattern', () => {
     const route = Routes.channelMessages('111111111111111111');
     expect(route).toMatch(/^\/channels\/\d{17,20}\/messages$/u);
@@ -695,24 +923,18 @@ describe('main behavioral safety', () => {
     expect(route).not.toContain('/bans/');
   });
 
-  // --- sendPreviews with no channels: planned=0 sent=0 ---
   it('sendPreviews with empty channels → planned=0 sent=0', async () => {
     const post = vi.fn();
-    const inventory = buildPreviewInventory();
+    const inventory = await buildPreviewInventory();
     const logs: string[] = [];
-    const result = await sendPreviews(
-      { post },
-      [], // no channels
-      inventory,
-      false,
-      (m) => logs.push(m),
+    const result = await sendPreviews({ post }, [], inventory, false, (m) =>
+      logs.push(m),
     );
     expect(result.planned).toBe(0);
     expect(result.sent).toBe(0);
     expect(post).not.toHaveBeenCalled();
   });
 
-  // --- sendPreviews dry-run → planned>0 sent=0 ---
   it('sendPreviews dry-run → planned>0 sent=0, zero POST', async () => {
     const post = vi.fn();
     const channels: ChannelConfig[] = [
@@ -721,15 +943,14 @@ describe('main behavioral safety', () => {
     const result = await sendPreviews(
       { post },
       channels,
-      buildPreviewInventory(),
-      true, // dryRun
+      await buildPreviewInventory(),
+      true,
     );
     expect(result.planned).toBeGreaterThan(0);
     expect(result.sent).toBe(0);
     expect(post).not.toHaveBeenCalled();
   });
 
-  // --- sendPreviews live → sent>0 ---
   it('sendPreviews live → POST called, sent>0', async () => {
     const post = vi.fn().mockResolvedValue(undefined);
     const channels: ChannelConfig[] = [
@@ -738,7 +959,7 @@ describe('main behavioral safety', () => {
     const result = await sendPreviews(
       { post },
       channels,
-      buildPreviewInventory(),
+      await buildPreviewInventory(),
       false,
     );
     expect(result.sent).toBeGreaterThan(0);

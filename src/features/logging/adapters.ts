@@ -43,18 +43,16 @@ export class LoggingEventAdapter {
   ) {}
   public async messageDelete(
     message: MessageView | null,
-    zone: string,
-    now = new Date(),
+    occurredAt: Date,
   ): Promise<LogEmbed> {
     const internal =
       message && this.correlation?.consume(message.guildId, message.messageId);
     if (internal)
       return messageDeleteEmbed(
         message,
-        now,
-        zone,
         internal.executor,
         internal.reason,
+        occurredAt,
       );
     await this.wait(2000);
     const audit = message
@@ -67,26 +65,24 @@ export class LoggingEventAdapter {
       : null;
     return messageDeleteEmbed(
       message,
-      now,
-      zone,
       audit?.executor,
       audit?.reason,
+      occurredAt,
     );
   }
   public messageEdit(
     before: MessageView | null,
     after: MessageView,
-    zone: string,
+    occurredAt: Date,
   ): LogEmbed | null {
-    return messageEditEmbed(before, after, zone);
+    return messageEditEmbed(before, after, occurredAt);
   }
   public async bulkDelete(
     guildId: string,
     channelId: string,
     ids: readonly string[],
     cached: readonly MessageView[],
-    zone: string,
-    now = new Date(),
+    occurredAt: Date,
   ): Promise<LogEmbed> {
     const peeked = this.correlation
       ? ids.map((id) => this.correlation?.peek?.(guildId, id) ?? null)
@@ -95,15 +91,14 @@ export class LoggingEventAdapter {
       peeked.length === ids.length &&
       peeked.every((value) => value !== null)
     ) {
-      const internal = ids.map((id) => this.correlation?.consume(guildId, id));
+      ids.map((id) => this.correlation?.consume(guildId, id));
       return bulkDeleteEmbed(
         channelId,
         ids.length,
         cached,
-        now,
-        zone,
-        internal[0]?.executor,
-        internal[0]?.reason,
+        peeked[0]?.executor,
+        occurredAt,
+        peeked[0]?.reason,
       );
     }
     await this.wait(2000);
@@ -112,9 +107,8 @@ export class LoggingEventAdapter {
       channelId,
       ids.length,
       cached,
-      now,
-      zone,
       audit?.executor,
+      occurredAt,
       audit?.reason,
     );
   }
@@ -123,12 +117,11 @@ export class LoggingEventAdapter {
     userId: string,
     oldChannel: string | null,
     newChannel: string | null,
-    zone: string,
-    now = new Date(),
+    occurredAt: Date,
   ): LogEmbed | null {
     const kind = classifyVoice(oldChannel, newChannel);
     return kind
-      ? voiceEmbed(user, userId, kind, oldChannel, newChannel, now, zone)
+      ? voiceEmbed(user, userId, kind, oldChannel, newChannel, occurredAt)
       : null;
   }
 }

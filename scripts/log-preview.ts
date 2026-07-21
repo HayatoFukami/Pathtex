@@ -1,14 +1,14 @@
 import { REST, Routes, type APIEmbed } from 'discord.js';
 import { PrismaClient } from '@prisma/client';
-import { DateTime } from 'luxon';
 import type { AppConfig } from '../src/config/env.js';
 import { loadConfig } from '../src/config/env.js';
 import { SnowflakeSchema } from '../src/repositories/contracts.js';
 
 // ---------------------------------------------------------------
-// Embed builders — sourced from the actual production modules to
-// guarantee preview fidelity.  We import the canonical functions,
-// then wrap with a preview label and accent colour.
+// Embed builders — sourced from the actual production modules.
+// The preview wraps production LogEmbeds with a safety label and
+// footer; all colours, inline settings, author, and timestamps
+// pass through faithfully.
 // ---------------------------------------------------------------
 import type { LogEmbed } from '../src/features/logging/service.js';
 import {
@@ -19,16 +19,20 @@ import {
   serverEmbed,
 } from '../src/features/logging/events.js';
 import { roleChangeEmbed } from '../src/features/logging/role-events.js';
-import { renderCaseTarget } from '../src/services/logging-services.js';
+import {
+  ModerationLogService,
+  type DiscordLogPort,
+  type LogSettings,
+} from '../src/services/logging-services.js';
 import type { CaseDto } from '../src/repositories/contracts.js';
+import type { CaseService } from '../src/services/case-service.js';
+import { ok } from '../src/domain/result.js';
 
 // ---------------------------------------------------------------
 // Preview metadata
 // ---------------------------------------------------------------
 const PREVIEW_LABEL = 'Pathtex UI Preview';
-const PREVIEW_COLOR = 0xf39c12;
-const PREVIEW_FOOTER = 'Pathtex UI Preview — dummy data, not a real event';
-const DUMMY_ZONE = 'Asia/Tokyo';
+const PREVIEW_FOOTER_TEXT = 'Pathtex UI Preview — dummy data, not a real event';
 
 const DUMMY = {
   guildId: '111111111111111111',
@@ -38,146 +42,90 @@ const DUMMY = {
   userId2: '444444444444444444',
   messageId: '555555555555555555',
   roleId: '666666666666666666',
+  caseId: '00000000-0000-4000-8000-000000000000',
 } as const;
 
 // ---------------------------------------------------------------
-// Preview embed factories
+// Preview embed factory — wraps a production LogEmbed.
+// Adds the preview title prefix; preserves production color,
+// author, footer, timestamp, and inline settings as-is.
+// Omits undefined optional fields for clean APIEmbed output.
 // ---------------------------------------------------------------
 function toPreviewEmbed(embed: LogEmbed, category: string): APIEmbed {
-  const base: APIEmbed = {
+  const result: APIEmbed = {
     title: `[${PREVIEW_LABEL} — ${category}] ${embed.title}`,
-    color: PREVIEW_COLOR,
     fields: embed.fields.map((f) => ({
       name: f.name,
       value: f.value,
-      inline: f.inline ?? false,
+      ...(f.inline !== undefined ? { inline: f.inline } : {}),
     })),
-    footer: { text: PREVIEW_FOOTER },
+    footer: embed.footer ?? { text: PREVIEW_FOOTER_TEXT },
   };
-  if (embed.timestamp !== undefined) base.timestamp = embed.timestamp;
-  return base;
-}
-
-/** Build a writeCase-style APIEmbed. Production writeCase has no Discord-level
- *  timestamp — only a "Timestamp" field.  We honour that exactly. */
-function toWriteCasePreviewEmbed(
-  embed: {
-    title: string;
-    description: string;
-    fields: NonNullable<APIEmbed['fields']>;
-  },
-  category: string,
-): APIEmbed {
-  return {
-    title: `[${PREVIEW_LABEL} — ${category}] ${embed.title}`,
-    description: embed.description,
-    color: PREVIEW_COLOR,
-    fields: embed.fields,
-    footer: { text: PREVIEW_FOOTER },
-  };
-}
-
-// ---------------------------------------------------------------
-// Moderation preview builders — three production layouts
-// ---------------------------------------------------------------
-
-/** writeCase: matches ModerationLogService.writeCase() exactly.
- *  DM values mirror String(dmDelivered): "true", "false", or "対象外". */
-function writeCasePreview(args: {
-  caseNumber: number;
-  action: string;
-  source: string;
-  status: string;
-  targetUserId: string;
-  targetDisplay: string;
-  reason: string;
-  duration: string;
-  moderatorUserId: string;
-  date: Date;
-  zone: string;
-  /** Production values: "true", "false", "対象外" */
-  dm: string;
-  errorCode?: string;
-}): {
-  title: string;
-  description: string;
-  fields: NonNullable<APIEmbed['fields']>;
-} {
-  const localTime = DateTime.fromJSDate(args.date)
-    .setZone(args.zone)
-    .toFormat('yyyy-LL-dd HH:mm:ss ZZZZ');
-  const fields: NonNullable<APIEmbed['fields']> = [
-    { name: 'Action', value: args.action, inline: false },
-    { name: 'Source', value: args.source, inline: false },
-    { name: 'Status', value: args.status, inline: false },
-    {
-      name: 'Target',
-      value: renderCaseTarget({
-        action: args.action,
-        targetUserId: args.targetUserId,
-        targetDisplay: args.targetDisplay,
-      } as unknown as CaseDto),
-      inline: false,
-    },
-    { name: 'Reason', value: args.reason, inline: false },
-    { name: 'Duration', value: args.duration, inline: false },
-    { name: 'Moderator', value: args.moderatorUserId, inline: false },
-    { name: 'Timestamp', value: localTime, inline: false },
-    { name: 'DM', value: args.dm, inline: false },
-  ];
-  if (args.errorCode) {
-    fields.push({ name: 'Error', value: args.errorCode, inline: false });
+  if (embed.color !== undefined) result.color = embed.color;
+  if (embed.timestamp !== undefined) result.timestamp = embed.timestamp;
+  if (embed.author) {
+    const { name, icon_url } = embed.author;
+    result.author = icon_url !== undefined ? { name, icon_url } : { name };
   }
+  return result;
+}
+
+// ---------------------------------------------------------------
+// Dummy case DTOs for writeCase rendering
+// ---------------------------------------------------------------
+function dummyCaseDto(overrides: Partial<CaseDto>): CaseDto {
   return {
-    title: `ケース #${String(args.caseNumber)}: ${args.action}`,
-    description: `発生時刻: ${localTime}`,
-    fields,
+    id: DUMMY.caseId,
+    guildId: DUMMY.guildId,
+    caseNumber: overrides.caseNumber ?? 1,
+    action: overrides.action ?? 'KICK',
+    targetUserId: overrides.targetUserId ?? DUMMY.userId,
+    targetDisplay: overrides.targetDisplay ?? '対象ユーザー',
+    moderatorUserId: overrides.moderatorUserId ?? DUMMY.userId2,
+    reason: overrides.reason ?? 'プレビュー用のダミー理由',
+    durationSeconds: overrides.durationSeconds ?? null,
+    source: overrides.source ?? 'COMMAND',
+    status: overrides.status ?? 'COMPLETED',
+    errorCode: overrides.errorCode ?? null,
+    logMessageId: null,
+    logChannelId: null,
+    discordAuditLogEntryId: null,
+    metadata: overrides.metadata ?? {},
+    createdAt: overrides.createdAt ?? new Date(),
+    updatedAt: overrides.updatedAt ?? new Date(),
   };
 }
 
-/** writeAction: compact embed from ModerationService.modlog.write() */
-function writeActionPreview(args: {
-  action: string;
-  targetUserId: string;
-  targetDisplay: string;
-  reason: string;
-}): LogEmbed {
-  return {
-    title: args.action,
-    fields: [
-      {
-        name: 'Target',
-        value: renderCaseTarget({
-          action: args.action,
-          targetUserId: args.targetUserId,
-          targetDisplay: args.targetDisplay,
-        } as unknown as CaseDto),
-      },
-      { name: 'Reason', value: args.reason },
-    ],
+/** Render a single case through the production writeCase pipeline
+ *  and return the resulting APIEmbed. */
+async function renderWriteCaseEmbed(
+  dto: CaseDto,
+  category: string,
+): Promise<APIEmbed> {
+  const captured: APIEmbed[] = [];
+  const sender: DiscordLogPort = {
+    send: (_channelId, event) => {
+      captured.push(event.embed as APIEmbed);
+      return Promise.resolve();
+    },
   };
-}
+  const settings: LogSettings = {
+    getChannel: () => Promise.resolve(DUMMY.channelId),
+    clearChannel: () => Promise.resolve(),
+  };
+  const cases: Pick<CaseService, 'get'> = {
+    get: () => Promise.resolve(ok(dto)),
+  };
+  const service = new ModerationLogService(
+    sender,
+    settings,
 
-/** VoiceKick: matches index.ts voicePort.modlog */
-function voiceKickPreview(args: {
-  displayName: string;
-  userId: string;
-  ok: boolean;
-  code?: string;
-  caseNumber?: number;
-  moderatorUserId: string;
-}): APIEmbed {
-  const result = args.ok ? '成功' : (args.code ?? '失敗');
-  const caseLine =
-    args.caseNumber === undefined ? '' : `\nCase #${String(args.caseNumber)}`;
-  const embed: APIEmbed = {
-    title: `[${PREVIEW_LABEL} — Moderation] VoiceKick`,
-    description: `対象: ${args.displayName} (${args.userId})\n結果: ${result}${caseLine}`,
-    color: PREVIEW_COLOR,
-    fields: [{ name: '実行者', value: args.moderatorUserId, inline: false }],
-    footer: { text: PREVIEW_FOOTER },
-  };
-  return embed;
+    cases as unknown as CaseService,
+  );
+  await service.writeCase(dto.guildId, dto.id);
+  const embed = captured[0];
+  if (!embed) throw new Error('writeCase did not produce an embed');
+  return toPreviewEmbed(embed as LogEmbed, category);
 }
 
 // ---------------------------------------------------------------
@@ -195,7 +143,7 @@ function messagePreviews(): PreviewPayload[] {
       messageId: DUMMY.messageId,
       author: 'testUser#1234',
       authorId: DUMMY.userId,
-      content: 'original content before edit',
+      content: '編集前の元の内容',
       attachments: [],
       embeds: [],
       createdAt: new Date(now.getTime() - 300_000),
@@ -207,13 +155,13 @@ function messagePreviews(): PreviewPayload[] {
       messageId: DUMMY.messageId,
       author: 'testUser#1234',
       authorId: DUMMY.userId,
-      content: 'edited content after change',
+      content: '編集後の変更内容',
       attachments: [],
       embeds: [],
       createdAt: now,
       url: `https://discord.com/channels/${DUMMY.guildId}/${DUMMY.channelId}/${DUMMY.messageId}`,
     },
-    DUMMY_ZONE,
+    now,
   );
   const del = messageDeleteEmbed(
     {
@@ -222,14 +170,13 @@ function messagePreviews(): PreviewPayload[] {
       messageId: DUMMY.messageId,
       author: 'deletedUser#5678',
       authorId: DUMMY.userId2,
-      content: 'this message was deleted',
+      content: 'このメッセージは削除されました',
       createdAt: new Date(now.getTime() - 600_000),
       url: `https://discord.com/channels/${DUMMY.guildId}/${DUMMY.channelId}/${DUMMY.messageId}`,
     },
-    now,
-    DUMMY_ZONE,
     'Moderator#0001',
-    'Spam removal',
+    'スパム対策',
+    now,
   );
   const bulk = bulkDeleteEmbed(
     DUMMY.channelId,
@@ -241,7 +188,7 @@ function messagePreviews(): PreviewPayload[] {
         messageId: '555555555555555501',
         author: 'user1#1111',
         authorId: DUMMY.userId,
-        content: 'spam 1',
+        content: 'スパムメッセージ 1',
         createdAt: new Date(now.getTime() - 100_000),
       },
       {
@@ -250,14 +197,13 @@ function messagePreviews(): PreviewPayload[] {
         messageId: '555555555555555502',
         author: 'user2#2222',
         authorId: DUMMY.userId2,
-        content: 'spam 2',
+        content: 'スパムメッセージ 2',
         createdAt: new Date(now.getTime() - 110_000),
       },
     ],
-    now,
-    DUMMY_ZONE,
     'Moderator#0001',
-    'Spam cleanup',
+    now,
+    'スパム一括削除',
   );
   return [
     { label: 'MessageEdit', embeds: edit ? [toPreviewEmbed(edit, C)] : [] },
@@ -266,145 +212,94 @@ function messagePreviews(): PreviewPayload[] {
   ];
 }
 
-function moderationPreviews(): PreviewPayload[] {
+async function moderationPreviews(): Promise<PreviewPayload[]> {
   const C = 'Moderation';
 
-  const wc = (overrides: {
-    caseNumber: number;
-    action: string;
-    source?: string;
-    status?: string;
-    reason?: string;
-    duration?: string;
-    dm?: string;
-    errorCode?: string;
-  }) => {
-    const args: Parameters<typeof writeCasePreview>[0] = {
-      caseNumber: overrides.caseNumber,
-      action: overrides.action,
-      source: overrides.source ?? 'COMMAND',
-      status: overrides.status ?? 'COMPLETED',
-      targetUserId: DUMMY.userId,
-      targetDisplay: 'TargetUser',
-      reason: overrides.reason ?? 'Preview reason — dummy data',
-      duration: overrides.duration ?? 'Permanent',
-      moderatorUserId: DUMMY.userId2,
-      date: now,
-      zone: DUMMY_ZONE,
-      dm: overrides.dm ?? 'true',
-    };
-    if (overrides.errorCode !== undefined) args.errorCode = overrides.errorCode;
-    return toWriteCasePreviewEmbed(writeCasePreview(args), C);
-  };
-
-  const wa = (overrides: { action: string; reason?: string }) =>
-    toPreviewEmbed(
-      writeActionPreview({
-        action: overrides.action,
-        targetUserId: DUMMY.userId,
-        targetDisplay: 'TargetUser',
-        reason: overrides.reason ?? 'Preview reason — dummy data',
+  const cases: Promise<PreviewPayload>[] = [
+    renderWriteCaseEmbed(
+      dummyCaseDto({ caseNumber: 1, action: 'KICK' }),
+      C,
+    ).then((embed) => ({ label: 'Case-KICK-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 2,
+        action: 'BAN',
+        durationSeconds: 604800,
+        reason: 'ルール違反',
       }),
       C,
-    );
-
-  const vk = (overrides: { ok: boolean; code?: string; caseNumber?: number }) =>
-    voiceKickPreview({
-      displayName: 'VoiceUser',
-      userId: DUMMY.userId,
-      moderatorUserId: DUMMY.userId2,
-      ...overrides,
-    });
-
-  return [
-    // writeCase
-    {
-      label: 'Case-KICK-writeCase',
-      embeds: [wc({ caseNumber: 1, action: 'KICK' })],
-    },
-    {
-      label: 'Case-BAN-writeCase',
-      embeds: [
-        wc({
-          caseNumber: 2,
-          action: 'BAN',
-          duration: '604800秒',
-          reason: 'Rule violation',
-        }),
-      ],
-    },
-    {
-      label: 'Case-MUTE-writeCase',
-      embeds: [
-        wc({
-          caseNumber: 3,
-          action: 'MUTE',
-          duration: '3600秒',
-          reason: 'Spam in chat',
-        }),
-      ],
-    },
-    {
-      label: 'Case-UNBAN-writeCase',
-      embeds: [wc({ caseNumber: 4, action: 'UNBAN', dm: '対象外' })],
-    },
-    {
-      label: 'Case-SOFTBAN-writeCase',
-      embeds: [wc({ caseNumber: 5, action: 'SOFTBAN' })],
-    },
-    {
-      label: 'Case-UNMUTE-writeCase',
-      embeds: [wc({ caseNumber: 6, action: 'UNMUTE', dm: '対象外' })],
-    },
-    {
+    ).then((embed) => ({ label: 'Case-BAN-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 3,
+        action: 'MUTE',
+        durationSeconds: 3600,
+        reason: 'チャットでのスパム',
+      }),
+      C,
+    ).then((embed) => ({ label: 'Case-MUTE-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 4,
+        action: 'UNBAN',
+        metadata: { dmDelivered: '対象外' },
+      }),
+      C,
+    ).then((embed) => ({ label: 'Case-UNBAN-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({ caseNumber: 5, action: 'SOFTBAN' }),
+      C,
+    ).then((embed) => ({ label: 'Case-SOFTBAN-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 6,
+        action: 'UNMUTE',
+        metadata: { dmDelivered: '対象外' },
+      }),
+      C,
+    ).then((embed) => ({ label: 'Case-UNMUTE-writeCase', embeds: [embed] })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 100,
+        action: 'BAN',
+        source: 'EXTERNAL',
+        reason: '外部操作',
+        metadata: { dmDelivered: '対象外' },
+      }),
+      C,
+    ).then((embed) => ({
       label: 'Case-EXTERNAL-BAN-writeCase',
-      embeds: [
-        wc({
-          caseNumber: 100,
-          action: 'BAN',
-          source: 'EXTERNAL',
-          reason: '外部操作',
-          dm: '対象外',
-        }),
-      ],
-    },
-    {
+      embeds: [embed],
+    })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 101,
+        action: 'KICK',
+        source: 'EXTERNAL',
+        reason: '外部操作',
+        metadata: { dmDelivered: '対象外' },
+      }),
+      C,
+    ).then((embed) => ({
       label: 'Case-EXTERNAL-KICK-writeCase',
-      embeds: [
-        wc({
-          caseNumber: 101,
-          action: 'KICK',
-          source: 'EXTERNAL',
-          reason: '外部操作',
-          dm: '対象外',
-        }),
-      ],
-    },
-    {
+      embeds: [embed],
+    })),
+    renderWriteCaseEmbed(
+      dummyCaseDto({
+        caseNumber: 200,
+        action: 'BAN',
+        status: 'FAILED',
+        errorCode: 'DISCORD_API_ERROR',
+        metadata: { dmDelivered: false },
+      }),
+      C,
+    ).then((embed) => ({
       label: 'Case-FAILED-writeCase',
-      embeds: [
-        wc({
-          caseNumber: 200,
-          action: 'BAN',
-          status: 'FAILED',
-          errorCode: 'DISCORD_API_ERROR',
-          dm: 'false',
-        }),
-      ],
-    },
-    // writeAction
-    { label: 'Action-KICK', embeds: [wa({ action: 'KICK' })] },
-    {
-      label: 'Action-BAN',
-      embeds: [wa({ action: 'BAN', reason: 'Rule violation' })],
-    },
-    // VoiceKick
-    { label: 'VoiceKick-Success', embeds: [vk({ ok: true, caseNumber: 10 })] },
-    {
-      label: 'VoiceKick-Failure',
-      embeds: [vk({ ok: false, code: 'MEMBER_NOT_FOUND' })],
-    },
+      embeds: [embed],
+    })),
   ];
+
+  return Promise.all(cases);
 }
 
 function serverPreviews(): PreviewPayload[] {
@@ -412,16 +307,24 @@ function serverPreviews(): PreviewPayload[] {
   const s = (
     title: string,
     fields: ReadonlyArray<{ name: string; value: string }>,
-  ) => serverEmbed(title, fields, now, DUMMY_ZONE);
+    color?: number,
+  ) => serverEmbed(title, fields, now, color);
 
   return [
     {
       label: 'MemberJoin',
       embeds: [
         toPreviewEmbed(
-          s('メンバー参加', [
-            { name: 'User', value: `NewUser#9999 (${DUMMY.userId})` },
-          ]),
+          s(
+            'メンバー参加',
+            [
+              {
+                name: 'ユーザー',
+                value: `新規ユーザー#9999 (${DUMMY.userId})`,
+              },
+            ],
+            0x3498db,
+          ),
           C,
         ),
       ],
@@ -430,9 +333,11 @@ function serverPreviews(): PreviewPayload[] {
       label: 'MemberLeave',
       embeds: [
         toPreviewEmbed(
-          s('メンバー退出', [
-            { name: 'User', value: `LeavingUser (${DUMMY.userId})` },
-          ]),
+          s(
+            'メンバー退出',
+            [{ name: 'ユーザー', value: `退出ユーザー (${DUMMY.userId})` }],
+            0x95a5a6,
+          ),
           C,
         ),
       ],
@@ -441,11 +346,18 @@ function serverPreviews(): PreviewPayload[] {
       label: 'MemberNameUpdate',
       embeds: [
         toPreviewEmbed(
-          s('メンバー更新', [
-            { name: 'User', value: `ChangedUser#7777 (${DUMMY.userId})` },
-            { name: 'Before', value: 'OldNickname' },
-            { name: 'After', value: 'NewNickname' },
-          ]),
+          s(
+            'メンバー更新',
+            [
+              {
+                name: 'ユーザー',
+                value: `変更ユーザー#7777 (${DUMMY.userId})`,
+              },
+              { name: '変更前', value: '旧ニックネーム' },
+              { name: '変更後', value: '新ニックネーム' },
+            ],
+            0x3498db,
+          ),
           C,
         ),
       ],
@@ -454,9 +366,16 @@ function serverPreviews(): PreviewPayload[] {
       label: 'UserUpdate',
       embeds: [
         toPreviewEmbed(
-          s('ユーザー更新', [
-            { name: 'User', value: `UpdatedGlobal#8888 (${DUMMY.userId})` },
-          ]),
+          s(
+            'ユーザー更新',
+            [
+              {
+                name: 'ユーザー',
+                value: `更新ユーザー#8888 (${DUMMY.userId})`,
+              },
+            ],
+            0x3498db,
+          ),
           C,
         ),
       ],
@@ -465,9 +384,16 @@ function serverPreviews(): PreviewPayload[] {
       label: 'ChannelCreate',
       embeds: [
         toPreviewEmbed(
-          s('チャンネル作成', [
-            { name: 'Channel', value: `new-channel (${DUMMY.channelId})` },
-          ]),
+          s(
+            'チャンネル作成',
+            [
+              {
+                name: 'チャンネル',
+                value: `新規チャンネル (${DUMMY.channelId})`,
+              },
+            ],
+            0x3498db,
+          ),
           C,
         ),
       ],
@@ -476,7 +402,11 @@ function serverPreviews(): PreviewPayload[] {
       label: 'ChannelUpdate',
       embeds: [
         toPreviewEmbed(
-          s('チャンネル更新', [{ name: 'Channel', value: DUMMY.channelId }]),
+          s(
+            'チャンネル更新',
+            [{ name: 'チャンネル', value: DUMMY.channelId }],
+            0x3498db,
+          ),
           C,
         ),
       ],
@@ -486,14 +416,14 @@ function serverPreviews(): PreviewPayload[] {
       embeds: [
         toPreviewEmbed(
           roleChangeEmbed({
-            targetDisplay: 'TargetUser',
+            targetDisplay: '対象ユーザー',
             targetUserId: DUMMY.userId,
-            roleName: 'Moderator',
+            roleName: 'モデレーター',
             roleId: DUMMY.roleId,
             operation: '追加',
-            executor: `AdminUser (${DUMMY.userId2})`,
+            executor: `管理者ユーザー (${DUMMY.userId2})`,
             date: now,
-            zone: DUMMY_ZONE,
+            zone: 'Asia/Tokyo',
           }),
           C,
         ),
@@ -504,39 +434,50 @@ function serverPreviews(): PreviewPayload[] {
       embeds: [
         toPreviewEmbed(
           roleChangeEmbed({
-            targetDisplay: 'TargetUser',
+            targetDisplay: '対象ユーザー',
             targetUserId: DUMMY.userId,
-            roleName: 'Moderator',
+            roleName: 'モデレーター',
             roleId: DUMMY.roleId,
             operation: '削除',
-            executor: `AdminUser (${DUMMY.userId2})`,
+            executor: `管理者ユーザー (${DUMMY.userId2})`,
             date: now,
-            zone: DUMMY_ZONE,
+            zone: 'Asia/Tokyo',
           }),
           C,
         ),
       ],
     },
     {
-      label: 'BanEvent',
+      label: 'BAN追加',
       embeds: [
         toPreviewEmbed(
-          s('BANイベント', [
-            { name: 'User', value: `BannedUser (${DUMMY.userId})` },
-            { name: '判定', value: 'Audit Log照合済み' },
-          ]),
+          s(
+            'BAN追加',
+            [
+              { name: 'ユーザー', value: `BAN対象ユーザー (${DUMMY.userId})` },
+              { name: '判定', value: 'Audit Log照合済み' },
+            ],
+            0xe74c3c,
+          ),
           C,
         ),
       ],
     },
     {
-      label: 'UnbanEvent',
+      label: 'BAN解除',
       embeds: [
         toPreviewEmbed(
-          s('UNBANイベント', [
-            { name: 'User', value: `UnbannedUser (${DUMMY.userId})` },
-            { name: '判定', value: '内部操作（Bot起因）' },
-          ]),
+          s(
+            'BAN解除',
+            [
+              {
+                name: 'ユーザー',
+                value: `UNBAN対象ユーザー (${DUMMY.userId})`,
+              },
+              { name: '判定', value: '内部操作（Bot起因）' },
+            ],
+            0x2ecc71,
+          ),
           C,
         ),
       ],
@@ -550,16 +491,7 @@ function voicePreviews(): PreviewPayload[] {
     kind: 'Join' | 'Leave' | 'Move',
     oldCh: string | null,
     newCh: string | null,
-  ) =>
-    voiceEmbed(
-      'VoiceUser#0000',
-      DUMMY.userId,
-      kind,
-      oldCh,
-      newCh,
-      now,
-      DUMMY_ZONE,
-    );
+  ) => voiceEmbed('ボイスユーザー#0000', DUMMY.userId, kind, oldCh, newCh, now);
   return [
     {
       label: 'VoiceJoin',
@@ -587,13 +519,11 @@ export interface PreviewEntry {
   embeds: APIEmbed[];
 }
 
-export function buildPreviewInventory(): PreviewEntry[] {
+export async function buildPreviewInventory(): Promise<PreviewEntry[]> {
+  const [moderation] = await Promise.all([moderationPreviews()]);
   return [
     ...messagePreviews().map((p): PreviewEntry => ({ kind: 'message', ...p })),
-    ...moderationPreviews().map((p): PreviewEntry => ({
-      kind: 'moderation',
-      ...p,
-    })),
+    ...moderation.map((p): PreviewEntry => ({ kind: 'moderation', ...p })),
     ...serverPreviews().map((p): PreviewEntry => ({ kind: 'server', ...p })),
     ...voicePreviews().map((p): PreviewEntry => ({ kind: 'voice', ...p })),
   ];
@@ -601,8 +531,6 @@ export function buildPreviewInventory(): PreviewEntry[] {
 
 // ---------------------------------------------------------------
 // Channel validation — fail-closed.
-// Type MUST be explicit 0 (GuildText) or 5 (GuildAnnouncement).
-// Missing / unknown type → REJECTED.
 // ---------------------------------------------------------------
 const SUITABLE_CHANNEL_TYPES = new Set([0, 5]);
 
@@ -629,9 +557,6 @@ export function validateChannelData(
   return { valid: true };
 }
 
-// ---------------------------------------------------------------
-// Channel config
-// ---------------------------------------------------------------
 export type LogKind = 'message' | 'moderation' | 'server' | 'voice';
 
 export interface ChannelConfig {
@@ -643,8 +568,6 @@ function isValidSnowflake(value: unknown): value is string {
   return typeof value === 'string' && SnowflakeSchema.safeParse(value).success;
 }
 
-/** Read configured channel IDs from DB, validated with canonical Snowflake
- *  schema.  Malformed IDs are silently dropped (they cannot route). */
 export async function readConfiguredChannels(
   prisma: Pick<PrismaClient, 'guildSettings'>,
   guildId: string,
@@ -672,9 +595,6 @@ export async function readConfiguredChannels(
     .map(([kind, channelId]) => ({ kind, channelId }));
 }
 
-// ---------------------------------------------------------------
-// Channel fetching & validation
-// ---------------------------------------------------------------
 async function fetchAndValidateChannel(
   rest: Pick<REST, 'get'>,
   channelId: string,
@@ -730,9 +650,6 @@ export async function validateAllChannels(
   return { valid, rejected };
 }
 
-// ---------------------------------------------------------------
-// Sender — only POST /channels/{id}/messages
-// ---------------------------------------------------------------
 const ALLOWED_PREFIX = '/channels/';
 const ALLOWED_SUFFIX = '/messages';
 
@@ -807,9 +724,6 @@ export async function sendPreviews(
   return { planned, sent };
 }
 
-// ---------------------------------------------------------------
-// Error sanitisation
-// ---------------------------------------------------------------
 export function sanitizeErrorMessage(message: string): string {
   return message
     .replace(/(?:discord[\s_-]?token|token)\s*[:=]\s*\S+/gi, '[REDACTED]')
@@ -821,9 +735,6 @@ export function sanitizeErrorMessage(message: string): string {
     .slice(0, 500);
 }
 
-// ---------------------------------------------------------------
-// CLI args
-// ---------------------------------------------------------------
 export interface ParsedArgs {
   confirm: boolean;
   dryRun: boolean;
@@ -840,9 +751,6 @@ export function parseArgs(
   };
 }
 
-// ---------------------------------------------------------------
-// Dependency-injectable runtime boundary
-// ---------------------------------------------------------------
 export interface RuntimeDeps {
   loadConfig(): AppConfig;
   createPrisma?(): Pick<PrismaClient, 'guildSettings' | '$disconnect'>;
@@ -854,16 +762,14 @@ export interface RuntimeDeps {
   logErr?: (msg: string) => void;
 }
 
-// ---------------------------------------------------------------
-// Main — injectable deps enable full behavioral testing.
-// ---------------------------------------------------------------
 export async function main(
   deps: RuntimeDeps,
   args: ParsedArgs = parseArgs(),
 ): Promise<number> {
   if (args.help) {
-    (deps.log ?? console.log)(
-      `Usage: tsx scripts/log-preview.ts --confirm [--dry-run]
+    (
+      deps.log ?? console.log
+    )(`Usage: tsx scripts/log-preview.ts --confirm [--dry-run]
 
   Sends dummy embed previews of every log type to the configured
   log channels in the DEV_GUILD_ID guild.
@@ -881,8 +787,7 @@ Safety guarantees:
   - All data is dummy; no real Discord objects are referenced.
   - No database writes, no moderation actions, no DMs, no state mutation.
   - Only POST /channels/{id}/messages routes are used.
-`,
-    );
+`);
     return 0;
   }
   if (!args.confirm) {
@@ -898,12 +803,8 @@ Safety guarantees:
   const defaultLogErr = (m: string): void => {
     console.error(m);
   };
-
   const log = deps.log ?? defaultLog;
   const logErr = deps.logErr ?? defaultLogErr;
-
-  // Guard: --confirm is required before any expensive init.
-  // No prisma, no REST, no token resolution before this point.
 
   let config: AppConfig;
   try {
@@ -923,7 +824,6 @@ Safety guarantees:
   log(`Mode: ${args.dryRun ? 'dry-run (no messages sent)' : 'LIVE'}`);
   log('');
 
-  // Read configured channels (read-only DB, Snowflake-validated).
   let rawChannels: ChannelConfig[] = [];
   if (deps.createPrisma) {
     const prisma = deps.createPrisma() as PrismaClient;
@@ -938,7 +838,6 @@ Safety guarantees:
     return 0;
   }
 
-  // Validate channels via Discord API.
   const rest = deps.createRest(config.DISCORD_TOKEN);
   const { valid, rejected } = await validateAllChannels(
     rest,
@@ -967,7 +866,7 @@ Safety guarantees:
   }
   log('');
 
-  const inventory = buildPreviewInventory();
+  const inventory = await buildPreviewInventory();
   log(`Preview inventory: ${String(inventory.length)} entry groups`);
   log('');
 
@@ -995,9 +894,6 @@ Safety guarantees:
   return 0;
 }
 
-// ---------------------------------------------------------------
-// CLI entrypoint — only runs when executed directly.
-// ---------------------------------------------------------------
 if (import.meta.url === `file://${process.argv[1] ?? ''}`) {
   const deps: RuntimeDeps = {
     loadConfig,

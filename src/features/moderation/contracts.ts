@@ -144,6 +144,7 @@ export interface ModerationServiceDependencies {
   readonly modlog?: {
     write(guildId: string, event: unknown, caseId?: string): Promise<unknown>;
     editReason?(guildId: string, caseId: string, reason: string): Promise<void>;
+    writeCase(guildId: string, caseId: string): Promise<unknown>;
   };
   readonly clock?: () => Date;
   readonly correlation?: {

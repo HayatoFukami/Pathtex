@@ -1,4 +1,4 @@
-import { discordTimestamp, timestamp, type LogEmbed } from './service.js';
+import { discordTimestamp, type LogEmbed } from './service.js';
 
 export interface RoleChangeEmbedInput {
   targetDisplay: string;
@@ -16,14 +16,19 @@ export function roleChangeEmbed(input: RoleChangeEmbedInput): LogEmbed {
   return {
     title: input.operation === '追加' ? 'ロール付与' : 'ロール除去',
     timestamp: discordTimestamp(input.date),
+    color: input.operation === '追加' ? 0x2ecc71 : 0x95a5a6,
     fields: [
-      { name: '日時', value: timestamp(input.date, input.zone) },
       {
-        name: 'User',
+        name: 'ユーザー',
         value: `${input.targetDisplay} (${input.targetUserId})`,
+        inline: true,
       },
-      { name: 'Role', value: `${input.roleName} (${input.roleId})` },
-      { name: 'Executor', value: input.executor },
+      {
+        name: 'ロール',
+        value: `${input.roleName} (${input.roleId})`,
+        inline: true,
+      },
+      { name: '実行者', value: input.executor, inline: true },
     ],
   };
 }

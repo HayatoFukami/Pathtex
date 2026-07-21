@@ -23,7 +23,6 @@ import {
   type TargetIdentity,
 } from '../../services/target-identity.js';
 import { createCanonicalUserCase } from '../../services/case-service.js';
-import { renderCaseTarget } from '../../services/logging-services.js';
 
 const DAY = 86_400;
 const validId = (id: string) => SnowflakeSchema.safeParse(id).success;
@@ -562,23 +561,7 @@ export class ModerationService {
         return failed(this.errorCode(error), pending.value);
       }
       try {
-        await this.deps.modlog?.write(
-          input.guildId,
-          {
-            type: 'moderation',
-            guildId: input.guildId,
-            occurredAt: this.clock(),
-            timezone: 'UTC',
-            embed: {
-              title: action,
-              fields: [
-                { name: 'Target', value: renderCaseTarget(pending.value) },
-                { name: 'Reason', value: reason },
-              ],
-            },
-          },
-          pending.value.id,
-        );
+        await this.deps.modlog?.writeCase(input.guildId, pending.value.id);
       } catch (error) {
         if (this.errorStatus(error) === 401) throw error;
         /* modlog is non-fatal */

@@ -198,4 +198,10 @@ export class DiscordVoiceAdapter implements VoicePort {
       actorPermissions.has('ViewChannel')
     );
   }
+  public writeCase(guildId: string, caseId: string): Promise<void> {
+    void guildId;
+    void caseId;
+    // Voice adapter does not own modlog delivery; wired externally.
+    return Promise.resolve();
+  }
 }
