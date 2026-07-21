@@ -3,8 +3,11 @@
     "explorer": {
       "model": "deepseek/deepseek-v4-flash"
     },
+    "librarian": {
+      "model": "deepseek/deepseek-v4-flash"
+    },
     "designer": {
-      "models": "alibaba-token-plan/qwen3.8-max-preview"
+      "model": "alibaba-token-plan/qwen3.8-max-preview"
     },
     "fixer": {
       "model": "alibaba-token-plan/qwen3.8-max-preview"
