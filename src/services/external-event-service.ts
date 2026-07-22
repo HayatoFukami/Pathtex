@@ -78,6 +78,7 @@ export interface AuditQuery {
   limit: 25;
   after: Date;
   before: Date;
+  type: ExternalAuditEntry['action'];
 }
 export interface ExternalAuditReader {
   list(
@@ -168,6 +169,7 @@ export class ExternalAuditPolicy {
           limit: 25,
           after: new Date(input.occurredAt.getTime() - 5_000),
           before: new Date(input.occurredAt.getTime() + 5_000),
+          type: input.expectedAction,
         })
       )
         .map((entry) => ExternalAuditEntrySchema.safeParse(entry))

@@ -51,6 +51,13 @@ export class SnapshotService {
       return err('INVALID_INPUT', 'Invalid member identity');
     return ok(await this.repository.getMember(guildId, userId));
   }
+  public async getMembersForUser(
+    userId: string,
+  ): Promise<Result<MemberSnapshotDto[]>> {
+    if (!SnowflakeSchema.safeParse(userId).success)
+      return err('INVALID_INPUT', 'Invalid user ID');
+    return ok(await this.repository.listMembersForUser(userId));
+  }
   public async deleteMessage(id: string): Promise<Result<void>> {
     if (!SnowflakeSchema.safeParse(id).success)
       return err('INVALID_INPUT', 'Invalid message ID');

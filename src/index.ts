@@ -994,7 +994,10 @@ export function createBootstrapDependencies(
     ): Promise<readonly ExternalAuditEntry[]> => {
       try {
         const guild = await rawClient.guilds.fetch(guildId);
-        const logs = await guild.fetchAuditLogs({ limit: query.limit });
+        const logs = await guild.fetchAuditLogs({
+          limit: query.limit,
+          type: auditLogEventType(query.type),
+        });
         const entries: ExternalAuditEntry[] = [];
         for (const entry of logs.entries.values()) {
           const createdAt = new Date(entry.createdTimestamp);
@@ -1090,7 +1093,7 @@ export function createBootstrapDependencies(
         const guild = await rawClient.guilds.fetch(guildId);
         const logs = await guild.fetchAuditLogs({
           limit: query.limit,
-          type: AuditLogEvent.MemberRoleUpdate,
+          type: auditLogEventType(query.type),
         });
         const entries: import('./services/role-audit-resolver.js').RoleAuditEntry[] =
           [];
@@ -1456,9 +1459,14 @@ export function buildRoleChangeInput(
   };
 }
 
-function messageView(message: Message): MessageView | null {
-  const author = (message as unknown as { author?: Message['author'] }).author;
-  if (!message.guildId || !author) return null;
+function messageView(message: Message | PartialMessage): MessageView | null {
+  const author = message.author;
+  const content = message.content;
+  // A usable view requires a guild message with a resolved author and string
+  // content. This rejects partial payloads (e.g. author-present/content-null)
+  // so they cannot serve as a sufficient fallback; nullable partial-only fields
+  // (content, system) are required or normalized rather than passed as null.
+  if (!message.guildId || !author || typeof content !== 'string') return null;
   return {
     guildId: message.guildId,
     channelId: message.channelId,
@@ -1471,10 +1479,10 @@ function messageView(message: Message): MessageView | null {
           return url ? { avatarUrl: url } : {};
         })()
       : {}),
-    content: message.content,
+    content,
     authorIsBot: author.bot,
     webhook: message.webhookId !== null,
-    system: message.system,
+    system: message.system === true,
     attachments: [...message.attachments.values()].map((item) => ({
       url: item.url,
       filename: item.name,
@@ -1508,6 +1516,14 @@ function messageView(message: Message): MessageView | null {
   };
 }
 
+export function auditLogEventType(
+  action: ExternalAuditEntry['action'],
+): AuditLogEvent {
+  if (action === 'MEMBER_KICK') return AuditLogEvent.MemberKick;
+  if (action === 'MEMBER_BAN_ADD') return AuditLogEvent.MemberBanAdd;
+  if (action === 'MEMBER_BAN_REMOVE') return AuditLogEvent.MemberBanRemove;
+  return AuditLogEvent.MemberRoleUpdate;
+}
 export interface MessageDeleteAuditEntry {
   action: unknown;
   createdTimestamp: number;
@@ -1576,16 +1592,15 @@ export function installMessageLoggingListeners(
     const result = await settings.get(message.guildId);
     if (!result.ok || !isConfiguredLogChannel(message.channelId, result.value))
       return false;
-    if (message.author?.bot === true) return true;
-    if (message.author !== null) return false;
+    const botUserId = client.user?.id;
+    // Complete payload: suppress only Pathtex's own log messages so that other
+    // bots and webhooks in a configured log channel remain eligible for logging.
+    if (message.author) return message.author.id === botUserId;
+    // Partial payload (author uncached): identify Pathtex via the snapshot author.
     const snapshot = await snapshots.getMessage(message.id);
     return (
       snapshot.ok &&
-      isBotAuthoredMessage(
-        undefined,
-        snapshot.value?.authorUserId,
-        client.user?.id,
-      )
+      isBotAuthoredMessage(undefined, snapshot.value?.authorUserId, botUserId)
     );
   };
   const queue = new MessageLaneQueue();
@@ -1604,16 +1619,45 @@ export function installMessageLoggingListeners(
   });
   client.on('messageUpdate', (before, after) => {
     const occurredAt = new Date();
+    // discord.js types newMessage as a full Message but emits a PartialMessage
+    // at runtime when the updated message is uncached; widen to handle both.
+    const updated = after as Message | PartialMessage;
     report(
       'gateway.message_update_failed',
-      queue.run(after.id, async () => {
-        if (await isBotLogMessage(after)) {
-          await snapshots.deleteMessage(after.id);
+      queue.run(updated.id, async () => {
+        if (await isBotLogMessage(updated)) {
+          await snapshots.deleteMessage(updated.id);
           return;
         }
-        const fullAfter = await (after as Message).fetch();
-        const oldView = messageView(before as Message);
-        const newView = messageView(fullAfter);
+        const oldView = messageView(before);
+        let newView: MessageView | null = null;
+        if (updated.partial) {
+          // Partial payload: complete it via REST.
+          let fetched: Message | null = null;
+          try {
+            fetched = await updated.fetch();
+          } catch (error) {
+            // A 401 must reach the fatal handler even when the partial payload
+            // is otherwise loggable; never mask an auth failure with a fallback.
+            if (isUnauthorized(error)) throw error;
+            // Other failures: fall back to the existing payload when it still
+            // yields a sufficient view; otherwise surface the error as before.
+            newView = messageView(after);
+            if (!newView) throw error;
+          }
+          if (fetched) {
+            // Re-apply the Pathtex-self recursion guard on the authoritative
+            // payload: a partial's uncached author can mask Pathtex's own message.
+            if (await isBotLogMessage(fetched)) {
+              await snapshots.deleteMessage(updated.id);
+              return;
+            }
+            newView = messageView(fetched);
+          }
+        } else {
+          // Complete payload: use it directly without a REST fetch.
+          newView = messageView(updated);
+        }
         if (newView) await logging.messageUpdate(oldView, newView, occurredAt);
       }),
     );
@@ -1628,7 +1672,7 @@ export function installMessageLoggingListeners(
           await snapshots.deleteMessage(message.id);
           return;
         }
-        const view = messageView(message as Message);
+        const view = messageView(message);
         await logging.messageDelete(
           view,
           message.guildId,
@@ -1665,7 +1709,7 @@ export function installMessageLoggingListeners(
         if (ids.length === 0) return;
         const cached = all
           .filter((message) => !excluded.has(message.id))
-          .map((message) => messageView(message as Message))
+          .map((message) => messageView(message))
           .filter((value): value is MessageView => value !== null);
         await logging.messageDeleteBulk(
           first.guildId,
@@ -1679,7 +1723,7 @@ export function installMessageLoggingListeners(
   });
 }
 
-function installGatewayListeners(
+export function installGatewayListeners(
   client: Client,
   logging: LoggingEventPipeline,
   settings: SettingsService,
@@ -1704,15 +1748,7 @@ function installGatewayListeners(
 ): void {
   const report = (event: string, operation: Promise<void>): void => {
     void operation.catch((error: unknown) => {
-      const status =
-        typeof error === 'object' && error !== null && 'status' in error
-          ? (error as { status?: unknown }).status
-          : undefined;
-      const code =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? (error as { code?: unknown }).code
-          : undefined;
-      if (status === 401 || code === 401) {
+      if (isUnauthorized(error)) {
         fatal(error);
         return;
       }
@@ -2031,18 +2067,15 @@ function installGatewayListeners(
     )
       return;
     const userUpdateOccurredAt = new Date();
-    for (const guild of after.client.guilds.cache.values())
-      if (guild.members.cache.has(after.id))
-        report(
-          'gateway.user_update_failed',
-          logging.server(
-            guild.id,
-            'ユーザー更新',
-            [{ name: 'ユーザー', value: `${after.tag} (${after.id})` }],
-            userUpdateOccurredAt,
-            0x3498db,
-          ),
-        );
+    report(
+      'gateway.user_update_failed',
+      logging.userUpdate(
+        after.id,
+        after.username,
+        after.globalName,
+        userUpdateOccurredAt,
+      ),
+    );
   });
   client.on('guildBanAdd', (ban) => {
     report(
@@ -2073,7 +2106,6 @@ function installGatewayListeners(
     );
   });
   client.on('channelCreate', (channel) => {
-    const channelCreateOccurredAt = new Date();
     void (async () => {
       const guild = channel.guild;
       const role = guild.roles.cache.find((item) => item.name === 'Muted');
@@ -2099,33 +2131,12 @@ function installGatewayListeners(
         'Muted role overwrite failed',
       );
     });
-    report(
-      'gateway.channel_create_failed',
-      logging.server(
-        channel.guild.id,
-        'チャンネル作成',
-        [{ name: 'チャンネル', value: `${channel.name} (${channel.id})` }],
-        channelCreateOccurredAt,
-        0x3498db,
-      ),
-    );
   });
   client.on('channelUpdate', (_before, after) => {
-    const channelUpdateOccurredAt = new Date();
     const guildChannel = after as unknown as {
       guild: { id: string };
       id: string;
     };
-    report(
-      'gateway.channel_update_failed',
-      logging.server(
-        guildChannel.guild.id,
-        'チャンネル更新',
-        [{ name: 'チャンネル', value: guildChannel.id }],
-        channelUpdateOccurredAt,
-        0x3498db,
-      ),
-    );
     const internalSlowmode = correlations.consume(
       'slowmode',
       `${guildChannel.guild.id}:${guildChannel.id}`,
@@ -2140,27 +2151,18 @@ function installGatewayListeners(
   });
   client.on('channelDelete', (channel) => {
     if ('guildId' in channel && channel.guildId) {
-      settings.invalidate(channel.guildId);
       const guildId = channel.guildId;
-      void ignores.clearChannel(guildId, channel.id);
-      void scheduler.cancel({
-        guildId,
-        targetUserId: null,
-        channelId: channel.id,
-        type: 'RESTORE_SLOWMODE',
-      });
-      void configuration.get(guildId).then((result) => {
-        if (!result.ok) return;
-        const kinds = [
-          ['message', result.value.messageLogChannelId],
-          ['moderation', result.value.modlogChannelId],
-          ['server', result.value.serverLogChannelId],
-          ['voice', result.value.voiceLogChannelId],
-        ] as const;
-        for (const [kind, configured] of kinds)
-          if (configured === channel.id)
-            void configuration.disableLog(guildId, kind);
-      });
+      const channelId = channel.id;
+      report(
+        'gateway.channel_delete_failed',
+        (async () => {
+          try {
+            await ignores.clearChannel(guildId, channelId);
+          } finally {
+            settings.invalidate(guildId);
+          }
+        })(),
+      );
     }
   });
   client.on('roleDelete', (role) => {

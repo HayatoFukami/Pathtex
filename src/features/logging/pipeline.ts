@@ -1,8 +1,11 @@
 import type { SnapshotService } from '../../services/snapshot-service.js';
-import type { LoggingEventAdapter } from './adapters.js';
+import { isUnauthorized, type LoggingEventAdapter } from './adapters.js';
 import type { LogDeliveryService } from './service.js';
 import { serverEmbed, type MessageView } from './events.js';
-import type { JsonValue } from '../../repositories/contracts.js';
+import type {
+  JsonValue,
+  MemberSnapshotDto,
+} from '../../repositories/contracts.js';
 import type { Logger } from 'pino';
 
 /** Gateway orchestration keeps ordering here; domain services remain Discord agnostic. */
@@ -12,7 +15,11 @@ export interface AutomodPort {
 export interface LoggingPipelinePorts {
   snapshots: Pick<
     SnapshotService,
-    'saveMessage' | 'getMessage' | 'deleteMessage'
+    | 'saveMessage'
+    | 'getMessage'
+    | 'deleteMessage'
+    | 'saveMember'
+    | 'getMembersForUser'
   >;
   automod?: AutomodPort;
   events: LoggingEventAdapter;
@@ -233,5 +240,90 @@ export class LoggingEventPipeline {
       occurredAt,
     );
     if (embed) await this.ports.delivery.deliver(guildId, 'voice', embed);
+  }
+  public async userUpdate(
+    userId: string,
+    username: string,
+    globalName: string | null,
+    occurredAt: Date,
+  ): Promise<void> {
+    const result = await this.ports.snapshots.getMembersForUser(userId);
+    if (!result.ok) return;
+    const members = result.value;
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < members.length) {
+        const member = members[cursor];
+        cursor += 1;
+        if (member === undefined) continue;
+        try {
+          await this.applyUserUpdateToMember(
+            member,
+            username,
+            globalName,
+            occurredAt,
+          );
+        } catch (error: unknown) {
+          if (isUnauthorized(error)) throw error;
+          this.ports.logger?.error(
+            {
+              event: 'logging.pipeline.user_update_guild_failed',
+              guildId: member.guildId,
+              userId,
+              errorName: error instanceof Error ? error.name : 'unknown',
+            },
+            'userUpdate fanout failed for guild',
+          );
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(5, members.length) }, () => worker()),
+    );
+  }
+  private async applyUserUpdateToMember(
+    member: MemberSnapshotDto,
+    username: string,
+    globalName: string | null,
+    occurredAt: Date,
+  ): Promise<void> {
+    const usernameChanged = member.username !== username;
+    const globalNameChanged = (member.globalName ?? null) !== globalName;
+    if (!usernameChanged && !globalNameChanged) return;
+    const user = `${username} (${member.userId})`;
+    if (usernameChanged)
+      await this.server(
+        member.guildId,
+        'ユーザー名変更',
+        [
+          { name: 'ユーザー', value: user },
+          { name: '変更前', value: member.username },
+          { name: '変更後', value: username },
+        ],
+        occurredAt,
+        0x3498db,
+      );
+    if (globalNameChanged)
+      await this.server(
+        member.guildId,
+        'グローバル表示名変更',
+        [
+          { name: 'ユーザー', value: user },
+          { name: '変更前', value: member.globalName ?? 'なし' },
+          { name: '変更後', value: globalName ?? 'なし' },
+        ],
+        occurredAt,
+        0x3498db,
+      );
+    const saved = await this.ports.snapshots.saveMember({
+      guildId: member.guildId,
+      userId: member.userId,
+      username,
+      globalName,
+      nickname: member.nickname ?? null,
+      joinedAt: member.joinedAt ?? null,
+    });
+    if (!saved.ok)
+      throw new Error(`Member snapshot save failed: ${saved.error.code}`);
   }
 }

@@ -59,8 +59,6 @@ const REQUIRED_LABELS = new Set([
   'MemberLeave',
   'MemberNameUpdate',
   'UserUpdate',
-  'ChannelCreate',
-  'ChannelUpdate',
   'RoleAdd',
   'RoleRemove',
   'BAN追加',
@@ -370,22 +368,6 @@ describe('inventory', () => {
 
     it('UserUpdate embed has blue colour', () => {
       const entry = inventory.find((e) => e.label === 'UserUpdate');
-      expect(entry).toBeDefined();
-      for (const em of (entry as PreviewEntry).embeds) {
-        expect(em.color).toBe(0x3498db);
-      }
-    });
-
-    it('ChannelCreate embed has blue colour', () => {
-      const entry = inventory.find((e) => e.label === 'ChannelCreate');
-      expect(entry).toBeDefined();
-      for (const em of (entry as PreviewEntry).embeds) {
-        expect(em.color).toBe(0x3498db);
-      }
-    });
-
-    it('ChannelUpdate embed has blue colour', () => {
-      const entry = inventory.find((e) => e.label === 'ChannelUpdate');
       expect(entry).toBeDefined();
       for (const em of (entry as PreviewEntry).embeds) {
         expect(em.color).toBe(0x3498db);

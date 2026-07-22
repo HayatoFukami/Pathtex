@@ -170,6 +170,8 @@ describe('AutoMod', () => {
         saveMessage,
         getMessage: vi.fn(),
         deleteMessage: vi.fn(),
+        saveMember: vi.fn(),
+        getMembersForUser: vi.fn(),
       },
       automod: {
         inspect: vi.fn().mockRejectedValue(new Error('automod down')),

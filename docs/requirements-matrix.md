@@ -30,7 +30,7 @@
 | `guildMemberAdd`、`guildMemberRemove`、`guildMemberUpdate`、`userUpdate` | なし | N/A / ログ設定に従う | ServerLogService、MemberRoleChangeService、RaidService、ModerationService | [RaidMode](31-raidmode.md)、[設定・ログ](40-configuration-and-logs.md)§8.10、基盤§3.5・§4.8 |
 | `voiceStateUpdate` | なし | N/A / ログ設定に従う | VoiceLogService、VoiceService | [設定・ログ](40-configuration-and-logs.md)、[ツール・ボイス](50-tools-and-voice.md) |
 | `guildBanAdd`、`guildBanRemove` | なし | N/A / ケース・ログ設定に従う | ModerationService、AuditService | [モデレーション](20-moderation.md)、基盤§3.5 |
-| `channelCreate`、`channelDelete`、`channelUpdate` | なし | N/A / 設定に従う | SettingsService、ModerationService、AuditService | [設定・ログ](40-configuration-and-logs.md)、[モデレーション](20-moderation.md)、基盤§3.5 |
+| `channelCreate`、`channelDelete`、`channelUpdate` | なし | N/A / サーバーログ対象外（Muted上書き・Slowmode相関・composite cleanupのみ） | SettingsService、IgnoreConfigurationService、SchedulerService | [設定・ログ](40-configuration-and-logs.md)§8.10、基盤§3.5・§4.11 |
 | `guildCreate`、`guildDelete` | なし | N/A / 保持マーカー更新 | GuildLifecycleService | 基盤§3.4、§4.14 |
 
 ### 正本への参照

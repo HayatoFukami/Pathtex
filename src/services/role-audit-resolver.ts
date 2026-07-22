@@ -115,6 +115,7 @@ export class RoleBatchResolver {
           limit: EXTERNAL_AUDIT_LIMIT,
           after: new Date(windowStart),
           before: new Date(windowEnd),
+          type: 'MEMBER_ROLE_UPDATE',
         })
       )
         .map((entry) => RoleAuditEntrySchema.safeParse(entry))

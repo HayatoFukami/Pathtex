@@ -6,6 +6,7 @@ import {
 } from '../src/features/configuration/service.js';
 import { serviceSettingsText } from '../src/features/configuration/commands.js';
 import {
+  installGatewayListeners,
   installMessageLoggingListeners,
   matchMessageDeleteAudit,
 } from '../src/index.js';
@@ -18,6 +19,7 @@ import {
   LogDeliveryService,
   LogEmbedSchema,
   LoggingEventAdapter,
+  LoggingEventPipeline,
   messageChanged,
   messageEditEmbed,
   messageDeleteEmbed,
@@ -27,6 +29,8 @@ import {
   serverEmbed,
   type MessageView,
 } from '../src/features/logging/index.js';
+import type { MemberSnapshotDto } from '../src/repositories/contracts.js';
+import { PrismaSnapshotRepository } from '../src/repositories/prisma-repositories.js';
 
 describe('configuration and logging slice', () => {
   const guildId = '12345678901234567';
@@ -1494,5 +1498,943 @@ describe('Phase 2 per-message serialization', () => {
     resolveCreate();
     await flushMicrotasks();
     expect(calls).toEqual(['create', 'bulk']);
+  });
+});
+
+describe('Phase 3 gateway message intake fixes', () => {
+  const guildId = '12345678901234567';
+  const pathtexId = 'pathtex-bot';
+  const flush = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, 0));
+
+  const logChannels = {
+    messageLogChannelId: 'message',
+    modlogChannelId: 'moderation',
+    serverLogChannelId: 'server',
+    voiceLogChannelId: 'voice',
+  };
+
+  const message = (overrides: Record<string, unknown> = {}) => ({
+    guildId,
+    channelId: 'other',
+    id: 'message-id',
+    content: 'content',
+    author: { id: 'human', tag: 'human#0', bot: false },
+    attachments: new Map(),
+    embeds: [],
+    flags: { bitfield: 0 },
+    mentions: { users: new Map(), roles: new Map(), everyone: false },
+    channel: {},
+    createdAt: new Date('2026-07-20T00:00:00.000Z'),
+    webhookId: null,
+    system: false,
+    url: 'https://discord.test/message',
+    partial: false,
+    fetch: vi.fn(),
+    ...overrides,
+  });
+
+  const install = (snapshotAuthors = new Map<string, string>()) => {
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: pathtexId },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    const snapshots = {
+      getMessage: vi.fn((id: string) =>
+        Promise.resolve({
+          ok: true as const,
+          value: snapshotAuthors.has(id)
+            ? ({ authorUserId: snapshotAuthors.get(id) } as never)
+            : null,
+        }),
+      ),
+      deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const logging = {
+      messageCreate: vi.fn().mockResolvedValue(undefined),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn().mockResolvedValue(undefined),
+      messageDeleteBulk: vi.fn().mockResolvedValue(undefined),
+    };
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    installMessageLoggingListeners(
+      client as never,
+      logging,
+      {
+        get: vi.fn().mockResolvedValue({ ok: true, value: logChannels }),
+      } as never,
+      snapshots,
+      logger as never,
+      fatal,
+    );
+    return { handlers, snapshots, logging, logger, fatal };
+  };
+
+  // --- (1) Recursive-log filtering suppresses only Pathtex's own messages ---
+
+  it('logs another bot message in a configured log channel instead of filtering it', async () => {
+    const { handlers, logging, snapshots } = install();
+
+    handlers.get('messageCreate')?.(
+      message({
+        id: 'other-bot',
+        channelId: 'message',
+        author: { id: 'other-bot', tag: 'other#0', bot: true },
+      }) as never,
+    );
+    await flush();
+
+    expect(logging.messageCreate).toHaveBeenCalledOnce();
+    expect(snapshots.deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('logs a webhook message in a configured log channel instead of filtering it', async () => {
+    const { handlers, logging, snapshots } = install();
+
+    handlers.get('messageCreate')?.(
+      message({
+        id: 'webhook-msg',
+        channelId: 'message',
+        webhookId: 'webhook-1',
+        author: { id: 'webhook-user', tag: 'webhook#0', bot: false },
+      }) as never,
+    );
+    await flush();
+
+    expect(logging.messageCreate).toHaveBeenCalledOnce();
+    expect(snapshots.deleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('suppresses only Pathtex own log message in a configured log channel', async () => {
+    const { handlers, logging, snapshots } = install();
+
+    handlers.get('messageCreate')?.(
+      message({
+        id: 'pathtex-own',
+        channelId: 'message',
+        author: { id: pathtexId, tag: 'pathtex#0', bot: true },
+      }) as never,
+    );
+    await flush();
+
+    expect(logging.messageCreate).not.toHaveBeenCalled();
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('pathtex-own');
+  });
+
+  it('suppresses a partial message whose snapshot author is Pathtex', async () => {
+    const { handlers, logging, snapshots } = install(
+      new Map([['partial-self', pathtexId]]),
+    );
+
+    handlers.get('messageDelete')?.(
+      message({
+        id: 'partial-self',
+        channelId: 'message',
+        author: null,
+      }) as never,
+    );
+    await flush();
+
+    expect(logging.messageDelete).not.toHaveBeenCalled();
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('partial-self');
+  });
+
+  it('logs a partial message whose snapshot author is another bot', async () => {
+    const { handlers, logging, snapshots } = install(
+      new Map([['partial-other', 'other-bot']]),
+    );
+
+    handlers.get('messageDelete')?.(
+      message({
+        id: 'partial-other',
+        channelId: 'message',
+        author: null,
+      }) as never,
+    );
+    await flush();
+
+    expect(logging.messageDelete).toHaveBeenCalledOnce();
+    expect(snapshots.deleteMessage).not.toHaveBeenCalled();
+  });
+
+  // --- (2) messageUpdate avoids an unconditional REST fetch ---
+
+  it('uses a complete after payload directly without a REST fetch', async () => {
+    const { handlers, logging } = install();
+    const fetch = vi.fn();
+    const before = message({ id: 'msg-1', content: 'before' });
+    const after = message({
+      id: 'msg-1',
+      content: 'after',
+      partial: false,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(logging.messageUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'before' }),
+      expect.objectContaining({ content: 'after', messageId: 'msg-1' }),
+      expect.any(Date),
+    );
+  });
+
+  it('fetches a partial after payload and logs the fetched view', async () => {
+    const { handlers, logging } = install();
+    const fetched = message({ id: 'msg-1', content: 'fetched-content' });
+    const fetch = vi.fn().mockResolvedValue(fetched);
+    const before = message({ id: 'msg-1', content: 'before' });
+    const after = message({
+      id: 'msg-1',
+      content: '',
+      author: null,
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(logging.messageUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'before' }),
+      expect.objectContaining({ content: 'fetched-content' }),
+      expect.any(Date),
+    );
+  });
+
+  it('falls back to a sufficient partial view when the fetch fails', async () => {
+    const { handlers, logging, logger } = install();
+    const fetch = vi.fn().mockRejectedValue(new Error('network down'));
+    const before = message({ id: 'msg-1', content: 'before' });
+    const after = message({
+      id: 'msg-1',
+      content: 'partial-content',
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(logging.messageUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'before' }),
+      expect.objectContaining({ content: 'partial-content' }),
+      expect.any(Date),
+    );
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('reports the error when the fetch fails and the partial view is insufficient', async () => {
+    const { handlers, logging, logger, fatal } = install();
+    const fetch = vi.fn().mockRejectedValue(new Error('network down'));
+    const before = message({ id: 'msg-1', content: 'before' });
+    const after = message({
+      id: 'msg-1',
+      content: '',
+      author: null,
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(fatal).not.toHaveBeenCalled();
+  });
+
+  it('routes a 401 fetch failure on a partial update to fatal', async () => {
+    const { handlers, logging, logger, fatal } = install();
+    const fetchError = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const fetch = vi.fn().mockRejectedValue(fetchError);
+    const before = message({ id: 'msg-1', content: 'before' });
+    const after = message({
+      id: 'msg-1',
+      content: '',
+      author: null,
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fatal).toHaveBeenCalledWith(fetchError);
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  // --- Oracle remediation regressions ---
+
+  it('routes a 401 fetch failure to fatal even when the partial view is sufficient', async () => {
+    const { handlers, logging, logger, fatal } = install();
+    const fetchError = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const fetch = vi.fn().mockRejectedValue(fetchError);
+    const before = message({ id: 'msg-1', content: 'before' });
+    // Sufficient partial (author + content present): a naive fallback would mask
+    // the 401, so the auth failure must be rethrown before any fallback view.
+    const after = message({
+      id: 'msg-1',
+      content: 'partial-content',
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fatal).toHaveBeenCalledWith(fetchError);
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('re-applies the recursion guard after a partial fetch reveals Pathtex own message', async () => {
+    const { handlers, logging, snapshots } = install();
+    // The authoritative fetched payload is Pathtex's own message in a log channel.
+    const fetched = message({
+      id: 'msg-1',
+      channelId: 'message',
+      content: 'pathtex log line',
+      author: { id: pathtexId, tag: 'pathtex#0', bot: true },
+    });
+    const fetch = vi.fn().mockResolvedValue(fetched);
+    const before = message({ id: 'msg-1', content: 'before' });
+    // Partial in the log channel with no cached author and no snapshot author, so
+    // the initial guard cannot yet identify it as Pathtex's own message.
+    const after = message({
+      id: 'msg-1',
+      channelId: 'message',
+      content: '',
+      author: null,
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(snapshots.deleteMessage).toHaveBeenCalledWith('msg-1');
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+  });
+
+  it('rejects an author-present/content-null partial fallback as insufficient', async () => {
+    const { handlers, logging, logger, fatal } = install();
+    const fetch = vi.fn().mockRejectedValue(new Error('network down'));
+    const before = message({ id: 'msg-1', content: 'before' });
+    // Author present but content null: must not become a usable fallback view.
+    const after = message({
+      id: 'msg-1',
+      content: null,
+      partial: true,
+      fetch,
+    });
+
+    handlers.get('messageUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(logging.messageUpdate).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(fatal).not.toHaveBeenCalled();
+  });
+});
+
+describe('Phase 4A userUpdate fanout', () => {
+  const occurredAt = new Date('2026-07-20T12:34:56.789Z');
+  const member = (
+    overrides: Partial<MemberSnapshotDto> = {},
+  ): MemberSnapshotDto => ({
+    guildId: '111111111111111111',
+    userId: '999999999999999999',
+    username: 'oldname',
+    globalName: 'oldglobal',
+    nickname: null,
+    joinedAt: null,
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  });
+  const buildPipeline = (
+    members: MemberSnapshotDto[],
+    deliver?: unknown,
+    logger?: unknown,
+  ) => {
+    const getMembersForUser = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: members });
+    const saveMember = vi.fn().mockResolvedValue({ ok: true, value: {} });
+    const snapshots = {
+      saveMessage: vi.fn().mockResolvedValue({ ok: true, value: {} }),
+      getMessage: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+      saveMember,
+      getMembersForUser,
+    };
+    const pipeline = new LoggingEventPipeline({
+      snapshots,
+      events: {} as never,
+      delivery: {
+        deliver: deliver ?? vi.fn().mockResolvedValue({ status: 'delivered' }),
+      } as never,
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      logger: (logger ?? { error: vi.fn() }) as never,
+    });
+    return { pipeline, saveMember, getMembersForUser };
+  };
+
+  it('emits logs and saves for persisted memberships regardless of gateway cache', async () => {
+    const members = [
+      member({ guildId: '111111111111111111' }),
+      member({ guildId: '222222222222222222' }),
+    ];
+    const deliver = vi.fn().mockResolvedValue({ status: 'delivered' });
+    const { pipeline, saveMember } = buildPipeline(members, deliver);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'newname',
+      'oldglobal',
+      occurredAt,
+    );
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    const guilds = deliver.mock.calls.map((call) => call[0] as string);
+    expect(guilds).toContain('111111111111111111');
+    expect(guilds).toContain('222222222222222222');
+    const titles = deliver.mock.calls.map(
+      (call) => (call[2] as { title: string }).title,
+    );
+    expect(titles).toEqual(['ユーザー名変更', 'ユーザー名変更']);
+    expect(saveMember).toHaveBeenCalledTimes(2);
+  });
+
+  it('limits concurrent per-guild processing to 5 for 6+ memberships', async () => {
+    const members = Array.from({ length: 6 }, (_, index) =>
+      member({ guildId: `10000000000000000${String(index)}` }),
+    );
+    let active = 0;
+    let maxActive = 0;
+    const deliver = vi.fn(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return { status: 'delivered' };
+    });
+    const { pipeline } = buildPipeline(members, deliver);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'newname',
+      'oldglobal',
+      occurredAt,
+    );
+
+    expect(deliver).toHaveBeenCalledTimes(6);
+    expect(maxActive).toBe(5);
+  });
+
+  it('preserves nickname and joinedAt when saving the updated snapshot', async () => {
+    const joinedAt = new Date('2025-01-01T00:00:00.000Z');
+    const members = [member({ guildId: 'g1', nickname: 'nick', joinedAt })];
+    const deliver = vi.fn().mockResolvedValue({ status: 'delivered' });
+    const { pipeline, saveMember } = buildPipeline(members, deliver);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'newname',
+      'newglobal',
+      occurredAt,
+    );
+
+    expect(saveMember).toHaveBeenCalledWith({
+      guildId: 'g1',
+      userId: '999999999999999999',
+      username: 'newname',
+      globalName: 'newglobal',
+      nickname: 'nick',
+      joinedAt,
+    });
+  });
+
+  it('emits ユーザー名変更 before グローバル表示名変更 with before/after and なし for null', async () => {
+    const members = [
+      member({ guildId: 'g1', username: 'oldname', globalName: null }),
+    ];
+    const deliver = vi.fn().mockResolvedValue({ status: 'delivered' });
+    const { pipeline } = buildPipeline(members, deliver);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'newname',
+      'newglobal',
+      occurredAt,
+    );
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    const embeds = deliver.mock.calls.map(
+      (call) =>
+        call[2] as {
+          title: string;
+          fields: Array<{ name: string; value: string }>;
+        },
+    );
+    expect(embeds[0]?.title).toBe('ユーザー名変更');
+    expect(embeds[1]?.title).toBe('グローバル表示名変更');
+    expect(embeds[0]?.fields.find((f) => f.name === '変更前')?.value).toBe(
+      'oldname',
+    );
+    expect(embeds[0]?.fields.find((f) => f.name === '変更後')?.value).toBe(
+      'newname',
+    );
+    expect(embeds[1]?.fields.find((f) => f.name === '変更前')?.value).toBe(
+      'なし',
+    );
+    expect(embeds[1]?.fields.find((f) => f.name === '変更後')?.value).toBe(
+      'newglobal',
+    );
+  });
+
+  it('isolates a per-guild delivery failure so other guilds still get logs and saves', async () => {
+    const members = [
+      member({ guildId: 'gA' }),
+      member({ guildId: 'gB' }),
+      member({ guildId: 'gC' }),
+    ];
+    const deliver = vi.fn((guildId: string) => {
+      if (guildId === 'gB') return Promise.reject(new Error('delivery down'));
+      return Promise.resolve({ status: 'delivered' });
+    });
+    const logger = { error: vi.fn() };
+    const { pipeline, saveMember } = buildPipeline(members, deliver, logger);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'newname',
+      'oldglobal',
+      occurredAt,
+    );
+
+    const attempted = deliver.mock.calls.map((call) => call[0]);
+    expect(attempted).toContain('gA');
+    expect(attempted).toContain('gB');
+    expect(attempted).toContain('gC');
+    expect(logger.error).toHaveBeenCalled();
+    const savedGuilds = saveMember.mock.calls.map(
+      (call) => (call[0] as { guildId: string }).guildId,
+    );
+    expect(savedGuilds).toContain('gA');
+    expect(savedGuilds).toContain('gC');
+    expect(savedGuilds).not.toContain('gB');
+  });
+
+  it('propagates an authorization (401) failure instead of swallowing it', async () => {
+    const members = [member({ guildId: 'gA' }), member({ guildId: 'gB' })];
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const deliver = vi.fn((guildId: string) => {
+      if (guildId === 'gB') return Promise.reject(unauthorized);
+      return Promise.resolve({ status: 'delivered' });
+    });
+    const { pipeline } = buildPipeline(members, deliver);
+
+    await expect(
+      pipeline.userUpdate(
+        '999999999999999999',
+        'newname',
+        'oldglobal',
+        occurredAt,
+      ),
+    ).rejects.toBe(unauthorized);
+  });
+
+  it('skips logs and save when a snapshot has no username/globalName change', async () => {
+    const members = [
+      member({ guildId: 'g1', username: 'same', globalName: 'sameG' }),
+    ];
+    const deliver = vi.fn().mockResolvedValue({ status: 'delivered' });
+    const { pipeline, saveMember } = buildPipeline(members, deliver);
+
+    await pipeline.userUpdate(
+      '999999999999999999',
+      'same',
+      'sameG',
+      occurredAt,
+    );
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(saveMember).not.toHaveBeenCalled();
+  });
+
+  it('treats a failed saveMember Result as a per-guild failure without halting others', async () => {
+    const members = [member({ guildId: 'gA' }), member({ guildId: 'gB' })];
+    const deliver = vi.fn().mockResolvedValue({ status: 'delivered' });
+    const logger = { error: vi.fn() };
+    const { pipeline, saveMember } = buildPipeline(members, deliver, logger);
+    saveMember.mockImplementation((input: { guildId: string }) => {
+      if (input.guildId === 'gA')
+        return Promise.resolve({
+          ok: false,
+          error: { code: 'INVALID_INPUT', message: 'bad' },
+        });
+      return Promise.resolve({ ok: true, value: {} });
+    });
+
+    await expect(
+      pipeline.userUpdate(
+        '999999999999999999',
+        'newname',
+        'oldglobal',
+        occurredAt,
+      ),
+    ).resolves.toBeUndefined();
+
+    const deliveredGuilds = deliver.mock.calls.map((call) => call[0] as string);
+    expect(deliveredGuilds).toContain('gA');
+    expect(deliveredGuilds).toContain('gB');
+    expect(logger.error).toHaveBeenCalled();
+  });
+});
+
+describe('Phase 4A member snapshot user lookup', () => {
+  const updatedAt = new Date('2026-01-01T00:00:00.000Z');
+  const rows = [
+    {
+      guildId: '111111111111111111',
+      userId: '999999999999999999',
+      username: 'alpha',
+      globalName: null,
+      nickname: null,
+      joinedAt: null,
+      updatedAt,
+    },
+    {
+      guildId: '222222222222222222',
+      userId: '999999999999999999',
+      username: 'beta',
+      globalName: 'bee',
+      nickname: 'beebee',
+      joinedAt: new Date('2025-01-01T00:00:00.000Z'),
+      updatedAt,
+    },
+  ];
+
+  it('queries by userId ordered by guildId, excluding LEFT guilds, and validates DTOs', async () => {
+    const lifecycleFindMany = vi.fn().mockResolvedValue([]);
+    const findMany = vi.fn().mockResolvedValue(rows);
+    const repository = new PrismaSnapshotRepository({
+      guildMemberSnapshot: { findMany },
+      guildLifecycleMarker: { findMany: lifecycleFindMany },
+    } as never);
+
+    const result = await repository.listMembersForUser('999999999999999999');
+
+    expect(lifecycleFindMany).toHaveBeenCalledWith({
+      where: { status: 'LEFT' },
+      select: { guildId: true },
+    });
+    expect(findMany).toHaveBeenCalledWith({
+      where: { userId: '999999999999999999', guildId: { notIn: [] } },
+      orderBy: { guildId: 'asc' },
+    });
+    expect(result).toEqual(rows);
+  });
+
+  it('excludes retained snapshots for lifecycle LEFT guilds from the user lookup', async () => {
+    const lifecycleFindMany = vi
+      .fn()
+      .mockResolvedValue([{ guildId: '222222222222222222' }]);
+    const activeRow = rows[0];
+    const findMany = vi.fn().mockResolvedValue(activeRow ? [activeRow] : []);
+    const repository = new PrismaSnapshotRepository({
+      guildMemberSnapshot: { findMany },
+      guildLifecycleMarker: { findMany: lifecycleFindMany },
+    } as never);
+
+    const result = await repository.listMembersForUser('999999999999999999');
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        userId: '999999999999999999',
+        guildId: { notIn: ['222222222222222222'] },
+      },
+      orderBy: { guildId: 'asc' },
+    });
+    expect(result.map((row) => row.guildId)).toEqual(['111111111111111111']);
+  });
+
+  it('rejects a malformed member snapshot DTO during validation', async () => {
+    const malformed = [
+      {
+        guildId: '111111111111111111',
+        userId: '999999999999999999',
+        username: 'x'.repeat(33),
+        globalName: null,
+        nickname: null,
+        joinedAt: null,
+        updatedAt,
+      },
+    ];
+    const lifecycleFindMany = vi.fn().mockResolvedValue([]);
+    const findMany = vi.fn().mockResolvedValue(malformed);
+    const repository = new PrismaSnapshotRepository({
+      guildMemberSnapshot: { findMany },
+      guildLifecycleMarker: { findMany: lifecycleFindMany },
+    } as never);
+
+    await expect(
+      repository.listMembersForUser('999999999999999999'),
+    ).rejects.toThrow();
+  });
+
+  it('rejects an invalid userId Snowflake without querying', async () => {
+    const findMany = vi.fn();
+    const lifecycleFindMany = vi.fn();
+    const repository = new PrismaSnapshotRepository({
+      guildMemberSnapshot: { findMany },
+      guildLifecycleMarker: { findMany: lifecycleFindMany },
+    } as never);
+
+    await expect(
+      repository.listMembersForUser('not-a-snowflake'),
+    ).rejects.toThrow();
+    expect(findMany).not.toHaveBeenCalled();
+    expect(lifecycleFindMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('Phase 4A userUpdate gateway wiring', () => {
+  const flush = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, 0));
+  const installGateway = (
+    logging: unknown,
+    logger: unknown,
+    fatal: unknown,
+  ) => {
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: 'bot' },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    installGatewayListeners(
+      client as never,
+      logging as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      logger as never,
+      fatal as never,
+      {} as never,
+    );
+    return { handlers };
+  };
+  const userUpdateEvent = (changed: boolean) => [
+    { username: 'old', globalName: 'g' },
+    {
+      id: '999999999999999999',
+      username: changed ? 'new' : 'old',
+      globalName: 'g',
+    },
+  ];
+
+  it('forwards one captured receipt timestamp to a single pipeline userUpdate call', () => {
+    const userUpdate = vi.fn().mockResolvedValue(undefined);
+    const { handlers } = installGateway(
+      { userUpdate },
+      { error: vi.fn() },
+      vi.fn(),
+    );
+    const [before, after] = userUpdateEvent(true);
+
+    handlers.get('userUpdate')?.(before as never, after as never);
+
+    expect(userUpdate).toHaveBeenCalledOnce();
+    const call = userUpdate.mock.calls[0];
+    expect(call?.[0]).toBe('999999999999999999');
+    expect(call?.[1]).toBe('new');
+    expect(call?.[2]).toBe('g');
+    expect(call?.[3]).toBeInstanceOf(Date);
+  });
+
+  it('reports a non-401 userUpdate failure under gateway.user_update_failed', async () => {
+    const userUpdate = vi.fn().mockRejectedValue(new Error('boom'));
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    const { handlers } = installGateway({ userUpdate }, logger, fatal);
+    const [before, after] = userUpdateEvent(true);
+
+    handlers.get('userUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'gateway.user_update_failed' }),
+      'Gateway event failed',
+    );
+    expect(fatal).not.toHaveBeenCalled();
+  });
+
+  it('routes a direct 401 userUpdate failure to fatal', async () => {
+    const unauthorized = Object.assign(new Error('unauth'), { status: 401 });
+    const userUpdate = vi.fn().mockRejectedValue(unauthorized);
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    const { handlers } = installGateway({ userUpdate }, logger, fatal);
+    const [before, after] = userUpdateEvent(true);
+
+    handlers.get('userUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fatal).toHaveBeenCalledWith(unauthorized);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('routes a cause-wrapped 401 userUpdate failure to fatal', async () => {
+    const wrapped = Object.assign(new Error('wrapped'), {
+      cause: { code: 401 },
+    });
+    const userUpdate = vi.fn().mockRejectedValue(wrapped);
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    const { handlers } = installGateway({ userUpdate }, logger, fatal);
+    const [before, after] = userUpdateEvent(true);
+
+    handlers.get('userUpdate')?.(before as never, after as never);
+    await flush();
+
+    expect(fatal).toHaveBeenCalledWith(wrapped);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('Phase 4B channel lifecycle', () => {
+  const flush = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, 0));
+  const installGatewayForChannel = (opts: {
+    ignores?: unknown;
+    settings?: unknown;
+    logger?: unknown;
+    fatal?: unknown;
+  }) => {
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: 'bot' },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    installGatewayListeners(
+      client as never,
+      { userUpdate: vi.fn().mockResolvedValue(undefined) } as never,
+      (opts.settings ?? {}) as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      (opts.ignores ?? {}) as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      (opts.logger ?? { error: vi.fn() }) as never,
+      (opts.fatal ?? vi.fn()) as never,
+      {} as never,
+    );
+    return { handlers };
+  };
+
+  it('runs the composite channel cleanup once and invalidates settings after it settles', async () => {
+    const clearChannel = vi.fn().mockResolvedValue(3);
+    const invalidate = vi.fn();
+    const { handlers } = installGatewayForChannel({
+      ignores: { clearChannel },
+      settings: { invalidate },
+    });
+
+    handlers.get('channelDelete')?.({ guildId: 'g1', id: 'c1' } as never);
+    await flush();
+
+    expect(clearChannel).toHaveBeenCalledOnce();
+    expect(clearChannel).toHaveBeenCalledWith('g1', 'c1');
+    expect(invalidate).toHaveBeenCalledWith('g1');
+  });
+
+  it('reports a composite cleanup rejection rather than leaving it unhandled', async () => {
+    const clearChannel = vi.fn().mockRejectedValue(new Error('cleanup down'));
+    const invalidate = vi.fn();
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    const { handlers } = installGatewayForChannel({
+      ignores: { clearChannel },
+      settings: { invalidate },
+      logger,
+      fatal,
+    });
+
+    handlers.get('channelDelete')?.({ guildId: 'g1', id: 'c1' } as never);
+    await flush();
+
+    expect(clearChannel).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'gateway.channel_delete_failed' }),
+      'Gateway event failed',
+    );
+    expect(fatal).not.toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith('g1');
+  });
+
+  it('routes a 401 composite cleanup rejection to fatal', async () => {
+    const unauthorized = Object.assign(new Error('unauth'), { status: 401 });
+    const clearChannel = vi.fn().mockRejectedValue(unauthorized);
+    const invalidate = vi.fn();
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    const { handlers } = installGatewayForChannel({
+      ignores: { clearChannel },
+      settings: { invalidate },
+      logger,
+      fatal,
+    });
+
+    handlers.get('channelDelete')?.({ guildId: 'g1', id: 'c1' } as never);
+    await flush();
+
+    expect(fatal).toHaveBeenCalledWith(unauthorized);
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

@@ -337,6 +337,7 @@ model GuildMemberSnapshot {
   guild      GuildSettings @relation(fields: [guildId], references: [guildId], onDelete: NoAction)
 
   @@id([guildId, userId])
+  @@index([userId])
   @@map("guild_member_snapshots")
 }
 

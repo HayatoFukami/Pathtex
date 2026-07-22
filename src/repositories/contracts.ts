@@ -719,6 +719,7 @@ export interface SnapshotRepository {
   getMessage(messageId: string): Promise<SnapshotDto | null>;
   getMessages(messageIds: string[]): Promise<SnapshotDto[]>;
   getMember(guildId: string, userId: string): Promise<MemberSnapshotDto | null>;
+  listMembersForUser(userId: string): Promise<MemberSnapshotDto[]>;
 }
 export interface MessageSnapshotInput {
   messageId: string;

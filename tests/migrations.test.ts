@@ -40,4 +40,19 @@ describe('database migrations', () => {
       'ADD COLUMN IF NOT EXISTS "max_lines" SMALLINT',
     );
   });
+
+  it('indexes guild_member_snapshots by user_id for userUpdate fanout lookup', async () => {
+    const schema = await readFile('prisma/schema.prisma', 'utf8');
+    const migration = await readFile(
+      'prisma/migrations/20260723000000_index_guild_member_snapshots_user_id/migration.sql',
+      'utf8',
+    );
+
+    expect(schema).toMatch(
+      /model GuildMemberSnapshot[\s\S]*?@@index\(\[userId\]\)/u,
+    );
+    expect(migration).toContain(
+      'CREATE INDEX IF NOT EXISTS "guild_member_snapshots_user_id_idx" ON "guild_member_snapshots"("user_id")',
+    );
+  });
 });

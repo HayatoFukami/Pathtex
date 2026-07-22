@@ -1091,6 +1091,20 @@ export class PrismaSnapshotRepository implements SnapshotRepository {
     });
     return row ? MemberSnapshotDtoSchema.parse(row) : null;
   }
+  public async listMembersForUser(userId: string) {
+    SnowflakeSchema.parse(userId);
+    const left = await this.db.guildLifecycleMarker.findMany({
+      where: { status: 'LEFT' },
+      select: { guildId: true },
+    });
+    const leftGuildIds = left.map((row) => row.guildId);
+    return (
+      await this.db.guildMemberSnapshot.findMany({
+        where: { userId, guildId: { notIn: leftGuildIds } },
+        orderBy: { guildId: 'asc' },
+      })
+    ).map((row) => MemberSnapshotDtoSchema.parse(row));
+  }
 }
 
 export class PrismaActiveMuteRepository implements ActiveMuteRepository {

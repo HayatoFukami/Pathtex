@@ -1318,6 +1318,73 @@ integration('PostgreSQL persistence foundation', () => {
     ).not.toBeNull();
   });
 
+  it('lists member snapshots for a user ordered by guildId', async () => {
+    const snapshots = new PrismaSnapshotRepository(getDb());
+    const userId = '12345678901234999';
+    const guildA = '12345678901234990';
+    const guildB = '12345678901234991';
+    await getDb().guildSettings.create({ data: { guildId: guildA } });
+    await getDb().guildSettings.create({ data: { guildId: guildB } });
+    // Insert out of guildId order (B before A) to prove ordering is by guildId.
+    await snapshots.upsertMember({
+      guildId: guildB,
+      userId,
+      username: 'beta',
+      globalName: 'b',
+      nickname: null,
+      joinedAt: null,
+    });
+    await snapshots.upsertMember({
+      guildId: guildA,
+      userId,
+      username: 'alpha',
+      globalName: 'a',
+      nickname: 'nick',
+      joinedAt: new Date('2025-01-01T00:00:00Z'),
+    });
+
+    const result = await snapshots.listMembersForUser(userId);
+
+    expect(result.map((row) => row.guildId)).toEqual([guildA, guildB]);
+    expect(result[0]?.username).toBe('alpha');
+    expect(result[0]?.nickname).toBe('nick');
+    expect(result[1]?.username).toBe('beta');
+  });
+
+  it('excludes retained member snapshots for lifecycle LEFT guilds', async () => {
+    const snapshots = new PrismaSnapshotRepository(getDb());
+    const userId = '12345678901234989';
+    const activeGuild = '12345678901234980';
+    const leftGuild = '12345678901234981';
+    await getDb().guildSettings.create({ data: { guildId: activeGuild } });
+    await getDb().guildSettings.create({ data: { guildId: leftGuild } });
+    // Mark leftGuild as LEFT; its retained snapshot must be excluded from the lookup.
+    await new PrismaDepartureRepository(getDb()).markLeft({
+      guildId: leftGuild,
+      departedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    await snapshots.upsertMember({
+      guildId: activeGuild,
+      userId,
+      username: 'active',
+      globalName: null,
+      nickname: null,
+      joinedAt: null,
+    });
+    await snapshots.upsertMember({
+      guildId: leftGuild,
+      userId,
+      username: 'left',
+      globalName: null,
+      nickname: null,
+      joinedAt: null,
+    });
+
+    const result = await snapshots.listMembersForUser(userId);
+
+    expect(result.map((row) => row.guildId)).toEqual([activeGuild]);
+  });
+
   it('rejects persistence constraints', async () => {
     await expectConstraint(
       getDb().$executeRawUnsafe(

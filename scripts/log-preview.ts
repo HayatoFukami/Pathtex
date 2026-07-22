@@ -381,37 +381,6 @@ function serverPreviews(): PreviewPayload[] {
       ],
     },
     {
-      label: 'ChannelCreate',
-      embeds: [
-        toPreviewEmbed(
-          s(
-            'チャンネル作成',
-            [
-              {
-                name: 'チャンネル',
-                value: `新規チャンネル (${DUMMY.channelId})`,
-              },
-            ],
-            0x3498db,
-          ),
-          C,
-        ),
-      ],
-    },
-    {
-      label: 'ChannelUpdate',
-      embeds: [
-        toPreviewEmbed(
-          s(
-            'チャンネル更新',
-            [{ name: 'チャンネル', value: DUMMY.channelId }],
-            0x3498db,
-          ),
-          C,
-        ),
-      ],
-    },
-    {
       label: 'RoleAdd',
       embeds: [
         toPreviewEmbed(

@@ -12,6 +12,8 @@ import {
   type RoleAuditEntry,
   type RoleTransition,
 } from '../src/services/role-audit-resolver.js';
+import { AuditLogEvent } from 'discord.js';
+import { auditLogEventType } from '../src/index.js';
 
 const guildId = '12345678901234567';
 const targetUserId = '12345678901234568';
@@ -59,7 +61,48 @@ describe('external audit and snapshot lane', () => {
       limit: 25,
       after: new Date(at.getTime() - 5000),
       before: new Date(at.getTime() + 5000),
+      type: 'MEMBER_BAN_ADD',
     });
+  });
+
+  it('forwards the expected action through every bounded retry', async () => {
+    let now = 0;
+    const reader = {
+      list: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+    };
+    const policy = new ExternalAuditPolicy(
+      reader,
+      (milliseconds) => {
+        now += milliseconds;
+        return Promise.resolve();
+      },
+      () => now,
+    );
+    await policy.find(guildId, {
+      expectedAction: 'MEMBER_KICK',
+      targetUserId,
+      occurredAt: at,
+    });
+    expect(reader.list).toHaveBeenCalledTimes(3);
+    for (const call of reader.list.mock.calls)
+      expect(call[1]).toMatchObject({ type: 'MEMBER_KICK' });
+  });
+
+  it('maps audit actions to Discord AuditLogEvent types', () => {
+    expect(auditLogEventType('MEMBER_KICK')).toBe(AuditLogEvent.MemberKick);
+    expect(auditLogEventType('MEMBER_BAN_ADD')).toBe(
+      AuditLogEvent.MemberBanAdd,
+    );
+    expect(auditLogEventType('MEMBER_BAN_REMOVE')).toBe(
+      AuditLogEvent.MemberBanRemove,
+    );
+    expect(auditLogEventType('MEMBER_ROLE_UPDATE')).toBe(
+      AuditLogEvent.MemberRoleUpdate,
+    );
   });
 
   it('rejects ambiguous, wrong, and executor-less candidates', () => {
@@ -1021,6 +1064,7 @@ describe('RoleBatchResolver', () => {
         limit: 25,
         after: new Date(at.getTime() - 5000),
         before: new Date(at.getTime() + 5000),
+        type: 'MEMBER_ROLE_UPDATE',
       });
     }
   });
