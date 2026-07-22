@@ -55,22 +55,27 @@ export interface MessageView {
   url?: string;
   avatarUrl?: string;
 }
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value))
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 export function messageChanged(
   before: MessageView,
   after: MessageView,
 ): boolean {
   return (
     before.content !== after.content ||
-    JSON.stringify(before.attachments ?? []) !==
-      JSON.stringify(after.attachments ?? []) ||
-    JSON.stringify(before.embeds ?? []) !==
-      JSON.stringify(after.embeds ?? []) ||
-    JSON.stringify(before.flags ?? null) !==
-      JSON.stringify(after.flags ?? null) ||
-    JSON.stringify(before.mentions ?? []) !==
-      JSON.stringify(after.mentions ?? []) ||
-    JSON.stringify(before.roleMentions ?? []) !==
-      JSON.stringify(after.roleMentions ?? [])
+    stableStringify(before.attachments ?? []) !==
+      stableStringify(after.attachments ?? []) ||
+    stableStringify(before.embeds ?? []) !== stableStringify(after.embeds ?? [])
   );
 }
 export function messageEditEmbed(
@@ -130,14 +135,14 @@ function attachmentDelta(
   before: readonly (string | Record<string, unknown>)[],
   after: readonly (string | Record<string, unknown>)[],
 ): string {
-  const oldSet = new Set(before.map((value) => JSON.stringify(value)));
-  const newSet = new Set(after.map((value) => JSON.stringify(value)));
+  const oldSet = new Set(before.map((value) => stableStringify(value)));
+  const newSet = new Set(after.map((value) => stableStringify(value)));
   return [
     ...after
-      .filter((item) => !oldSet.has(JSON.stringify(item)))
+      .filter((item) => !oldSet.has(stableStringify(item)))
       .map((item) => `追加: ${renderValue(item)}`),
     ...before
-      .filter((item) => !newSet.has(JSON.stringify(item)))
+      .filter((item) => !newSet.has(stableStringify(item)))
       .map((item) => `削除: ${renderValue(item)}`),
   ].join('\n');
 }
@@ -191,7 +196,7 @@ export function messageDeleteEmbed(
       {
         name: '本文',
         value: message
-          ? truncate(message.content)
+          ? truncate(message.content) || '(空)'
           : 'キャッシュに存在しないため取得できません',
         inline: false,
       },
@@ -199,7 +204,10 @@ export function messageDeleteEmbed(
         name: '添付',
         value:
           message?.attachments && message.attachments.length > 0
-            ? message.attachments.map((a) => renderValue(a)).join('\n')
+            ? truncate(
+                message.attachments.map((a) => renderValue(a)).join('\n'),
+                1024,
+              ) || 'なし'
             : 'なし',
         inline: false,
       },

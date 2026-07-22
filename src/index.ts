@@ -72,6 +72,7 @@ import {
   type ConfigurationRoleResolutionPort,
 } from './features/configuration/index.js';
 import {
+  isUnauthorized,
   LoggingEventAdapter,
   LoggingEventPipeline,
   LogDeliveryService,
@@ -88,6 +89,7 @@ import {
   isConfiguredLogChannel,
   type MessageView,
 } from './features/logging/events.js';
+import { MessageLaneQueue } from './features/logging/message-queue.js';
 import {
   ModerationService,
   DiscordModerationAdapter,
@@ -936,45 +938,25 @@ export function createBootstrapDependencies(
     logger,
     events: new LoggingEventAdapter(
       {
-        findMessageDelete: async (guildId, channelId, messageIds, authorId) => {
+        findMessageDelete: async (
+          guildId,
+          channelId,
+          messageIds,
+          authorId,
+          occurredAt,
+        ) => {
           const guild = await client?.client.guilds.fetch(guildId);
           if (!guild) return null;
           const logs = await guild.fetchAuditLogs({ limit: 50 });
-          const now = Date.now();
-          const matches = logs.entries.filter((entry) => {
-            const target = entry.target as { id?: string } | null;
-            const extra = entry.extra as {
-              channel?: { id?: string };
-              count?: number;
-              userId?: string;
-              user?: { id?: string };
-            } | null;
-            const count = typeof extra?.count === 'number' ? extra.count : 1;
-            return (
-              (String(entry.action) === '72' ||
-                String(entry.action) === '73') &&
-              (messageIds.length === 1
-                ? authorId !== undefined && target?.id === authorId
-                : target?.id === channelId) &&
-              count === messageIds.length &&
-              Math.abs(now - entry.createdTimestamp) <= 5_000 &&
-              extra?.channel?.id === channelId
-            );
-          });
-          const match =
-            matches.size === 1
-              ? (matches.first() as unknown as {
-                  executor?: { tag?: string };
-                  executorId?: string;
-                  reason?: string;
-                })
-              : undefined;
-          return match
-            ? {
-                executor: match.executor?.tag ?? match.executorId ?? '不明',
-                reason: match.reason ?? '不明',
-              }
-            : null;
+          return matchMessageDeleteAudit(
+            [
+              ...logs.entries.values(),
+            ] as unknown as readonly MessageDeleteAuditEntry[],
+            channelId,
+            messageIds,
+            authorId,
+            occurredAt,
+          );
         },
       },
       undefined,
@@ -1526,6 +1508,44 @@ function messageView(message: Message): MessageView | null {
   };
 }
 
+export interface MessageDeleteAuditEntry {
+  action: unknown;
+  createdTimestamp: number;
+  target?: { id?: string } | null;
+  extra?: { channel?: { id?: string }; count?: number } | null;
+  executor?: { tag?: string } | null;
+  executorId?: string;
+  reason?: string | null;
+}
+export function matchMessageDeleteAudit(
+  entries: readonly MessageDeleteAuditEntry[],
+  channelId: string,
+  messageIds: readonly string[],
+  authorId: string | undefined,
+  occurredAt: Date,
+): { executor: string; reason: string } | null {
+  const matches = entries.filter((entry) => {
+    const target = entry.target ?? null;
+    const extra = entry.extra ?? null;
+    const count = typeof extra?.count === 'number' ? extra.count : 1;
+    return (
+      (String(entry.action) === '72' || String(entry.action) === '73') &&
+      (messageIds.length === 1
+        ? authorId !== undefined && target?.id === authorId
+        : target?.id === channelId) &&
+      count === messageIds.length &&
+      Math.abs(occurredAt.getTime() - entry.createdTimestamp) <= 5_000 &&
+      extra?.channel?.id === channelId
+    );
+  });
+  const match = matches.length === 1 ? matches[0] : undefined;
+  return match
+    ? {
+        executor: match.executor?.tag ?? match.executorId ?? '不明',
+        reason: match.reason ?? '不明',
+      }
+    : null;
+}
 export function installMessageLoggingListeners(
   client: Client,
   logging: Pick<
@@ -1535,9 +1555,14 @@ export function installMessageLoggingListeners(
   settings: SettingsService,
   snapshots: Pick<SnapshotService, 'getMessage' | 'deleteMessage'>,
   logger: ReturnType<typeof createLogger>,
+  fatal: (error: unknown) => void,
 ): void {
   const report = (event: string, operation: Promise<void>): void => {
     void operation.catch((error: unknown) => {
+      if (isUnauthorized(error)) {
+        fatal(error);
+        return;
+      }
       logger.error(
         { event, errorName: error instanceof Error ? error.name : 'unknown' },
         'Gateway event failed',
@@ -1563,24 +1588,25 @@ export function installMessageLoggingListeners(
       )
     );
   };
+  const queue = new MessageLaneQueue();
   client.on('messageCreate', (message) => {
     report(
       'gateway.message_create_failed',
-      (async () => {
+      queue.run(message.id, async () => {
         if (await isBotLogMessage(message)) {
           await snapshots.deleteMessage(message.id);
           return;
         }
         const view = messageView(message);
         if (view) await logging.messageCreate(view);
-      })(),
+      }),
     );
   });
   client.on('messageUpdate', (before, after) => {
     const occurredAt = new Date();
     report(
       'gateway.message_update_failed',
-      (async () => {
+      queue.run(after.id, async () => {
         if (await isBotLogMessage(after)) {
           await snapshots.deleteMessage(after.id);
           return;
@@ -1589,14 +1615,14 @@ export function installMessageLoggingListeners(
         const oldView = messageView(before as Message);
         const newView = messageView(fullAfter);
         if (newView) await logging.messageUpdate(oldView, newView, occurredAt);
-      })(),
+      }),
     );
   });
   client.on('messageDelete', (message) => {
     const occurredAt = new Date();
     report(
       'gateway.message_delete_failed',
-      (async () => {
+      queue.run(message.id, async () => {
         if (!message.guildId) return;
         if (await isBotLogMessage(message)) {
           await snapshots.deleteMessage(message.id);
@@ -1609,7 +1635,7 @@ export function installMessageLoggingListeners(
           message.id,
           occurredAt,
         );
-      })(),
+      }),
     );
   });
   client.on('messageDeleteBulk', (messages) => {
@@ -1618,7 +1644,7 @@ export function installMessageLoggingListeners(
     if (!first?.guildId) return;
     report(
       'gateway.message_bulk_delete_failed',
-      (async () => {
+      queue.runMany([...messages.keys()], async () => {
         const all = [...messages.values()];
         const settingsResult = await settings.get(first.guildId);
         const excluded = new Set<string>();
@@ -1648,7 +1674,7 @@ export function installMessageLoggingListeners(
           cached,
           occurredAt,
         );
-      })(),
+      }),
     );
   });
 }
@@ -1708,7 +1734,14 @@ function installGatewayListeners(
         );
     }
   };
-  installMessageLoggingListeners(client, logging, settings, snapshots, logger);
+  installMessageLoggingListeners(
+    client,
+    logging,
+    settings,
+    snapshots,
+    logger,
+    fatal,
+  );
   client.on(
     'voiceStateUpdate',
     (oldState: VoiceState, newState: VoiceState) => {

@@ -5,18 +5,27 @@ import {
   formatGuildTime,
 } from '../src/features/configuration/service.js';
 import { serviceSettingsText } from '../src/features/configuration/commands.js';
-import { installMessageLoggingListeners } from '../src/index.js';
+import {
+  installMessageLoggingListeners,
+  matchMessageDeleteAudit,
+} from '../src/index.js';
+import { MessageLaneQueue } from '../src/features/logging/message-queue.js';
 import {
   classifyVoice,
   isBotAuthoredMessage,
   isConfiguredLogChannel,
+  isUnauthorized,
   LogDeliveryService,
+  LogEmbedSchema,
+  LoggingEventAdapter,
+  messageChanged,
   messageEditEmbed,
   messageDeleteEmbed,
   bulkDeleteEmbed,
   voiceEmbed,
   normalizeEmbed,
   serverEmbed,
+  type MessageView,
 } from '../src/features/logging/index.js';
 
 describe('configuration and logging slice', () => {
@@ -258,6 +267,7 @@ describe('configuration and logging slice', () => {
       } as never,
       snapshots,
       { error: vi.fn() } as never,
+      vi.fn(),
     );
 
     for (const [index, channelId] of Object.values(logChannels).entries()) {
@@ -742,5 +752,747 @@ describe('Oracle blocker regression tests', () => {
   it('serverEmbed has no color when not provided', () => {
     const em = serverEmbed('title', [{ name: 'ユーザー', value: 'val' }], now);
     expect(em.color).toBeUndefined();
+  });
+});
+
+describe('Phase 1A logging fixes', () => {
+  const guildId = '12345678901234567';
+  const channelId = '98765432109876543';
+  const now = new Date('2026-07-20T12:34:56.789Z');
+  const noWait = (): Promise<void> => Promise.resolve();
+  const view = (overrides: Partial<MessageView> = {}): MessageView => ({
+    guildId,
+    channelId,
+    messageId: '11111111111111111',
+    author: 'Author',
+    authorId: '22222222222222222',
+    content: 'hello',
+    createdAt: now,
+    ...overrides,
+  });
+
+  // --- Fix 1: audit lookup failure must not block delivery (except 401) ---
+
+  it('messageDelete continues with unknown executor when audit lookup fails (non-401)', async () => {
+    const findMessageDelete = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('audit backend error'), { status: 500 }),
+      );
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    const embed = await adapter.messageDelete(view(), now);
+
+    expect(findMessageDelete).toHaveBeenCalledOnce();
+    expect(embed.fields.find((f) => f.name === '削除実行者')?.value).toBe(
+      '不明',
+    );
+  });
+
+  it('bulkDelete continues with unknown executor when audit lookup fails (non-401)', async () => {
+    const findMessageDelete = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('audit backend error'), { status: 503 }),
+      );
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    const embed = await adapter.bulkDelete(
+      guildId,
+      channelId,
+      ['m1', 'm2'],
+      [],
+      now,
+    );
+
+    expect(embed.fields.find((f) => f.name === '削除実行者')?.value).toBe(
+      '不明',
+    );
+  });
+
+  it('messageDelete propagates a fatal 401 from audit lookup', async () => {
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const findMessageDelete = vi.fn().mockRejectedValue(unauthorized);
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    await expect(adapter.messageDelete(view(), now)).rejects.toBe(unauthorized);
+  });
+
+  it('bulkDelete propagates a fatal 401 from audit lookup', async () => {
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const findMessageDelete = vi.fn().mockRejectedValue(unauthorized);
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    await expect(
+      adapter.bulkDelete(guildId, channelId, ['m1'], [], now),
+    ).rejects.toBe(unauthorized);
+  });
+
+  // --- Fix 2: audit matching uses the captured gateway receipt occurredAt ---
+
+  it('messageDelete forwards the captured occurredAt to the audit port', async () => {
+    const occurredAt = new Date('2026-07-01T00:00:00.000Z');
+    const findMessageDelete = vi.fn().mockResolvedValue(null);
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    await adapter.messageDelete(view(), occurredAt);
+
+    expect(findMessageDelete).toHaveBeenCalledWith(
+      guildId,
+      channelId,
+      ['11111111111111111'],
+      '22222222222222222',
+      occurredAt,
+    );
+  });
+
+  it('bulkDelete forwards the captured occurredAt to the audit port', async () => {
+    const occurredAt = new Date('2026-07-02T00:00:00.000Z');
+    const findMessageDelete = vi.fn().mockResolvedValue(null);
+    const adapter = new LoggingEventAdapter({ findMessageDelete }, noWait);
+
+    await adapter.bulkDelete(guildId, channelId, ['m1', 'm2'], [], occurredAt);
+
+    expect(findMessageDelete).toHaveBeenCalledWith(
+      guildId,
+      channelId,
+      ['m1', 'm2'],
+      undefined,
+      occurredAt,
+    );
+  });
+
+  // --- Fix 3: persisted before-snapshots lacking flags/mentions ---
+
+  it('does not treat a persisted before-snapshot lacking flags/mentions as an edit', () => {
+    const before = view({ content: 'same', attachments: [], embeds: [] });
+    const after = view({
+      content: 'same',
+      attachments: [],
+      embeds: [],
+      flags: 0,
+      mentions: [{ id: 'u1', bot: false }],
+      roleMentions: ['r1'],
+      everyoneMentioned: false,
+    });
+
+    expect(messageChanged(before, after)).toBe(false);
+    expect(messageEditEmbed(before, after, now)).toBeNull();
+  });
+
+  it('still detects content, attachment, and major embed changes', () => {
+    const base = view({ content: 'x', attachments: [], embeds: [] });
+
+    expect(messageChanged(base, view({ ...base, content: 'y' }))).toBe(true);
+    expect(
+      messageChanged(base, view({ ...base, attachments: [{ url: 'u' }] })),
+    ).toBe(true);
+    expect(
+      messageChanged(base, view({ ...base, embeds: [{ title: 't' }] })),
+    ).toBe(true);
+  });
+
+  // --- Fix 4: valid non-empty, <=1024-char body/attachment fields ---
+
+  it('renders a non-empty body for attachment-only deleted messages and passes strict validation', () => {
+    const embed = messageDeleteEmbed(
+      view({ content: '', attachments: ['https://cdn.discord.test/a.png'] }),
+      '実行者',
+      '理由',
+      now,
+    );
+
+    expect(embed.fields.find((f) => f.name === '本文')?.value).toBe('(空)');
+    expect(embed.fields.find((f) => f.name === '添付')?.value).toBe(
+      'https://cdn.discord.test/a.png',
+    );
+    for (const field of embed.fields) {
+      expect(field.value.length).toBeGreaterThan(0);
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    }
+    expect(LogEmbedSchema.safeParse(embed).success).toBe(true);
+  });
+
+  it('bounds the attachment field to 1024 characters for many attachments', () => {
+    const attachments = Array.from(
+      { length: 30 },
+      (_, index) =>
+        `https://cdn.discord.test/attachment-${String(index)}-${'x'.repeat(60)}.png`,
+    );
+    const embed = messageDeleteEmbed(
+      view({ content: 'content', attachments }),
+      '実行者',
+      '理由',
+      now,
+    );
+
+    const field = embed.fields.find((f) => f.name === '添付');
+    expect(field?.value.length).toBeGreaterThan(0);
+    expect(field?.value.length).toBeLessThanOrEqual(1024);
+    expect(LogEmbedSchema.safeParse(embed).success).toBe(true);
+  });
+});
+
+describe('Phase 1 Oracle remediation', () => {
+  const guildId = '12345678901234567';
+  const channelId = '98765432109876543';
+  const now = new Date('2026-07-20T12:34:56.789Z');
+
+  // --- Blocker 1: audit reader compares against forwarded occurredAt ---
+
+  it('matches a delete audit entry within ±5s of occurredAt even when far from Date.now()', () => {
+    const occurredAt = new Date('2026-01-01T00:00:00.000Z');
+    const entry = {
+      action: '72',
+      createdTimestamp: occurredAt.getTime() + 3_000,
+      target: { id: 'author-1' },
+      extra: { channel: { id: channelId }, count: 1 },
+      executor: { tag: 'Mod#0001' },
+      executorId: 'mod-1',
+      reason: 'spam',
+    };
+
+    expect(
+      matchMessageDeleteAudit(
+        [entry],
+        channelId,
+        ['msg-1'],
+        'author-1',
+        occurredAt,
+      ),
+    ).toEqual({ executor: 'Mod#0001', reason: 'spam' });
+  });
+
+  it('rejects a delete audit entry outside the ±5s occurredAt window', () => {
+    const occurredAt = new Date('2026-01-01T00:00:00.000Z');
+    const entry = {
+      action: '72',
+      createdTimestamp: occurredAt.getTime() + 6_000,
+      target: { id: 'author-1' },
+      extra: { channel: { id: channelId }, count: 1 },
+      executor: { tag: 'Mod#0001' },
+      executorId: 'mod-1',
+      reason: 'spam',
+    };
+
+    expect(
+      matchMessageDeleteAudit(
+        [entry],
+        channelId,
+        ['msg-1'],
+        'author-1',
+        occurredAt,
+      ),
+    ).toBeNull();
+  });
+
+  it('matches a bulk-delete audit entry by channel target and count within the window', () => {
+    const occurredAt = new Date('2026-01-01T00:00:00.000Z');
+    const entry = {
+      action: '73',
+      createdTimestamp: occurredAt.getTime() - 2_000,
+      target: { id: channelId },
+      extra: { channel: { id: channelId }, count: 2 },
+      executor: { tag: 'Mod#0001' },
+      executorId: 'mod-1',
+      reason: 'clean',
+    };
+
+    expect(
+      matchMessageDeleteAudit(
+        [entry],
+        channelId,
+        ['m1', 'm2'],
+        undefined,
+        occurredAt,
+      ),
+    ).toEqual({ executor: 'Mod#0001', reason: 'clean' });
+  });
+
+  // --- Blocker 2: unauthorized detection + fatal wiring ---
+
+  it('detects 401 via direct status, direct code, and exactly one cause layer', () => {
+    expect(isUnauthorized({ status: 401 })).toBe(true);
+    expect(isUnauthorized({ code: 401 })).toBe(true);
+    expect(isUnauthorized({ cause: { status: 401 } })).toBe(true);
+    expect(isUnauthorized({ cause: { code: 401 } })).toBe(true);
+    expect(isUnauthorized({ status: 500 })).toBe(false);
+    expect(isUnauthorized({ code: 500 })).toBe(false);
+    expect(isUnauthorized({ cause: { cause: { status: 401 } } })).toBe(false);
+    expect(isUnauthorized(null)).toBe(false);
+    expect(isUnauthorized(undefined)).toBe(false);
+    expect(isUnauthorized('401')).toBe(false);
+  });
+
+  const gatewayMessage = (): Record<string, unknown> => ({
+    guildId,
+    channelId: 'other',
+    id: 'msg-1',
+    content: 'content',
+    author: { id: 'human', tag: 'human', bot: false },
+    attachments: new Map(),
+    embeds: [],
+    flags: { bitfield: 0 },
+    mentions: { users: new Map(), roles: new Map(), everyone: false },
+    channel: {},
+    createdAt: new Date(),
+    webhookId: null,
+    system: false,
+    url: 'https://discord.test/message',
+    fetch: vi.fn(),
+  });
+
+  const installWithDeleteRejection = (rejection: unknown) => {
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: 'bot' },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    const logging = {
+      messageCreate: vi.fn().mockResolvedValue(undefined),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn().mockRejectedValue(rejection),
+      messageDeleteBulk: vi.fn().mockResolvedValue(undefined),
+    };
+    const snapshots = {
+      getMessage: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    installMessageLoggingListeners(
+      client as never,
+      logging,
+      { get: vi.fn().mockResolvedValue({ ok: true, value: {} }) } as never,
+      snapshots,
+      logger as never,
+      fatal,
+    );
+    return { handlers, logger, fatal };
+  };
+
+  it('routes a direct 401 from messageDelete to fatal instead of logging', async () => {
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      status: 401,
+    });
+    const { handlers, logger, fatal } =
+      installWithDeleteRejection(unauthorized);
+
+    handlers.get('messageDelete')?.(gatewayMessage() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fatal).toHaveBeenCalledWith(unauthorized);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('routes a cause-wrapped 401 from messageDelete to fatal', async () => {
+    const wrapped = Object.assign(new Error('wrapped'), {
+      cause: { code: 401 },
+    });
+    const { handlers, logger, fatal } = installWithDeleteRejection(wrapped);
+
+    handlers.get('messageDelete')?.(gatewayMessage() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fatal).toHaveBeenCalledWith(wrapped);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('keeps non-401 messageDelete failures on the report/log fallback', async () => {
+    const failure = Object.assign(new Error('boom'), { status: 500 });
+    const { handlers, logger, fatal } = installWithDeleteRejection(failure);
+
+    handlers.get('messageDelete')?.(gatewayMessage() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fatal).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+  });
+
+  // --- Blocker 3: deterministic stable-key serialization ---
+
+  const baseView: MessageView = {
+    guildId,
+    channelId,
+    messageId: 'm1',
+    author: 'A',
+    authorId: 'a1',
+    content: 'same',
+    attachments: [],
+    embeds: [],
+    createdAt: now,
+  };
+
+  it('treats attachments/embeds with reordered object keys as unchanged', () => {
+    const before: MessageView = {
+      ...baseView,
+      attachments: [{ url: 'u', filename: 'f', size: 1 }],
+      embeds: [{ title: 't', description: 'd' }],
+    };
+    const after: MessageView = {
+      ...baseView,
+      attachments: [{ size: 1, filename: 'f', url: 'u' }],
+      embeds: [{ description: 'd', title: 't' }],
+    };
+
+    expect(messageChanged(before, after)).toBe(false);
+    expect(messageEditEmbed(before, after, now)).toBeNull();
+  });
+
+  it('retains array order so a reordered attachment list is still a change', () => {
+    const before: MessageView = {
+      ...baseView,
+      attachments: [{ id: '1' }, { id: '2' }],
+    };
+    const after: MessageView = {
+      ...baseView,
+      attachments: [{ id: '2' }, { id: '1' }],
+    };
+
+    expect(messageChanged(before, after)).toBe(true);
+  });
+
+  it('still detects a real attachment value change under stable serialization', () => {
+    const before: MessageView = {
+      ...baseView,
+      attachments: [{ url: 'u1', filename: 'f' }],
+    };
+    const after: MessageView = {
+      ...baseView,
+      attachments: [{ url: 'u2', filename: 'f' }],
+    };
+
+    expect(messageChanged(before, after)).toBe(true);
+  });
+
+  it('renders 添付 as なし for a content change with key-reordered-but-equal attachments', () => {
+    const before: MessageView = {
+      ...baseView,
+      content: 'before',
+      attachments: [{ url: 'u', filename: 'f' }],
+    };
+    const after: MessageView = {
+      ...baseView,
+      content: 'after',
+      attachments: [{ filename: 'f', url: 'u' }],
+    };
+
+    const embed = messageEditEmbed(before, after, now);
+
+    expect(embed).not.toBeNull();
+    expect(embed?.fields.find((f) => f.name === '添付')?.value).toBe('なし');
+  });
+});
+
+describe('Phase 2 per-message serialization', () => {
+  const guildId = '12345678901234567';
+  const flushMicrotasks = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, 0));
+
+  // --- MessageLaneQueue unit behavior (deterministic deferred promises) ---
+
+  it('runs same-message-ID tasks FIFO so a delete cannot overtake a prior delayed update', async () => {
+    const queue = new MessageLaneQueue();
+    const order: string[] = [];
+    let resolveUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      resolveUpdate = resolve;
+    });
+
+    const update = queue.run('msg-1', async () => {
+      await updateGate;
+      order.push('update');
+    });
+    const del = queue.run('msg-1', () => {
+      order.push('delete');
+      return Promise.resolve();
+    });
+
+    await flushMicrotasks();
+    expect(order).toEqual([]);
+
+    resolveUpdate();
+    await Promise.all([update, del]);
+    expect(order).toEqual(['update', 'delete']);
+  });
+
+  it('does not serialize independent message IDs together', async () => {
+    const queue = new MessageLaneQueue();
+    const events: string[] = [];
+    let resolveA!: () => void;
+    const gateA = new Promise<void>((resolve) => {
+      resolveA = resolve;
+    });
+
+    const a = queue.run('msg-A', async () => {
+      await gateA;
+      events.push('A');
+    });
+    const b = queue.run('msg-B', () => {
+      events.push('B');
+      return Promise.resolve();
+    });
+
+    await b;
+    expect(events).toEqual(['B']);
+
+    resolveA();
+    await a;
+    expect(events).toEqual(['B', 'A']);
+  });
+
+  it('does not poison later same-ID tasks when an earlier task fails', async () => {
+    const queue = new MessageLaneQueue();
+    const order: string[] = [];
+    const failing = queue.run('msg-1', () => {
+      order.push('fail');
+      return Promise.reject(new Error('boom'));
+    });
+    const next = queue.run('msg-1', () => {
+      order.push('next');
+      return Promise.resolve();
+    });
+
+    await expect(failing).rejects.toThrow('boom');
+    await next;
+    expect(order).toEqual(['fail', 'next']);
+  });
+
+  it('cleans up lane state after the queue drains', async () => {
+    const queue = new MessageLaneQueue();
+    expect(queue.size).toBe(0);
+    const done = queue.run('msg-1', () => Promise.resolve());
+    expect(queue.size).toBe(1);
+    await done;
+    await flushMicrotasks();
+    expect(queue.size).toBe(0);
+  });
+
+  it('runMany reserves each member lane and cannot deadlock with single-message handlers', async () => {
+    const queue = new MessageLaneQueue();
+    const order: string[] = [];
+    let resolveDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      resolveDelete = resolve;
+    });
+
+    const single = queue.run('msg-1', async () => {
+      await deleteGate;
+      order.push('single-delete-msg-1');
+    });
+    const bulk = queue.runMany(['msg-1', 'msg-2'], () => {
+      order.push('bulk');
+      return Promise.resolve();
+    });
+
+    await flushMicrotasks();
+    expect(order).toEqual([]);
+
+    resolveDelete();
+    await Promise.all([single, bulk]);
+    expect(order).toEqual(['single-delete-msg-1', 'bulk']);
+  });
+
+  it('runMany executes the bulk task exactly once across multiple lanes', async () => {
+    const queue = new MessageLaneQueue();
+    let calls = 0;
+    await queue.runMany(['a', 'b', 'c', 'a'], () => {
+      calls += 1;
+      return Promise.resolve();
+    });
+    expect(calls).toBe(1);
+  });
+
+  it('runMany propagates a bulk task failure to the caller', async () => {
+    const queue = new MessageLaneQueue();
+    await expect(
+      queue.runMany(['a', 'b'], () => Promise.reject(new Error('bulk-fail'))),
+    ).rejects.toThrow('bulk-fail');
+  });
+
+  it('runMany runs a synchronously throwing task exactly once, rejects callers, and keeps lanes usable', async () => {
+    const queue = new MessageLaneQueue();
+    let calls = 0;
+    const throwingTask = (): Promise<void> => {
+      calls += 1;
+      throw new Error('sync-boom');
+    };
+
+    await expect(queue.runMany(['a', 'b', 'c'], throwingTask)).rejects.toThrow(
+      'sync-boom',
+    );
+    // Exactly-once: the synchronous throw must not re-execute on other lanes.
+    expect(calls).toBe(1);
+
+    // Lanes drain and clean up even after the failure.
+    await flushMicrotasks();
+    expect(queue.size).toBe(0);
+
+    // Subsequent work on the same keys remains usable.
+    const order: string[] = [];
+    await queue.run('a', () => {
+      order.push('a-after');
+      return Promise.resolve();
+    });
+    await queue.run('b', () => {
+      order.push('b-after');
+      return Promise.resolve();
+    });
+    expect(order).toEqual(['a-after', 'b-after']);
+    await flushMicrotasks();
+    expect(queue.size).toBe(0);
+  });
+
+  // --- Gateway listener wiring ---
+
+  const gatewayMessage = (id: string): Record<string, unknown> => ({
+    guildId,
+    channelId: 'other',
+    id,
+    content: 'content',
+    author: { id: 'human', tag: 'human', bot: false },
+    attachments: new Map(),
+    embeds: [],
+    flags: { bitfield: 0 },
+    mentions: { users: new Map(), roles: new Map(), everyone: false },
+    channel: {},
+    createdAt: new Date(),
+    webhookId: null,
+    system: false,
+    url: 'https://discord.test/message',
+    fetch: vi.fn(),
+  });
+
+  const installListeners = (logging: Record<string, unknown>) => {
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const client = {
+      user: { id: 'bot' },
+      on: vi.fn((event: string, handler: (...args: never[]) => void) => {
+        handlers.set(event, handler);
+      }),
+    };
+    const snapshots = {
+      getMessage: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const settings = {
+      get: vi.fn().mockResolvedValue({ ok: true, value: {} }),
+    };
+    const logger = { error: vi.fn() };
+    const fatal = vi.fn();
+    installMessageLoggingListeners(
+      client as never,
+      logging as never,
+      settings as never,
+      snapshots,
+      logger as never,
+      fatal,
+    );
+    return { handlers, snapshots, logger, fatal };
+  };
+
+  it('listener: messageDelete cannot overtake a prior delayed messageCreate for the same ID', async () => {
+    const calls: string[] = [];
+    let resolveCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const logging = {
+      messageCreate: vi.fn(async () => {
+        await createGate;
+        calls.push('create');
+      }),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn(() => {
+        calls.push('delete');
+        return Promise.resolve();
+      }),
+      messageDeleteBulk: vi.fn().mockResolvedValue(undefined),
+    };
+    const { handlers } = installListeners(logging);
+
+    handlers.get('messageCreate')?.(gatewayMessage('msg-1') as never);
+    handlers.get('messageDelete')?.(gatewayMessage('msg-1') as never);
+    await flushMicrotasks();
+
+    expect(calls).toEqual([]);
+
+    resolveCreate();
+    await flushMicrotasks();
+    expect(calls).toEqual(['create', 'delete']);
+  });
+
+  it('listener: independent message IDs are processed concurrently, not serialized', async () => {
+    const calls: string[] = [];
+    let resolveA!: () => void;
+    const gateA = new Promise<void>((resolve) => {
+      resolveA = resolve;
+    });
+    const logging = {
+      messageCreate: vi.fn(async (view: { messageId: string }) => {
+        if (view.messageId === 'msg-A') await gateA;
+        calls.push(view.messageId);
+      }),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn().mockResolvedValue(undefined),
+      messageDeleteBulk: vi.fn().mockResolvedValue(undefined),
+    };
+    const { handlers } = installListeners(logging);
+
+    handlers.get('messageCreate')?.(gatewayMessage('msg-A') as never);
+    handlers.get('messageCreate')?.(gatewayMessage('msg-B') as never);
+    await flushMicrotasks();
+
+    expect(calls).toEqual(['msg-B']);
+
+    resolveA();
+    await flushMicrotasks();
+    expect(calls).toEqual(['msg-B', 'msg-A']);
+  });
+
+  it('listener: bulk delete joins per-message lanes and waits for an in-flight create on a shared ID', async () => {
+    const calls: string[] = [];
+    let resolveCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const logging = {
+      messageCreate: vi.fn(async () => {
+        await createGate;
+        calls.push('create');
+      }),
+      messageUpdate: vi.fn().mockResolvedValue(undefined),
+      messageDelete: vi.fn().mockResolvedValue(undefined),
+      messageDeleteBulk: vi.fn(() => {
+        calls.push('bulk');
+        return Promise.resolve();
+      }),
+    };
+    const { handlers } = installListeners(logging);
+
+    handlers.get('messageCreate')?.(gatewayMessage('msg-1') as never);
+    const m1 = gatewayMessage('msg-1');
+    const m2 = gatewayMessage('msg-2');
+    const batch = Object.assign(
+      new Map([
+        [m1.id, m1],
+        [m2.id, m2],
+      ]),
+      { first: () => m1 },
+    );
+    handlers.get('messageDeleteBulk')?.(batch as never);
+    await flushMicrotasks();
+
+    expect(calls).toEqual([]);
+
+    resolveCreate();
+    await flushMicrotasks();
+    expect(calls).toEqual(['create', 'bulk']);
   });
 });

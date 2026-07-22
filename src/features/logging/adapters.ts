@@ -12,8 +12,22 @@ export interface AuditPort {
     guildId: string,
     channelId: string,
     messageIds: readonly string[],
-    authorId?: string,
+    authorId: string | undefined,
+    occurredAt: Date,
   ): Promise<{ executor: string; reason: string } | null>;
+}
+function hasUnauthorizedMarker(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const status =
+    'status' in value ? (value as { status?: unknown }).status : undefined;
+  const code = 'code' in value ? (value as { code?: unknown }).code : undefined;
+  return status === 401 || code === 401;
+}
+export function isUnauthorized(error: unknown): boolean {
+  if (hasUnauthorizedMarker(error)) return true;
+  if (typeof error === 'object' && error !== null && 'cause' in error)
+    return hasUnauthorizedMarker((error as { cause?: unknown }).cause);
+  return false;
 }
 export interface MessageDeleteCorrelation {
   peek?(
@@ -41,6 +55,26 @@ export class LoggingEventAdapter {
       new Promise((resolve) => setTimeout(resolve, ms)),
     private readonly correlation?: MessageDeleteCorrelation,
   ) {}
+  private async lookupAudit(
+    guildId: string,
+    channelId: string,
+    messageIds: readonly string[],
+    authorId: string | undefined,
+    occurredAt: Date,
+  ): Promise<{ executor: string; reason: string } | null> {
+    try {
+      return await this.audit.findMessageDelete(
+        guildId,
+        channelId,
+        messageIds,
+        authorId,
+        occurredAt,
+      );
+    } catch (error: unknown) {
+      if (isUnauthorized(error)) throw error;
+      return null;
+    }
+  }
   public async messageDelete(
     message: MessageView | null,
     occurredAt: Date,
@@ -56,11 +90,12 @@ export class LoggingEventAdapter {
       );
     await this.wait(2000);
     const audit = message
-      ? await this.audit.findMessageDelete(
+      ? await this.lookupAudit(
           message.guildId,
           message.channelId,
           [message.messageId],
           message.authorId,
+          occurredAt,
         )
       : null;
     return messageDeleteEmbed(
@@ -102,7 +137,13 @@ export class LoggingEventAdapter {
       );
     }
     await this.wait(2000);
-    const audit = await this.audit.findMessageDelete(guildId, channelId, ids);
+    const audit = await this.lookupAudit(
+      guildId,
+      channelId,
+      ids,
+      undefined,
+      occurredAt,
+    );
     return bulkDeleteEmbed(
       channelId,
       ids.length,
