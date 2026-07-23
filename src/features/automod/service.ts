@@ -20,6 +20,7 @@ import type {
   AutomodResult,
 } from './contracts.js';
 import type { MessageView } from '../logging/events.js';
+import { isUnauthorized } from '../logging/adapters.js';
 import { TargetIdentitySchema } from '../../services/target-identity.js';
 
 export class AutomodService {
@@ -97,19 +98,20 @@ export class AutomodService {
     guildId: string,
     patch: Parameters<AutomodDependencies['settings']['update']>[1],
   ): Promise<unknown> {
-    const fixed =
-      patch.antiInviteStrikes ??
-      patch.antiReferralStrikes ??
-      patch.antiEveryoneStrikes ??
-      patch.antiCopypastaStrikes;
+    const enablesStrikeRule =
+      (patch.antiInviteStrikes !== undefined && patch.antiInviteStrikes > 0) ||
+      (patch.antiReferralStrikes !== undefined &&
+        patch.antiReferralStrikes > 0) ||
+      (patch.antiEveryoneStrikes !== undefined &&
+        patch.antiEveryoneStrikes > 0) ||
+      (patch.antiCopypastaStrikes !== undefined &&
+        patch.antiCopypastaStrikes > 0) ||
+      patch.maxUserMentions != null ||
+      patch.maxRoleMentions != null ||
+      patch.maxLines != null ||
+      patch.duplicateEnabled === true;
     if (
-      fixed !== undefined &&
-      fixed > 0 &&
-      (await this.deps.punishments.list(guildId)).length === 0
-    )
-      return err('CONFIGURATION_MISSING', 'Punishment設定が必要です');
-    if (
-      patch.duplicateEnabled === true &&
+      enablesStrikeRule &&
       (await this.deps.punishments.list(guildId)).length === 0
     )
       return err('CONFIGURATION_MISSING', 'Punishment設定が必要です');
@@ -242,6 +244,7 @@ export class AutomodService {
     try {
       await this.deps.discord.dehoist(guildId, userId, character);
     } catch (error) {
+      if (isUnauthorized(error)) throw error;
       this.deps.warning?.(
         guildId,
         error instanceof Error ? error.message : 'AutoDehoistに失敗しました',
@@ -528,6 +531,7 @@ export class AutomodService {
         await this.deps.messageLog?.deleted(message, aggregate.value.reason);
       }
     } catch (error) {
+      if (isUnauthorized(error)) throw error;
       warnings.push(
         error instanceof Error ? error.message : 'メッセージ削除に失敗しました',
       );
@@ -581,13 +585,7 @@ export class AutomodService {
           for (const key of pendingCacheKeys)
             this.editedRules.set(key, now + 600_000);
       } catch (error) {
-        if (
-          typeof error === 'object' &&
-          error !== null &&
-          'status' in error &&
-          (error as { status?: unknown }).status === 401
-        )
-          throw error;
+        if (isUnauthorized(error)) throw error;
         warnings.push(
           error instanceof Error
             ? error.message
@@ -647,6 +645,7 @@ export class AutomodService {
         await this.deps.discord.deleteMessage(channelId, messageId);
         return;
       } catch (error) {
+        if (isUnauthorized(error)) throw error;
         const code = (error as { code?: number; status?: number }).code;
         const status = (error as { status?: number }).status;
         if (code === 10008) return;
@@ -673,6 +672,7 @@ export class AutomodService {
         await this.deps.discord.deleteMessages?.(channelId, ids);
         return;
       } catch (error) {
+        if (isUnauthorized(error)) throw error;
         const code = (error as { code?: number }).code;
         const status = (error as { status?: number }).status;
         if (code === 10008) return;

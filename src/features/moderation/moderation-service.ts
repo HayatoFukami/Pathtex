@@ -163,7 +163,7 @@ export class ModerationService {
             reason,
           );
         } catch (error: unknown) {
-          const status = this.errorStatus(error);
+          const status = this.httpStatus(error);
           if (status === 401) throw error;
           const persistedIdentity = preCreated
             ? TargetIdentitySchema.safeParse({
@@ -183,6 +183,7 @@ export class ModerationService {
             targetId: target.id,
             ok: false,
             code: this.errorCode(error),
+            ...(status !== undefined ? { status } : {}),
             ...(target.identity
               ? { identity: target.identity }
               : persistedIdentity?.success
@@ -226,12 +227,14 @@ export class ModerationService {
       user =
         member ?? (await this.deps.discord.getUser(input.guildId, target.id));
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
+      const status = this.httpStatus(error);
+      if (status === 401) throw error;
       if (persisted?.success && preCreated)
         return {
           targetId: target.id,
           ok: false,
           code: this.errorCode(error),
+          ...(status !== undefined ? { status } : {}),
           identity: persisted.data,
           case: preCreated,
         };
@@ -240,6 +243,7 @@ export class ModerationService {
           targetId: target.id,
           ok: false,
           code: this.errorCode(error),
+          ...(status !== undefined ? { status } : {}),
           identity: supplied,
         };
       if (this.deps.targetIdentityResolver) {
@@ -253,12 +257,14 @@ export class ModerationService {
             targetId: target.id,
             ok: false,
             code: resolved.errorCode,
+            ...(status !== undefined ? { status } : {}),
             identity: resolved.identity,
           };
         return {
           targetId: target.id,
           ok: false,
           code: this.errorCode(error),
+          ...(status !== undefined ? { status } : {}),
           identity: resolved.identity,
         };
       }
@@ -266,6 +272,7 @@ export class ModerationService {
         targetId: target.id,
         ok: false,
         code: this.errorCode(error),
+        ...(status !== undefined ? { status } : {}),
       };
     }
     const resolved: TargetIdentity | undefined = persisted?.data ?? supplied;
@@ -273,10 +280,15 @@ export class ModerationService {
       ? { identity: resolved, errorCode: undefined }
       : await this.resolveIdentity(input.guildId, target.id, member);
     const identity = identityResult.identity;
-    const failed = (code: string, caseValue?: CaseDto): TargetOutcome => ({
+    const failed = (
+      code: string,
+      caseValue?: CaseDto,
+      status?: number,
+    ): TargetOutcome => ({
       targetId: target.id,
       ok: false,
       code,
+      ...(status !== undefined ? { status } : {}),
       ...(this.deps.targetIdentityResolver || supplied || preCreated
         ? { identity }
         : {}),
@@ -286,7 +298,8 @@ export class ModerationService {
           ? { case: caseValue }
           : {}),
     });
-    if (identityResult.errorCode) return failed(identityResult.errorCode);
+    if (identityResult.errorCode)
+      return failed(identityResult.errorCode, undefined, identityResult.status);
     if (preCreated) {
       const expectedSource =
         input.execution.source === 'AUTO_PUNISHMENT'
@@ -318,8 +331,9 @@ export class ModerationService {
     try {
       botId = await this.deps.discord.getBotUserId(input.guildId);
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
-      return failed(this.errorCode(error));
+      const status = this.httpStatus(error);
+      if (status === 401) throw error;
+      return failed(this.errorCode(error), undefined, status);
     }
     if (target.id === input.actorId) return failed('TARGET_IS_SELF');
     if (target.id === botId) return failed('TARGET_IS_BOT');
@@ -336,8 +350,9 @@ export class ModerationService {
           input.guildId,
         );
       } catch (error) {
-        if (this.errorStatus(error) === 401) throw error;
-        return failed(this.errorCode(error));
+        const status = this.httpStatus(error);
+        if (status === 401) throw error;
+        return failed(this.errorCode(error), undefined, status);
       }
     }
     if (member && member.rolePosition >= (botRolePosition ?? -1))
@@ -348,8 +363,9 @@ export class ModerationService {
         ? await this.deps.discord.getActorIsOwner(input.guildId, input.actorId)
         : false;
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
-      return failed(this.errorCode(error));
+      const status = this.httpStatus(error);
+      if (status === 401) throw error;
+      return failed(this.errorCode(error), undefined, status);
     }
     if (member && this.deps.discord.getActorRolePosition && !actorIsOwner) {
       let actorRole: number;
@@ -359,8 +375,9 @@ export class ModerationService {
           input.actorId,
         );
       } catch (error) {
-        if (this.errorStatus(error) === 401) throw error;
-        return failed(this.errorCode(error));
+        const status = this.httpStatus(error);
+        if (status === 401) throw error;
+        return failed(this.errorCode(error), undefined, status);
       }
       if (member.rolePosition >= actorRole) return failed('ROLE_HIERARCHY');
     }
@@ -377,8 +394,9 @@ export class ModerationService {
         identity,
       );
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
-      return failed(this.errorCode(error));
+      const status = this.httpStatus(error);
+      if (status === 401) throw error;
+      return failed(this.errorCode(error), undefined, status);
     }
     if (!pending.ok) return failed(pending.error.code);
     const audit = auditReason(pending.value.caseNumber, reason);
@@ -528,6 +546,7 @@ export class ModerationService {
       throw new Error('Fatal detached DM failure');
     }
     const failureCode = apiError ? this.errorCode(apiError) : undefined;
+    const failureStatus = apiError ? this.httpStatus(apiError) : undefined;
     const partial =
       action === 'SOFTBAN' && apiError && banSucceeded
         ? 'PARTIAL'
@@ -572,6 +591,7 @@ export class ModerationService {
           targetId: target.id,
           ok: false,
           code: failureCode ?? 'DISCORD_API_ERROR',
+          ...(failureStatus !== undefined ? { status: failureStatus } : {}),
           case: updated.ok ? updated.value : pending.value,
           ...(this.deps.targetIdentityResolver || supplied || preCreated
             ? { identity }
@@ -591,7 +611,11 @@ export class ModerationService {
     guildId: string,
     userId: string,
     member: { displayName?: unknown } | null,
-  ): Promise<{ identity: TargetIdentity; errorCode?: string }> {
+  ): Promise<{
+    identity: TargetIdentity;
+    errorCode?: string;
+    status?: number;
+  }> {
     if (!this.deps.targetIdentityResolver)
       return { identity: fallbackTargetIdentity(userId) };
     try {
@@ -610,10 +634,12 @@ export class ModerationService {
         identity: parsed.data,
       };
     } catch (error) {
-      if (this.errorStatus(error) === 401) throw error;
+      const status = this.httpStatus(error);
+      if (status === 401) throw error;
       return {
         identity: fallbackTargetIdentity(userId),
         errorCode: this.errorCode(error),
+        ...(status !== undefined ? { status } : {}),
       };
     }
   }
@@ -622,6 +648,20 @@ export class ModerationService {
     if (typeof error !== 'object' || error === null || !('status' in error))
       return undefined;
     const status = (error as { status?: unknown }).status;
+    return typeof status === 'number' ? status : undefined;
+  }
+  /** Resolves the underlying Discord HTTP status from an enforcement error,
+   * unwrapping a `cause` wrapper the same way the scheduler classifier does so
+   * the preserved outcome status classifies identically downstream. */
+  private httpStatus(error: unknown): number | undefined {
+    const source =
+      error instanceof Error && 'cause' in error
+        ? (error as Error & { cause?: unknown }).cause
+        : error;
+    const status =
+      typeof source === 'object' && source !== null && 'status' in source
+        ? (source as { status?: unknown }).status
+        : undefined;
     return typeof status === 'number' ? status : undefined;
   }
   private errorCode(error: unknown): string {

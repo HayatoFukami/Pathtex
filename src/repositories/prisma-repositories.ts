@@ -66,6 +66,7 @@ import {
   StrikeCountRowSchema,
   IdRowSchema,
   MuteLockRowSchema,
+  SCHEDULED_MAX_ATTEMPTS,
 } from './contracts.js';
 import type { GeneralRepository } from './contracts.js';
 import type { Prisma as PrismaTypes } from '@prisma/client';
@@ -583,51 +584,84 @@ export class PrismaSchedulerRepository implements SchedulerRepository {
     WorkerIdSchema.parse(workerId);
     z.string().min(1).parse(error);
     z.boolean().parse(retryable);
-    const action = await this.db.scheduledAction.findFirst({
-      where: { id, status: 'RUNNING', lockedBy: workerId },
+    return this.db.$transaction(async (tx) => {
+      const action = await tx.scheduledAction.findFirst({
+        where: { id, status: 'RUNNING', lockedBy: workerId },
+      });
+      if (!action) return false;
+      const retry = retryable && action.attempts < SCHEDULED_MAX_ATTEMPTS;
+      const delays = [30, 60, 120, 240, 480];
+      const delaySeconds = delays[Math.max(0, action.attempts - 1)] ?? 480;
+      const result = await tx.scheduledAction.updateMany({
+        where: { id, status: 'RUNNING', lockedBy: workerId },
+        data: {
+          status: retry ? 'PENDING' : 'FAILED',
+          executeAt: retry
+            ? new Date(this.clock().getTime() + delaySeconds * 1000)
+            : action.executeAt,
+          lastError: error,
+          lockedAt: null,
+          lockedBy: null,
+        },
+      });
+      if (result.count !== 1) return false;
+      // Retry exhaustion: when the job becomes FAILED, atomically fail any
+      // linked still-PENDING SCHEDULED case. This is the repository fallback
+      // that prevents a case staying PENDING after a dispatcher crash before it
+      // could terminalize at the final attempt.
+      if (!retry && action.executedCaseId)
+        await tx.moderationCase.updateMany({
+          where: { id: action.executedCaseId, status: 'PENDING' },
+          data: { status: 'FAILED', errorCode: 'SCHEDULED_JOB_FAILED' },
+        });
+      return true;
     });
-    if (!action) return false;
-    const retry = retryable && action.attempts < 5;
-    const delays = [30, 60, 120, 240, 480];
-    const delaySeconds = delays[Math.max(0, action.attempts - 1)] ?? 480;
-    const result = await this.db.scheduledAction.updateMany({
-      where: { id, status: 'RUNNING', lockedBy: workerId },
-      data: {
-        status: retry ? 'PENDING' : 'FAILED',
-        executeAt: retry
-          ? new Date(this.clock().getTime() + delaySeconds * 1000)
-          : action.executeAt,
-        lastError: error,
-        lockedAt: null,
-        lockedBy: null,
-      },
-    });
-    return result.count === 1;
   }
 
   public async recoverStale(now = new Date(), workerTimeoutMs = 5 * 60_000) {
-    const exhausted = await this.db.scheduledAction.updateMany({
-      where: {
-        status: 'RUNNING',
-        attempts: { gte: 5 },
-        lockedAt: { lt: new Date(now.getTime() - workerTimeoutMs) },
-      },
-      data: {
-        status: 'FAILED',
-        lastError: 'worker lease expired',
-        lockedAt: null,
-        lockedBy: null,
-      },
+    const staleBefore = new Date(now.getTime() - workerTimeoutMs);
+    return this.db.$transaction(async (tx) => {
+      const exhaustedJobs = await tx.scheduledAction.findMany({
+        where: {
+          status: 'RUNNING',
+          attempts: { gte: SCHEDULED_MAX_ATTEMPTS },
+          lockedAt: { lt: staleBefore },
+        },
+        select: { executedCaseId: true },
+      });
+      const exhausted = await tx.scheduledAction.updateMany({
+        where: {
+          status: 'RUNNING',
+          attempts: { gte: SCHEDULED_MAX_ATTEMPTS },
+          lockedAt: { lt: staleBefore },
+        },
+        data: {
+          status: 'FAILED',
+          lastError: 'worker lease expired',
+          lockedAt: null,
+          lockedBy: null,
+        },
+      });
+      // Exhausted stale recovery: fail linked still-PENDING SCHEDULED cases so
+      // a crashed worker that never terminalized cannot leave a case PENDING.
+      const exhaustedCaseIds = exhaustedJobs
+        .map((job) => job.executedCaseId)
+        .filter((caseId): caseId is string => caseId !== null);
+      if (exhaustedCaseIds.length > 0)
+        await tx.moderationCase.updateMany({
+          where: { id: { in: exhaustedCaseIds }, status: 'PENDING' },
+          data: { status: 'FAILED', errorCode: 'SCHEDULED_JOB_FAILED' },
+        });
+      const recovered = await tx.scheduledAction.updateMany({
+        where: {
+          status: 'RUNNING',
+          attempts: { lt: SCHEDULED_MAX_ATTEMPTS },
+          lockedAt: { lt: staleBefore },
+        },
+        data: { status: 'PENDING', lockedAt: null, lockedBy: null },
+      });
+      return exhausted.count + recovered.count;
     });
-    const recovered = await this.db.scheduledAction.updateMany({
-      where: {
-        status: 'RUNNING',
-        attempts: { lt: 5 },
-        lockedAt: { lt: new Date(now.getTime() - workerTimeoutMs) },
-      },
-      data: { status: 'PENDING', lockedAt: null, lockedBy: null },
-    });
-    return exhausted.count + recovered.count;
   }
   public async findPending(
     guildId: string,
@@ -1364,7 +1398,7 @@ export class PrismaActiveMuteRepository implements ActiveMuteRepository {
   ): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
       await tx.$queryRaw(
-        Prisma.sql`SELECT id FROM scheduled_actions WHERE id = ${jobId} FOR UPDATE`,
+        Prisma.sql`SELECT id FROM scheduled_actions WHERE id = ${jobId}::uuid FOR UPDATE`,
       );
       const job = await tx.scheduledAction.findUnique({ where: { id: jobId } });
       const rows = await tx.$queryRaw<unknown[]>(
@@ -1383,6 +1417,10 @@ export class PrismaActiveMuteRepository implements ActiveMuteRepository {
         job.executeAt.getTime() !== mute.expires_at.getTime()
       )
         return false;
+      // Expire only the matching active mute. The job is deliberately left
+      // RUNNING: terminalizing the linked SCHEDULED case (and completing the
+      // job) is the dispatcher's responsibility via terminalizeScheduledCase,
+      // keeping the case/modlog boundary independent of the mute transition.
       const muteUpdated = await tx.activeMute.updateMany({
         where: {
           guildId,
@@ -1392,19 +1430,7 @@ export class PrismaActiveMuteRepository implements ActiveMuteRepository {
         },
         data: { status: 'EXPIRED' },
       });
-      if (muteUpdated.count !== 1)
-        throw Object.assign(new Error('Active mute CAS failed'), {
-          code: 'CAS_FAILED',
-        });
-      const result = await tx.scheduledAction.updateMany({
-        where: { id: jobId, status: 'RUNNING', lockedBy: workerId },
-        data: { status: 'COMPLETED', lockedAt: null, lockedBy: null },
-      });
-      if (result.count !== 1)
-        throw Object.assign(new Error('Scheduled job CAS failed'), {
-          code: 'CAS_FAILED',
-        });
-      return true;
+      return muteUpdated.count === 1;
     });
   }
 
@@ -1476,7 +1502,8 @@ export class PrismaRaidRepository implements RaidRepository {
             raidStartedAt: new Date(),
             verificationLevelBeforeRaid:
               input.verificationLevelBeforeRaid ?? null,
-            raidVerificationChanged: input.changed,
+            // Ownership is confirmed only after a successful Discord raise.
+            raidVerificationChanged: false,
           },
         }),
       );
@@ -1507,9 +1534,11 @@ export class PrismaRaidRepository implements RaidRepository {
           raidModeSource: 'MANUAL',
           raidModeReason: input.reason ?? null,
           raidStartedAt: new Date(),
+          // Capture the prior level but claim ownership only after a
+          // successful Discord raise (see markVerificationRaised).
           verificationLevelBeforeRaid:
             input.verificationLevelBeforeRaid ?? null,
-          raidVerificationChanged: input.changed,
+          raidVerificationChanged: false,
         },
       });
       const createdCase = await allocateCase(tx, {
@@ -1539,20 +1568,89 @@ export class PrismaRaidRepository implements RaidRepository {
       };
     });
   }
-  public deactivate(guildId: string) {
+  public markVerificationRaised(guildId: string) {
     SnowflakeSchema.parse(guildId);
-    return this.db.guildSettings
-      .update({
+    return this.db.$transaction(async (tx) => {
+      await ensureSettings(tx, guildId);
+      await tx.$queryRaw(
+        Prisma.sql`SELECT guild_id FROM guild_settings WHERE guild_id = ${guildId} FOR UPDATE`,
+      );
+      const current = await tx.guildSettings.findUnique({
         where: { guildId },
+      });
+      if (!current)
+        return GuildSettingsDtoSchema.parse(await ensureSettings(tx, guildId));
+      // Claim ownership only while the raid is still active; a concurrent OFF
+      // owns restoration and must not be second-guessed.
+      if (!current.raidModeEnabled)
+        return GuildSettingsDtoSchema.parse(current);
+      return GuildSettingsDtoSchema.parse(
+        await tx.guildSettings.update({
+          where: { guildId },
+          data: { raidVerificationChanged: true },
+        }),
+      );
+    });
+  }
+  public async deactivateWithCase(input: {
+    guildId: string;
+    actorUserId: string;
+    reason: string;
+  }): Promise<import('./contracts.js').RaidDeactivationDto> {
+    SnowflakeSchema.parse(input.guildId);
+    SnowflakeSchema.parse(input.actorUserId);
+    ReasonSchema.parse(input.reason);
+    return this.db.$transaction(async (tx) => {
+      await ensureSettings(tx, input.guildId);
+      await tx.$queryRaw(
+        Prisma.sql`SELECT guild_id FROM guild_settings WHERE guild_id = ${input.guildId} FOR UPDATE`,
+      );
+      const current = await tx.guildSettings.findUnique({
+        where: { guildId: input.guildId },
+      });
+      // Conditional, idempotent transition: a concurrent OFF that already won
+      // leaves `changed` false and creates no additional case.
+      if (!current?.raidModeEnabled)
+        return {
+          changed: false,
+          settings: GuildSettingsDtoSchema.parse(
+            current ?? (await ensureSettings(tx, input.guildId)),
+          ),
+          restoreLevel: null,
+        };
+      const restoreLevel =
+        current.raidVerificationChanged &&
+        current.verificationLevelBeforeRaid !== null
+          ? current.verificationLevelBeforeRaid
+          : null;
+      const settings = await tx.guildSettings.update({
+        where: { guildId: input.guildId },
         data: { raidModeEnabled: false, raidModeSource: null },
-      })
-      .then((row) => GuildSettingsDtoSchema.parse(row));
+      });
+      const createdCase = await allocateCase(tx, {
+        guildId: input.guildId,
+        action: 'RAIDMODE_OFF',
+        targetDisplay: 'raidmode',
+        moderatorUserId: input.actorUserId,
+        source: 'RAIDMODE',
+        status: 'COMPLETED',
+        reason: input.reason,
+      });
+      return {
+        changed: true,
+        settings: GuildSettingsDtoSchema.parse(settings),
+        case: validateDbOutput(createdCase),
+        restoreLevel,
+      };
+    });
   }
   public async disableAutoIfIdle(
     guildId: string,
     now: Date,
-  ): Promise<{ disabled: boolean; nextAt: Date | null }> {
+    actorUserId: string,
+  ): Promise<import('./contracts.js').RaidAutoDisableDto> {
     SnowflakeSchema.parse(guildId);
+    SnowflakeSchema.parse(actorUserId);
     z.date().parse(now);
     return this.db.$transaction(async (tx) => {
       await ensureSettings(tx, guildId);
@@ -1563,25 +1661,48 @@ export class PrismaRaidRepository implements RaidRepository {
         where: { guildId },
       });
       if (!settings?.raidModeEnabled || settings.raidModeSource !== 'AUTO')
-        return { disabled: false, nextAt: null };
+        return { disabled: false };
       const latest = await tx.raidJoinEvent.findFirst({
         where: { guildId },
         orderBy: { joinedAt: 'desc' },
       });
-      if (!latest) {
-        await tx.guildSettings.update({
-          where: { guildId },
-          data: { raidModeEnabled: false, raidModeSource: null },
-        });
-        return { disabled: true, nextAt: null };
+      if (latest) {
+        const nextAt = new Date(latest.joinedAt.getTime() + 120_000);
+        if (nextAt > now) {
+          // Not idle yet. Keep the deadline at the repository-authoritative
+          // latest-join deadline (max-only) inside this transaction so a stale
+          // disable can never cancel or replace a newer join's deadline.
+          await extendAutoDisableDeadline(tx, guildId, latest.joinedAt);
+          return { disabled: false };
+        }
       }
-      const nextAt = new Date(latest.joinedAt.getTime() + 120_000);
-      if (nextAt > now) return { disabled: false, nextAt };
-      await tx.guildSettings.update({
+      // Idle: transition OFF and allocate the single OFF case atomically under
+      // the same lock so a restore failure can never leave a durable OFF state
+      // without exactly one case.
+      const restoreLevel =
+        settings.raidVerificationChanged &&
+        settings.verificationLevelBeforeRaid !== null
+          ? settings.verificationLevelBeforeRaid
+          : null;
+      const updated = await tx.guildSettings.update({
         where: { guildId },
         data: { raidModeEnabled: false, raidModeSource: null },
       });
-      return { disabled: true, nextAt: null };
+      const createdCase = await allocateCase(tx, {
+        guildId,
+        action: 'RAIDMODE_OFF',
+        targetDisplay: 'raidmode',
+        moderatorUserId: actorUserId,
+        source: 'RAIDMODE',
+        status: 'COMPLETED',
+        reason: 'AutoRaid自動解除',
+      });
+      return {
+        disabled: true,
+        settings: GuildSettingsDtoSchema.parse(updated),
+        case: validateDbOutput(createdCase),
+        restoreLevel,
+      };
     });
   }
   public async recordJoinAndEvaluate(
@@ -1624,12 +1745,21 @@ export class PrismaRaidRepository implements RaidRepository {
       const count = await tx.raidJoinEvent.count({
         where: { guildId, joinedAt: { gte: since, lte: windowEnd } },
       });
-      if (count < threshold) return { activated: false, count };
       const current = await tx.guildSettings.findUnique({
         where: { guildId },
-        select: { raidModeEnabled: true },
+        select: { raidModeEnabled: true, raidModeSource: true },
       });
-      if (current?.raidModeEnabled) return { activated: false, count };
+      if (current?.raidModeEnabled) {
+        // Raid already active. For AUTO raids every join extends the disable
+        // deadline to the repository-authoritative latest-join deadline. The
+        // deadline only ever moves later (windowEnd is monotonic under the
+        // guild lock and the update keeps the max), so out-of-order deliveries
+        // or a concurrent completion can never shorten it.
+        if (current.raidModeSource === 'AUTO')
+          await extendAutoDisableDeadline(tx, guildId, windowEnd);
+        return { activated: false, count };
+      }
+      if (count < threshold) return { activated: false, count };
       const settings = await tx.guildSettings.update({
         where: { guildId },
         data: {
@@ -1637,9 +1767,11 @@ export class PrismaRaidRepository implements RaidRepository {
           raidModeSource: activation.source,
           raidModeReason: activation.reason ?? null,
           raidStartedAt: windowEnd,
+          // Capture the prior level but claim ownership only after a
+          // successful Discord raise (see markVerificationRaised).
           verificationLevelBeforeRaid:
             activation.verificationLevelBeforeRaid ?? null,
-          raidVerificationChanged: activation.changed,
+          raidVerificationChanged: false,
         },
       });
       const createdCase = await allocateCase(tx, {
@@ -1665,7 +1797,10 @@ export class PrismaRaidRepository implements RaidRepository {
         data: {
           guildId,
           type: 'DISABLE_RAIDMODE',
-          executeAt: new Date(joinedAt.getTime() + 120_000),
+          // Schedule from the newest committed join chosen for window
+          // evaluation, not the possibly stale input timestamp, so
+          // out-of-order gateway deliveries cannot pick an older idle base.
+          executeAt: new Date(windowEnd.getTime() + 120_000),
           payload: { guildId },
           createdByCaseId: createdCase.id,
         },
@@ -1819,6 +1954,42 @@ async function cancelMatching(tx: DbTransaction, input: ScheduledActionInput) {
       status: 'PENDING',
     },
     data: { status: 'CANCELLED' },
+  });
+}
+
+/** Extends the AUTO raid disable deadline to `windowEnd + 120s`, keeping the
+ * later of the existing and new deadlines so it can never move earlier. */
+async function extendAutoDisableDeadline(
+  tx: DbTransaction,
+  guildId: string,
+  windowEnd: Date,
+) {
+  const deadline = new Date(windowEnd.getTime() + 120_000);
+  const pending = await tx.scheduledAction.findFirst({
+    where: {
+      guildId,
+      type: 'DISABLE_RAIDMODE',
+      status: 'PENDING',
+      targetUserId: null,
+      channelId: null,
+    },
+  });
+  if (pending) {
+    if (pending.executeAt.getTime() < deadline.getTime())
+      await tx.scheduledAction.update({
+        where: { id: pending.id },
+        data: { executeAt: deadline },
+      });
+    return;
+  }
+  await tx.scheduledAction.create({
+    data: {
+      guildId,
+      type: 'DISABLE_RAIDMODE',
+      executeAt: deadline,
+      payload: { guildId },
+      createdByCaseId: null,
+    },
   });
 }
 

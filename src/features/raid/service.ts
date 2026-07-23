@@ -1,8 +1,5 @@
 import { err, ok } from '../../domain/result.js';
-import {
-  SnowflakeSchema,
-  CaseInputSchema,
-} from '../../repositories/contracts.js';
+import { SnowflakeSchema } from '../../repositories/contracts.js';
 import type { RaidDependencies } from './contracts.js';
 import type { RaidMemberAdd } from './contracts.js';
 import {
@@ -14,10 +11,54 @@ import {
 const validId = (value: string) => SnowflakeSchema.safeParse(value).success;
 const reasonOf = (reason?: string) => reason?.trim() || '理由未指定';
 
+/** Discord authentication failures (401) must propagate so the runtime can
+ * treat them as fatal; every other verification-level failure is non-fatal. */
+const isAuthError = (error: unknown): boolean => {
+  const source =
+    error instanceof Error && 'cause' in error
+      ? (error as Error & { cause?: unknown }).cause
+      : error;
+  const status =
+    source && typeof source === 'object' && 'status' in source
+      ? (source as { status?: unknown }).status
+      : undefined;
+  const code =
+    source && typeof source === 'object' && 'code' in source
+      ? (source as { code?: unknown }).code
+      : undefined;
+  return status === 401 || code === 401;
+};
+
 export class RaidService {
   private readonly clock: () => Date;
+  /** Per-guild promise chains serialize the verification raise/ownership claim
+   * against manual/scheduled OFF transitions for the same guild, while leaving
+   * different guilds fully concurrent. */
+  private readonly guildLocks = new Map<string, Promise<unknown>>();
   public constructor(private readonly deps: RaidDependencies) {
     this.clock = deps.clock ?? (() => new Date());
+  }
+
+  /** Runs `operation` exclusively for `guildId`. A failing operation does not
+   * poison the queue for later waiters, and the chain entry is dropped once it
+   * is the tail so idle guilds do not leak memory. */
+  private async withGuildLock<T>(
+    guildId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.guildLocks.get(guildId) ?? Promise.resolve();
+    const current = previous.then(
+      () => operation(),
+      () => operation(),
+    );
+    const tail = current.catch(() => undefined);
+    this.guildLocks.set(guildId, tail);
+    try {
+      return await current;
+    } finally {
+      if (this.guildLocks.get(guildId) === tail)
+        this.guildLocks.delete(guildId);
+    }
   }
 
   public status(guildId: string) {
@@ -64,63 +105,67 @@ export class RaidService {
     const current = await this.deps.settings.get(guildId);
     if (!current.ok) return current;
     if (current.value.raidModeEnabled) return ok({ settings: current.value });
-    const level = await this.deps.discord.getVerificationLevel(guildId);
-    const changed = level < 3;
-    if (changed)
-      await this.deps.discord.setVerificationLevel(
+    // Serialize activation/raise/ownership-claim against OFF for this guild so
+    // an OFF cannot observe the pre-raise (ownership-unconfirmed) state.
+    return this.withGuildLock(guildId, async () => {
+      const level = await this.deps.discord.getVerificationLevel(guildId);
+      const changed = level < 3;
+      const activation = await this.deps.repository.activateManual({
         guildId,
-        3,
-        reasonOf(reason),
-      );
-    const activation = await this.deps.repository.activateManual({
-      guildId,
-      actorUserId: actorId,
-      source: 'MANUAL',
-      reason: reasonOf(reason),
-      verificationLevelBeforeRaid: level,
-      changed,
-    });
-    if (!activation.settings)
-      return err('INTERNAL_ERROR', 'RaidMode state was not returned');
-    this.deps.settings.invalidate(guildId);
-    if (activation.activated && activation.case)
-      await this.writeLog(guildId, 'RaidMode ON', activation.case.id);
-    return ok({
-      settings: activation.settings,
-      ...(activation.case ? { case: activation.case } : {}),
+        actorUserId: actorId,
+        source: 'MANUAL',
+        reason: reasonOf(reason),
+        verificationLevelBeforeRaid: level,
+        changed,
+      });
+      if (!activation.settings)
+        return err('INTERNAL_ERROR', 'RaidMode state was not returned');
+      // Invalidate before the Discord verification-level call so joins observe
+      // the persisted raid state even if that call fails (no rollback).
+      this.deps.settings.invalidate(guildId);
+      if (changed)
+        await this.raiseAndConfirmOwnership(guildId, reasonOf(reason));
+      if (activation.activated && activation.case)
+        await this.writeLog(guildId, 'RaidMode ON', activation.case.id);
+      return ok({
+        settings: activation.settings,
+        ...(activation.case ? { case: activation.case } : {}),
+      });
     });
   }
 
   public async off(guildId: string, actorId: string, reason?: string) {
-    if (reason === 'AutoRaid自動解除') {
-      await this.disableJob(guildId);
-      return this.deps.settings.get(guildId);
-    }
-    const current = await this.deps.settings.get(guildId);
-    if (!current.ok) return current;
-    if (!current.value.raidModeEnabled) return ok({ settings: current.value });
-    if (
-      current.value.raidVerificationChanged &&
-      current.value.verificationLevelBeforeRaid !== null &&
-      current.value.verificationLevelBeforeRaid !== undefined &&
-      (await this.deps.discord.getVerificationLevel(guildId)) === 3
-    )
-      await this.deps.discord.setVerificationLevel(
+    if (!validId(guildId) || !validId(actorId))
+      return err('INVALID_INPUT', 'Invalid ID');
+    // Serialize against an in-flight raise/ownership claim for this guild. The
+    // conditional transition and the single OFF case are committed atomically
+    // under the DB lock, so concurrent OFFs cannot duplicate the case/modlog
+    // and a later restore failure cannot lose the case.
+    return this.withGuildLock(guildId, async () => {
+      const result = await this.deps.repository.deactivateWithCase({
         guildId,
-        current.value.verificationLevelBeforeRaid,
-        reasonOf(reason),
-      );
-    const settings = await this.deps.repository.deactivate(guildId);
-    this.deps.settings.invalidate(guildId);
-    const created = await this.createCase(
-      guildId,
-      actorId,
-      'RAIDMODE_OFF',
-      reasonOf(reason),
-    );
-    if (created.ok)
-      await this.writeLog(guildId, 'RaidMode OFF', created.value.id);
-    return ok({ settings, ...(created.ok ? { case: created.value } : {}) });
+        actorUserId: actorId,
+        reason: reasonOf(reason),
+      });
+      if (!result.changed) return ok({ settings: result.settings });
+      // Invalidate before the Discord verification-level call so joins observe
+      // the persisted OFF state even if that call fails (no rollback).
+      this.deps.settings.invalidate(guildId);
+      // Log the durable case before attempting restoration so a propagate-able
+      // 401 never leaves an OFF state without its case/modlog.
+      if (result.case)
+        await this.writeLog(guildId, 'RaidMode OFF', result.case.id);
+      if (result.restoreLevel !== null)
+        await this.restoreVerificationLevel(
+          guildId,
+          result.restoreLevel,
+          reasonOf(reason),
+        );
+      return ok({
+        settings: result.settings,
+        ...(result.case ? { case: result.case } : {}),
+      });
+    });
   }
 
   public async memberAdd(member: RaidMemberAdd): Promise<void> {
@@ -134,32 +179,35 @@ export class RaidService {
         member.guildId,
       );
       const verificationChanged = verificationLevel < 3;
-      const result = await this.deps.repository.recordJoinAndEvaluate(
-        member.guildId,
-        member.userId,
-        now,
-        auto.autoRaidJoinCount,
-        auto.autoRaidWindowSeconds,
-        {
-          guildId: member.guildId,
-          actorUserId: await this.deps.discord.getBotUserId(member.guildId),
-          source: 'AUTO',
-          reason: `AutoRaid: ${String(auto.autoRaidJoinCount)} joins in ${String(auto.autoRaidWindowSeconds)} seconds`,
-          verificationLevelBeforeRaid: verificationLevel,
-          changed: verificationChanged,
-        },
-      );
-      if (result.activated) {
-        if (verificationChanged)
-          await this.deps.discord.setVerificationLevel(
-            member.guildId,
-            3,
-            'AutoRaid',
-          );
-        this.deps.settings.invalidate(member.guildId);
-        if (result.case)
-          await this.writeLog(member.guildId, 'RaidMode ON', result.case.id);
-      }
+      // Serialize record/evaluate + raise + ownership claim against OFF for
+      // this guild. The Kick/DM below stays outside the lock.
+      await this.withGuildLock(member.guildId, async () => {
+        const result = await this.deps.repository.recordJoinAndEvaluate(
+          member.guildId,
+          member.userId,
+          now,
+          auto.autoRaidJoinCount,
+          auto.autoRaidWindowSeconds,
+          {
+            guildId: member.guildId,
+            actorUserId: await this.deps.discord.getBotUserId(member.guildId),
+            source: 'AUTO',
+            reason: `AutoRaid: ${String(auto.autoRaidJoinCount)} joins in ${String(auto.autoRaidWindowSeconds)} seconds`,
+            verificationLevelBeforeRaid: verificationLevel,
+            changed: verificationChanged,
+          },
+        );
+        if (result.activated) {
+          // Invalidate before the Discord verification-level call so concurrent
+          // joins observe the persisted raid state and still get kicked even if
+          // that call fails (no rollback).
+          this.deps.settings.invalidate(member.guildId);
+          if (verificationChanged)
+            await this.raiseAndConfirmOwnership(member.guildId, 'AutoRaid');
+          if (result.case)
+            await this.writeLog(member.guildId, 'RaidMode ON', result.case.id);
+        }
+      });
     } else
       await this.deps.repository.recordJoin(member.guildId, member.userId, now);
     const after = await this.deps.settings.get(member.guildId);
@@ -187,16 +235,9 @@ export class RaidService {
       'KICK',
       { source: 'RAIDMODE', sendDm: false, waitForDm: false },
     );
-    if (after.value.raidModeSource === 'AUTO')
-      await this.deps.scheduler.schedule({
-        guildId: member.guildId,
-        targetUserId: null,
-        channelId: null,
-        type: 'DISABLE_RAIDMODE',
-        executeAt: new Date(now.getTime() + 120_000),
-        payload: { guildId: member.guildId },
-        createdByCaseId: null,
-      });
+    // Automatic disable-deadline extension lives in the locked repository path
+    // (recordJoinAndEvaluate); the service never replaces the job from a local
+    // clock reading.
   }
 
   private async resolveJoinIdentity(
@@ -232,65 +273,76 @@ export class RaidService {
   }
 
   /** Scheduler entry point: stale jobs cannot disable manual raids or a raid
-   * that received a newer join. */
+   * that received a newer join. The conditional OFF transition, the single OFF
+   * case, and any idle-not-yet-disable deadline write are all committed
+   * atomically in the repository; the service performs no deadline
+   * replacement. */
   public async disableJob(guildId: string, now = this.clock()) {
-    const before = await this.deps.settings.get(guildId);
-    if (!before.ok) return before;
-    const result = await this.deps.repository.disableAutoIfIdle(guildId, now);
-    if (result.disabled) {
-      if (
-        before.value.raidVerificationChanged &&
-        before.value.verificationLevelBeforeRaid !== null &&
-        before.value.verificationLevelBeforeRaid !== undefined &&
-        (await this.deps.discord.getVerificationLevel(guildId)) === 3
-      )
-        await this.deps.discord.setVerificationLevel(
-          guildId,
-          before.value.verificationLevelBeforeRaid,
-          'AutoRaid自動解除',
-        );
-      this.deps.settings.invalidate(guildId);
-      const actorId = await this.deps.discord.getBotUserId(guildId);
-      const created = await this.createCase(
+    const actorId = await this.deps.discord.getBotUserId(guildId);
+    return this.withGuildLock(guildId, async () => {
+      const result = await this.deps.repository.disableAutoIfIdle(
         guildId,
+        now,
         actorId,
-        'RAIDMODE_OFF',
-        'AutoRaid自動解除',
       );
-      if (created.ok)
-        await this.writeLog(guildId, 'RaidMode OFF', created.value.id);
-    }
-    if (result.nextAt)
-      await this.deps.scheduler.schedule({
-        guildId,
-        targetUserId: null,
-        channelId: null,
-        type: 'DISABLE_RAIDMODE',
-        executeAt: result.nextAt,
-        payload: { guildId },
-        createdByCaseId: null,
-      });
-    return result;
+      if (result.disabled) {
+        // Invalidate before the Discord verification-level call so joins
+        // observe the persisted OFF state even if that call fails (no
+        // rollback).
+        this.deps.settings.invalidate(guildId);
+        // Log the durable case before attempting restoration so a
+        // propagate-able 401 never leaves an OFF state without its
+        // case/modlog.
+        if (result.case)
+          await this.writeLog(guildId, 'RaidMode OFF', result.case.id);
+        if (result.restoreLevel !== null && result.restoreLevel !== undefined)
+          await this.restoreVerificationLevel(
+            guildId,
+            result.restoreLevel,
+            'AutoRaid自動解除',
+          );
+      }
+      return result;
+    });
   }
 
-  private async createCase(
+  /** Raises the verification level after the raid transition is persisted and
+   * claims verification ownership only on success. A non-auth Discord failure
+   * leaves ownership cleared (and warns) without rolling back the transition or
+   * blocking the downstream kick/scheduling; a 401 is propagated as fatal. */
+  private async raiseAndConfirmOwnership(
     guildId: string,
-    actorId: string,
-    action: 'RAIDMODE_ON' | 'RAIDMODE_OFF',
     reason: string,
-  ) {
-    const input = CaseInputSchema.parse({
-      guildId,
-      action,
-      targetDisplay: 'raidmode',
-      moderatorUserId: actorId,
-      reason,
-      source: 'RAIDMODE',
-      status: 'COMPLETED',
-      metadata: {},
-    });
-    return this.deps.cases.create(input);
+  ): Promise<void> {
+    try {
+      await this.deps.discord.setVerificationLevel(guildId, 3, reason);
+    } catch (error: unknown) {
+      if (isAuthError(error)) throw error;
+      this.deps.logger?.warn(
+        { event: 'raid.verification_raise_failed', guildId },
+        'Verification raise failed; raid verification ownership not claimed',
+      );
+      return;
+    }
+    await this.deps.repository.markVerificationRaised(guildId);
   }
+
+  /** Restores the pre-raid verification level when the bot raised it and the
+   * guild is still at HIGH. A non-auth Discord failure must not block OFF
+   * processing; a 401 is propagated as fatal. */
+  private async restoreVerificationLevel(
+    guildId: string,
+    before: number,
+    reason: string,
+  ): Promise<void> {
+    try {
+      if ((await this.deps.discord.getVerificationLevel(guildId)) !== 3) return;
+      await this.deps.discord.setVerificationLevel(guildId, before, reason);
+    } catch (error: unknown) {
+      if (isAuthError(error)) throw error;
+    }
+  }
+
   private async writeLog(guildId: string, _title: string, caseId: string) {
     try {
       await this.deps.modlog?.writeCase(guildId, caseId);

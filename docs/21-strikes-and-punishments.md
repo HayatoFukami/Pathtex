@@ -87,8 +87,9 @@ Action choices:
 規則:
 
 - `none`は対象しきい値の設定削除。
-- Mute/Banのみduration可。
-- Kick/Softbanでduration指定は拒否。
+- Mute/Banのみduration可。Kick/Softbanでduration指定は拒否。
+- Action別duration上限: Muteは28日（2,419,200秒）以下、Banは365日（31,536,000秒）以下。上限超過は拒否。
+- Actionとdurationの組み合わせ妥当性は設定時に検証する。Domain schema・公開設定サービス・永続化書き込み境界のすべてが同一ポリシーを共有し、不正な組み合わせは保存せずに`INVALID_INPUT`として拒否する。暗黙のclampや既存データの再解釈は行わない。
 - 同一しきい値は上書き。
 
 ### `/punishment remove`

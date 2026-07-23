@@ -3,11 +3,10 @@ import type {
   GuildSettingsDto,
   RaidRepository,
 } from '../../repositories/contracts.js';
+import type { Logger } from 'pino';
 import type { Result } from '../../domain/result.js';
 import type { SettingsService } from '../../services/settings-service.js';
-import type { SchedulerService } from '../../services/scheduler-service.js';
 import type { ModerationService } from '../moderation/moderation-service.js';
-import type { CaseService } from '../../services/case-service.js';
 import type { TargetIdentity } from '../../services/target-identity.js';
 
 export interface RaidDiscordPort {
@@ -34,9 +33,7 @@ export interface RaidDependencies {
       patch: import('../../repositories/contracts.js').AutomodSettingsUpdate,
     ): Promise<import('../../repositories/contracts.js').AutomodSettingsDto>;
   };
-  readonly scheduler: SchedulerService;
   readonly moderation: ModerationService;
-  readonly cases: CaseService;
   /** Shared identity resolver; Raid supplies the joining member as context. */
   readonly targetIdentityResolver?: {
     resolve(
@@ -50,6 +47,8 @@ export interface RaidDependencies {
     write(guildId: string, event: unknown, caseId?: string): Promise<unknown>;
     writeCase(guildId: string, caseId: string): Promise<unknown>;
   };
+  /** Operational warnings (e.g. a failed verification raise) are emitted here. */
+  readonly logger?: Logger;
   readonly clock?: () => Date;
 }
 

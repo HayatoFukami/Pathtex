@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { punishmentDurationError } from '../domain/punishment.js';
 
 export const SnowflakeSchema = z.string().regex(/^\d{17,20}$/);
 const snowflake = SnowflakeSchema;
@@ -196,6 +197,13 @@ export const MuteReleaseStatusSchema = z.enum(['RELEASED', 'EXPIRED']);
 export const WorkerIdSchema = z.string().min(1).max(64);
 export const ReasonSchema = z.string().max(1000);
 export const ErrorCodeSchema = z.string().min(1).max(64);
+/** Shared maximum number of delivery attempts for a scheduled action. A job
+ * claimed for the Nth time carries `attempts === N`; once `attempts` reaches
+ * this bound the next retryable failure terminates the job (FAILED) instead of
+ * re-queueing it. The scheduler repository, the scheduler service, and the
+ * scheduled moderation dispatcher all reference this single constant so the
+ * retry bound and the "final attempt" terminalization agree. */
+export const SCHEDULED_MAX_ATTEMPTS = 5;
 export const CaseNumberRowSchema = z.object({
   next_case_number: z.number().int().positive(),
 });
@@ -363,6 +371,28 @@ export interface RaidResultDto {
   count: number;
   settings?: GuildSettingsDto;
   case?: CaseDto;
+}
+/** Result of a conditional, idempotent manual OFF transition performed under
+ * the guild lock. `changed` is false when the raid was already off (a
+ * concurrent OFF won the race); `case` is the single reusable OFF case created
+ * by the winning transition; `restoreLevel` is the captured pre-raid
+ * verification level when ownership was confirmed, else null. */
+export interface RaidDeactivationDto {
+  readonly changed: boolean;
+  readonly settings: GuildSettingsDto;
+  readonly case?: CaseDto;
+  readonly restoreLevel: number | null;
+}
+/** Result of the locked AUTO idle-disable evaluation. When `disabled` is true
+ * the transition and the single OFF case were committed atomically; `restoreLevel`
+ * carries the confirmed ownership level. When not idle, the repository keeps the
+ * disable deadline at the latest-join deadline (max-only) inside the transaction;
+ * the service performs no deadline replacement. */
+export interface RaidAutoDisableDto {
+  readonly disabled: boolean;
+  readonly settings?: GuildSettingsDto;
+  readonly case?: CaseDto;
+  readonly restoreLevel?: number | null;
 }
 export interface LifecycleDto {
   guildId: string;
@@ -664,13 +694,31 @@ export const AutomodSettingsUpdateSchema = z.object({
   autoRaidJoinCount: z.number().int().min(3).max(100).optional(),
   autoRaidWindowSeconds: z.number().int().min(2).max(300).optional(),
 });
-export const PunishmentParametersSchema = z.object({
-  guildId: snowflake,
-  threshold: z.number().int().min(1).max(1_000_000),
-  action: PunishmentActionSchema,
-  durationSeconds: z.number().int().positive().nullish(),
-  actor: snowflake,
-});
+/** Write-boundary guard for `PunishmentRepository.replace`. Enforces the same
+ * action-specific duration policy as the domain schema and the public
+ * configuration service so an impossible rule can never be newly persisted,
+ * even by a caller that bypasses the service. Read schemas stay lenient so
+ * legacy rows are never rejected or reinterpreted on load. */
+export const PunishmentParametersSchema = z
+  .object({
+    guildId: snowflake,
+    threshold: z.number().int().min(1).max(1_000_000),
+    action: PunishmentActionSchema,
+    durationSeconds: z.number().int().positive().nullish(),
+    actor: snowflake,
+  })
+  .superRefine((value, context) => {
+    const message = punishmentDurationError(
+      value.action,
+      value.durationSeconds,
+    );
+    if (message)
+      context.addIssue({
+        code: 'custom',
+        path: ['durationSeconds'],
+        message,
+      });
+  });
 export interface PunishmentRepository {
   replace(
     guildId: string,
@@ -781,11 +829,19 @@ export interface RaidRepository {
   ): Promise<RaidResultDto>;
   activate(input: RaidActivation): Promise<GuildSettingsDto>;
   activateManual(input: RaidActivation): Promise<RaidResultDto>;
-  deactivate(guildId: string): Promise<GuildSettingsDto>;
+  /** Confirms verification ownership after a successful Discord raise. */
+  markVerificationRaised(guildId: string): Promise<GuildSettingsDto>;
+  /** Conditional, idempotent OFF transition + single OFF case under the lock. */
+  deactivateWithCase(input: {
+    guildId: string;
+    actorUserId: string;
+    reason: string;
+  }): Promise<RaidDeactivationDto>;
   disableAutoIfIdle(
     guildId: string,
     now: Date,
-  ): Promise<{ disabled: boolean; nextAt: Date | null }>;
+    actorUserId: string,
+  ): Promise<RaidAutoDisableDto>;
 }
 export interface ActiveMuteRepository {
   getActive(guildId: string, userId: string): Promise<MuteDto | null>;
@@ -822,6 +878,11 @@ export interface ActiveMuteRepository {
     jobId: string,
     workerId: string,
   ): Promise<boolean>;
+  /** Mute-side compare-and-swap: expires only the matching `ACTIVE` mute whose
+   * `caseId`/expiry still agree with the claimed job, and leaves the job
+   * `RUNNING`. Job terminalization is the dispatcher's responsibility (via
+   * `terminalizeScheduledCase`) so the case/modlog boundary stays independent of
+   * the mute transition. Returns `false` when the mute no longer matches. */
   completeScheduledUnmute(
     guildId: string,
     userId: string,

@@ -11,6 +11,10 @@ import type {
 } from './contracts.js';
 import { parseDuration } from '../../domain/parsers.js';
 import {
+  BAN_MAX_DURATION_SECONDS,
+  punishmentDurationError,
+} from '../../domain/punishment.js';
+import {
   TargetIdentitySchema,
   fallbackTargetIdentity,
   type TargetIdentity,
@@ -355,7 +359,10 @@ export class StrikeService {
         ? null
         : input.durationSeconds;
     if (typeof durationSeconds === 'string') {
-      const parsedDuration = parseDuration(durationSeconds, 365 * 86400);
+      const parsedDuration = parseDuration(
+        durationSeconds,
+        BAN_MAX_DURATION_SECONDS,
+      );
       if (!parsedDuration.ok) return parsedDuration;
       durationSeconds = parsedDuration.value;
     }
@@ -380,16 +387,11 @@ export class StrikeService {
         ? ok({ applied: true })
         : err('NOT_APPLIED', 'Punishment is not configured');
     }
-    if (
-      (input.action === 'KICK' || input.action === 'SOFTBAN') &&
-      numericDuration !== null
-    )
-      return err('INVALID_INPUT', 'This action cannot have a duration');
-    if (
-      numericDuration !== null &&
-      (numericDuration < 1 || numericDuration > 365 * 86400)
-    )
-      return err('INVALID_INPUT', 'Invalid duration');
+    const durationError = punishmentDurationError(
+      input.action,
+      numericDuration,
+    );
+    if (durationError) return err('INVALID_INPUT', durationError);
     if (!this.deps.punishments.set)
       return err('INTERNAL_ERROR', 'Punishment repository unavailable');
     return ok({

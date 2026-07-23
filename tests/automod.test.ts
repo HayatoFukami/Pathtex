@@ -29,8 +29,12 @@ const settings = (patch: Record<string, unknown> = {}) =>
 const make = (patch: Record<string, unknown> = {}) => {
   const strike = vi.fn().mockResolvedValue({ ok: true });
   const deleteMessage = vi.fn().mockResolvedValue(undefined);
+  const deleteMessages = vi.fn().mockResolvedValue(undefined);
+  const dehoist = vi.fn().mockResolvedValue(undefined);
   const discord = {
     deleteMessage,
+    deleteMessages,
+    dehoist,
     getMember: vi
       .fn()
       .mockResolvedValue({ roleIds: [], canMentionEveryone: false }),
@@ -46,7 +50,7 @@ const make = (patch: Record<string, unknown> = {}) => {
     strikes: { autoModStrike: strike },
     discord,
   });
-  return { service, strike, discord, deleteMessage };
+  return { service, strike, discord, deleteMessage, deleteMessages, dehoist };
 };
 describe('AutoMod', () => {
   it('never passes an author ID as the legacy display', async () => {
@@ -354,18 +358,168 @@ describe('AutoMod', () => {
       expect.objectContaining({ actorId: 'bot' }),
     );
   });
-  it('guards enabling strike-producing settings without punishment', async () => {
-    const { service } = make();
-    (
-      service as unknown as {
-        deps: { punishments: { list: ReturnType<typeof vi.fn> } };
+  describe('punishment prerequisite for strike-producing rules', () => {
+    const noPunishments = (service: AutomodService) => {
+      (
+        service as unknown as {
+          deps: { punishments: { list: ReturnType<typeof vi.fn> } };
+        }
+      ).deps.punishments.list.mockResolvedValue([]);
+    };
+
+    it('rejects each fixed strike rule without punishment', async () => {
+      for (const field of [
+        'antiInviteStrikes',
+        'antiReferralStrikes',
+        'antiEveryoneStrikes',
+        'antiCopypastaStrikes',
+      ] as const) {
+        const { service } = make();
+        noPunishments(service);
+        await expect(
+          service.update('g', { [field]: 3 }),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: 'CONFIGURATION_MISSING' },
+        });
       }
-    ).deps.punishments.list.mockResolvedValue([]);
-    await expect(
-      service.update('g', { duplicateEnabled: true }),
-    ).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'CONFIGURATION_MISSING' },
+    });
+
+    it('rejects maxUserMentions without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { maxUserMentions: 10 }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFIGURATION_MISSING' },
+      });
+    });
+
+    it('rejects maxRoleMentions without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { maxRoleMentions: 5 }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFIGURATION_MISSING' },
+      });
+    });
+
+    it('rejects maxLines without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { maxLines: 20 }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFIGURATION_MISSING' },
+      });
+    });
+
+    it('rejects duplicateEnabled without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { duplicateEnabled: true }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFIGURATION_MISSING' },
+      });
+    });
+
+    it('rejects when a later fixed rule is positive even if an earlier one is 0', async () => {
+      // Regression: the old ?? chain only checked the first non-nullish value,
+      // so antiInviteStrikes:0 + antiReferralStrikes:5 slipped through.
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', {
+          antiInviteStrikes: 0,
+          antiReferralStrikes: 5,
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'CONFIGURATION_MISSING' },
+      });
+    });
+
+    it('allows disabling fixed rules without punishment', async () => {
+      for (const field of [
+        'antiInviteStrikes',
+        'antiReferralStrikes',
+        'antiEveryoneStrikes',
+        'antiCopypastaStrikes',
+      ] as const) {
+        const { service } = make();
+        noPunishments(service);
+        await expect(
+          service.update('g', { [field]: 0 }),
+        ).resolves.toMatchObject({ ok: true });
+      }
+    });
+
+    it('allows disabling maxmentions/maxlines (null) without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', {
+          maxUserMentions: null,
+          maxRoleMentions: null,
+          maxLines: null,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('allows disabling duplicate without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { duplicateEnabled: false }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('allows non-strike settings (autodehoist) without punishment', async () => {
+      const { service } = make();
+      noPunishments(service);
+      await expect(
+        service.update('g', { autodehoistCharacter: '!' }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('allows all strike-producing rules when punishment exists', async () => {
+      const { service } = make();
+      // Default make() has punishments: [{ threshold: 1 }]
+      await expect(
+        service.update('g', {
+          antiInviteStrikes: 2,
+          antiReferralStrikes: 1,
+          antiEveryoneStrikes: 1,
+          antiCopypastaStrikes: 1,
+          maxUserMentions: 10,
+          maxRoleMentions: 5,
+          maxLines: 20,
+          duplicateEnabled: true,
+          duplicateStrikeThreshold: 3,
+          duplicateStrikes: 1,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+
+    it('calls punishments.list exactly once per update', async () => {
+      const { service } = make();
+      const list = (
+        service as unknown as {
+          deps: { punishments: { list: ReturnType<typeof vi.fn> } };
+        }
+      ).deps.punishments.list;
+      await service.update('g', {
+        antiInviteStrikes: 1,
+        maxUserMentions: 10,
+        duplicateEnabled: true,
+      });
+      expect(list).toHaveBeenCalledTimes(1);
     });
   });
   it('expires duplicate LRU entries and keeps bounded state', () => {
@@ -375,5 +529,181 @@ describe('AutoMod', () => {
     expect(lru.get('a')?.ordinal).toBe(2);
     lru.observe('b', 'x', 'c', '3', 2_000);
     expect(lru.get('a')).toBeUndefined();
+  });
+
+  describe('fatal-401 propagation at every catch boundary', () => {
+    const msg = {
+      id: 'm1',
+      guildId: 'g',
+      channelId: 'c',
+      authorId: 'u',
+      content: 'discord.gg/abc',
+    } as const;
+
+    it('deleteWithRetry rethrows a direct status 401', async () => {
+      const { service, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { status: 401 }),
+      );
+      await expect(service.evaluate(msg)).rejects.toMatchObject({
+        status: 401,
+      });
+    });
+
+    it('deleteWithRetry rethrows a code 401', async () => {
+      const { service, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { code: 401 }),
+      );
+      await expect(service.evaluate(msg)).rejects.toMatchObject({ code: 401 });
+    });
+
+    it('deleteWithRetry rethrows a cause-wrapped 401', async () => {
+      const { service, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+      );
+      await expect(service.evaluate(msg)).rejects.toMatchObject({
+        cause: { status: 401 },
+      });
+    });
+
+    it('deleteBatchWithRetry rethrows a direct status 401', async () => {
+      const { service, deleteMessages } = make({
+        duplicateEnabled: true,
+        duplicateStrikeThreshold: 2,
+        duplicateDeleteThreshold: 2,
+        duplicateStrikes: 1,
+      });
+      deleteMessages.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { status: 401 }),
+      );
+      // Seed a prior duplicate so batch path is taken (ids.length > 1).
+      await service.evaluate({ ...msg, id: 'seed' }, 1);
+      await expect(
+        service.evaluate({ ...msg, id: 'dup' }, 2),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it('deleteBatchWithRetry rethrows a cause-wrapped 401', async () => {
+      const { service, deleteMessages } = make({
+        duplicateEnabled: true,
+        duplicateStrikeThreshold: 2,
+        duplicateDeleteThreshold: 2,
+        duplicateStrikes: 1,
+      });
+      deleteMessages.mockRejectedValue(
+        Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+      );
+      await service.evaluate({ ...msg, id: 'seed2' }, 1);
+      await expect(
+        service.evaluate({ ...msg, id: 'dup2' }, 2),
+      ).rejects.toMatchObject({ cause: { code: 401 } });
+    });
+
+    it('strike catch rethrows a cause-wrapped 401', async () => {
+      const { service, strike } = make();
+      strike.mockRejectedValue(
+        Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+      );
+      await expect(service.evaluate(msg)).rejects.toMatchObject({
+        cause: { status: 401 },
+      });
+    });
+
+    it('strike catch rethrows a code 401', async () => {
+      const { service, strike } = make();
+      strike.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { code: 401 }),
+      );
+      await expect(service.evaluate(msg)).rejects.toMatchObject({ code: 401 });
+    });
+
+    it('autoDehoist rethrows a direct status 401', async () => {
+      const { service, dehoist } = make({ autodehoistCharacter: '!' });
+      dehoist.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { status: 401 }),
+      );
+      await expect(
+        service.autoDehoist('g', 'u', '.badname'),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+
+    it('autoDehoist rethrows a cause-wrapped 401', async () => {
+      const { service, dehoist } = make({ autodehoistCharacter: '!' });
+      dehoist.mockRejectedValue(
+        Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+      );
+      await expect(
+        service.autoDehoist('g', 'u', '.badname'),
+      ).rejects.toMatchObject({ cause: { code: 401 } });
+    });
+  });
+
+  describe('non-auth errors preserve warning/fallback semantics', () => {
+    const msg = {
+      id: 'm1',
+      guildId: 'g',
+      channelId: 'c',
+      authorId: 'u',
+      content: 'discord.gg/abc',
+    } as const;
+
+    it('deleteWithRetry treats 403 as a permanent non-auth failure and still strikes', async () => {
+      const { service, strike, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('forbidden'), { status: 403 }),
+      );
+      const result = await service.evaluate(msg);
+      expect(result).toMatchObject({ value: { deleted: false, strikes: 1 } });
+      expect(strike).toHaveBeenCalledTimes(1);
+    });
+
+    it('deleteWithRetry retries 500 then surfaces warning and still strikes', async () => {
+      const { service, strike, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('server error'), { status: 500 }),
+      );
+      const result = await service.evaluate(msg);
+      expect(deleteMessage).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({ value: { deleted: false, strikes: 1 } });
+      expect(strike).toHaveBeenCalledTimes(1);
+    });
+
+    it('strike non-auth failure produces a warning, not a throw', async () => {
+      const { service, strike } = make();
+      strike.mockRejectedValue(new Error('strike db down'));
+      const result = await service.evaluate(msg);
+      expect(result).toMatchObject({ ok: true, value: { strikes: 1 } });
+      expect(
+        (result as { value: { warnings: readonly string[] } }).value.warnings,
+      ).toContain('strike db down');
+    });
+
+    it('autoDehoist non-auth failure returns false with warning', async () => {
+      const warning = vi.fn();
+      const { service, dehoist } = make({ autodehoistCharacter: '!' });
+      dehoist.mockRejectedValue(
+        Object.assign(new Error('forbidden'), { status: 403 }),
+      );
+      (
+        service as unknown as {
+          deps: { warning: typeof warning };
+        }
+      ).deps.warning = warning;
+      const result = await service.autoDehoist('g', 'u', '.badname');
+      expect(result).toBe(false);
+      expect(warning).toHaveBeenCalledWith('g', 'forbidden');
+    });
+
+    it('deleteWithRetry treats code 10008 (Unknown Message) as success', async () => {
+      const { service, strike, deleteMessage } = make();
+      deleteMessage.mockRejectedValue(
+        Object.assign(new Error('unknown message'), { code: 10008 }),
+      );
+      const result = await service.evaluate(msg);
+      expect(result).toMatchObject({ value: { deleted: true, strikes: 1 } });
+      expect(strike).toHaveBeenCalledTimes(1);
+    });
   });
 });

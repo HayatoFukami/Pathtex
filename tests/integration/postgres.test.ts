@@ -17,9 +17,11 @@ import {
 } from '../../src/repositories/prisma-repositories.js';
 import { CaseService } from '../../src/services/case-service.js';
 import { SchedulerService } from '../../src/services/scheduler-service.js';
+import { ScheduledModerationDispatcher } from '../../src/features/moderation/scheduled-dispatch.js';
 import {
   CaseDtoSchema,
   JobDtoSchema,
+  SCHEDULED_MAX_ATTEMPTS,
 } from '../../src/repositories/contracts.js';
 
 const integration =
@@ -372,6 +374,259 @@ integration('PostgreSQL persistence foundation', () => {
     if (!legacy.ok) throw new Error('legacy scheduled case creation failed');
     expect(legacy.value.created).toBe(true);
     expect(legacy.value.case.targetDisplay).toBe('不明なユーザー');
+  });
+
+  it('dispatches a scheduled UNMUTE to one case + one modlog across a crash-retry', async () => {
+    const guildId = '12345678901234620';
+    const targetUserId = '12345678901234621';
+    const moderatorUserId = '12345678901234622';
+    const cases = new PrismaCaseRepository(getDb());
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const origin = await cases.createWithNumber({
+      guildId,
+      action: 'MUTE',
+      targetUserId,
+      targetDisplay: 'scheduled-unmute-name',
+      moderatorUserId,
+      source: 'COMMAND',
+      status: 'COMPLETED',
+      reason: 'temporary mute',
+    });
+    const job = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId,
+      channelId: null,
+      type: 'UNMUTE',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: targetUserId },
+      createdByCaseId: origin.id,
+    });
+    const worker = new SchedulerService(scheduler, { workerId: 'worker-one' });
+    const claimed = await worker.claimDue(1);
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) throw new Error('claim failed');
+    expect(claimed.value).toHaveLength(1);
+
+    const modlogCalls: string[] = [];
+    let muteActive = true;
+    const dispatcher = new ScheduledModerationDispatcher({
+      scheduler: worker,
+      moderation: {
+        execute: () => {
+          throw new Error('UNMUTE dispatch must not route through moderation');
+        },
+      },
+      discord: {
+        getBotUserId: () => Promise.resolve(moderatorUserId),
+        hasRole: () => Promise.resolve(true),
+        removeRoleUnlocked: () => Promise.resolve(undefined),
+        withRoleMutationLock: (_g, _u, operation) => operation(),
+      },
+      activeMutes: {
+        claimScheduledUnmute: () => Promise.resolve(muteActive),
+        verifyScheduledUnmute: () => Promise.resolve(true),
+        completeScheduledUnmute: () => Promise.resolve(true),
+        restoreScheduledUnmute: () => Promise.resolve(true),
+      },
+      settings: {
+        get: () =>
+          Promise.resolve({ ok: true, value: { mutedRoleId: 'muted-role' } }),
+      },
+      roleCorrelation: { put: () => undefined, remove: () => undefined },
+      modlog: {
+        writeCase: (_guild, caseId) => {
+          modlogCalls.push(caseId);
+          return Promise.resolve();
+        },
+      },
+      workerId: 'worker-one',
+    });
+
+    await dispatcher.dispatch(job);
+    // Exactly one SCHEDULED case allocated and exactly one modlog emitted.
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, source: 'SCHEDULED' },
+      }),
+    ).toBe(1);
+    expect(modlogCalls).toHaveLength(1);
+    const scheduledCase = await getDb().moderationCase.findFirst({
+      where: { guildId, source: 'SCHEDULED' },
+    });
+    expect(scheduledCase?.targetDisplay).toBe('scheduled-unmute-name');
+    expect(modlogCalls[0]).toBe(scheduledCase?.id);
+    await expect(
+      getDb().scheduledAction.findUnique({ where: { id: job.id } }),
+    ).resolves.toMatchObject({
+      status: 'COMPLETED',
+      executedCaseId: scheduledCase?.id,
+    });
+
+    // Simulate a crash-retry: the mute is already released, the job is
+    // reclaimed, and the dispatcher runs again. It must reuse the same case
+    // (no duplicate) and must not emit a second modlog.
+    muteActive = false;
+    await getDb().scheduledAction.update({
+      where: { id: job.id },
+      data: { status: 'PENDING', lockedAt: null, lockedBy: null },
+    });
+    const reclaimed = await worker.claimDue(1);
+    expect(reclaimed.ok).toBe(true);
+    if (!reclaimed.ok) throw new Error('reclaim failed');
+    expect(reclaimed.value).toHaveLength(1);
+    await dispatcher.dispatch(job);
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, source: 'SCHEDULED' },
+      }),
+    ).toBe(1);
+    expect(modlogCalls).toHaveLength(1);
+  });
+
+  it('completeScheduledUnmute expires only the matching mute and leaves the job RUNNING', async () => {
+    const guildId = '12345678901234630';
+    const targetUserId = '12345678901234631';
+    const cases = new PrismaCaseRepository(getDb());
+    const mute = new PrismaActiveMuteRepository(getDb());
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const origin = await cases.createWithNumber({
+      guildId,
+      action: 'MUTE',
+      targetUserId,
+      targetDisplay: 'cas-name',
+      moderatorUserId: '12345678901234632',
+      source: 'COMMAND',
+      status: 'COMPLETED',
+      reason: 'temp',
+    });
+    const expiry = new Date(Date.now() + 60_000);
+    await mute.activateWithSchedule(guildId, targetUserId, origin.id, expiry, {
+      guildId,
+      userId: targetUserId,
+    });
+    const claimed = await scheduler.claimDue(
+      10,
+      'cas-worker',
+      new Date(expiry.getTime() + 1),
+    );
+    const job = claimed.find(
+      (item) => item.type === 'UNMUTE' && item.targetUserId === targetUserId,
+    );
+    const jobId = requireDefined(
+      job,
+      'expected an unmute job to be claimed',
+    ).id;
+    expect(
+      await mute.claimScheduledUnmute(
+        guildId,
+        targetUserId,
+        jobId,
+        'cas-worker',
+      ),
+    ).toBe(true);
+    expect(
+      await mute.completeScheduledUnmute(
+        guildId,
+        targetUserId,
+        jobId,
+        'cas-worker',
+      ),
+    ).toBe(true);
+    // The matching mute is expired...
+    const muteRow = await getDb().activeMute.findUnique({
+      where: { guildId_userId: { guildId, userId: targetUserId } },
+    });
+    expect(muteRow?.status).toBe('EXPIRED');
+    // ...but the job is deliberately left RUNNING for terminalizeScheduledCase.
+    expect(await scheduler.getStatus(jobId)).toBe('RUNNING');
+    // A second CAS no longer matches the (now expired) mute.
+    expect(
+      await mute.completeScheduledUnmute(
+        guildId,
+        targetUserId,
+        jobId,
+        'cas-worker',
+      ),
+    ).toBe(false);
+  });
+
+  it('fail() at retry exhaustion atomically fails the linked PENDING scheduled case', async () => {
+    const guildId = '12345678901234640';
+    const targetUserId = '12345678901234641';
+    const moderatorUserId = '12345678901234642';
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const worker = new SchedulerService(scheduler, { workerId: 'fail-worker' });
+    const job = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId,
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: targetUserId },
+    });
+    const claimed = await worker.claimDue(1);
+    expect(claimed.ok && claimed.value).toHaveLength(1);
+    const created = await worker.createScheduledCase(job.id, moderatorUserId);
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error('scheduled case creation failed');
+    expect(created.value.case.status).toBe('PENDING');
+    // Push the job to the final attempt so the next retryable failure exhausts.
+    await getDb().scheduledAction.update({
+      where: { id: job.id },
+      data: { attempts: SCHEDULED_MAX_ATTEMPTS },
+    });
+    expect(await scheduler.fail(job.id, 'fail-worker', 'transient', true)).toBe(
+      true,
+    );
+    await expect(
+      getDb().scheduledAction.findUnique({ where: { id: job.id } }),
+    ).resolves.toMatchObject({ status: 'FAILED' });
+    // The linked still-PENDING SCHEDULED case is failed by the same transaction.
+    await expect(
+      getDb().moderationCase.findUnique({
+        where: { id: created.value.case.id },
+      }),
+    ).resolves.toMatchObject({ status: 'FAILED' });
+  });
+
+  it('recoverStale() exhaustion atomically fails the linked PENDING scheduled case', async () => {
+    const guildId = '12345678901234650';
+    const targetUserId = '12345678901234651';
+    const moderatorUserId = '12345678901234652';
+    const scheduler = new PrismaSchedulerRepository(getDb());
+    const worker = new SchedulerService(scheduler, {
+      workerId: 'stale-worker',
+    });
+    const job = await scheduler.scheduleReplacing({
+      guildId,
+      targetUserId,
+      channelId: null,
+      type: 'UNBAN',
+      executeAt: new Date(Date.now() - 1_000),
+      payload: { guildId, userId: targetUserId },
+    });
+    const claimed = await worker.claimDue(1);
+    expect(claimed.ok && claimed.value).toHaveLength(1);
+    const created = await worker.createScheduledCase(job.id, moderatorUserId);
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error('scheduled case creation failed');
+    // Simulate a crashed worker that exhausted attempts and never terminalized.
+    await getDb().scheduledAction.update({
+      where: { id: job.id },
+      data: {
+        attempts: SCHEDULED_MAX_ATTEMPTS,
+        lockedAt: new Date(Date.now() - 6 * 60_000),
+      },
+    });
+    expect(await worker.recoverStale()).toBeGreaterThanOrEqual(1);
+    await expect(
+      getDb().scheduledAction.findUnique({ where: { id: job.id } }),
+    ).resolves.toMatchObject({ status: 'FAILED' });
+    await expect(
+      getDb().moderationCase.findUnique({
+        where: { id: created.value.case.id },
+      }),
+    ).resolves.toMatchObject({ status: 'FAILED' });
   });
 
   it('upgrades legacy rows without changing job status or data', async () => {
@@ -1100,6 +1355,462 @@ integration('PostgreSQL persistence foundation', () => {
         },
       }),
     ).toBe(1);
+  });
+
+  it('schedules auto raid disable from the latest committed join, not a stale input', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234578';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: false,
+      reason: 'AutoRaid: 3 joins in 300 seconds',
+    };
+    const early = new Date('2025-06-01T12:00:00.000Z');
+    const newest = new Date('2025-06-01T12:00:02.000Z');
+    // The activating delivery arrives out of order with an older timestamp
+    // than a join that was already committed.
+    const staleInput = new Date('2025-06-01T12:00:01.000Z');
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      early,
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      newest,
+      3,
+      300,
+      activation,
+    );
+    const result = await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      staleInput,
+      3,
+      300,
+      activation,
+    );
+    expect(result.activated).toBe(true);
+    const job = await getDb().scheduledAction.findFirst({
+      where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+    });
+    expect(job).not.toBeNull();
+    expect(job?.executeAt.getTime()).toBe(newest.getTime() + 120_000);
+    expect(job?.executeAt.getTime()).not.toBe(staleInput.getTime() + 120_000);
+  });
+
+  it('claims raid verification ownership only after confirmation', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234579';
+    await raid.activateManual({
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'MANUAL',
+      changed: true,
+      verificationLevelBeforeRaid: 1,
+      reason: 'raid',
+    });
+    const before = await getDb().guildSettings.findUnique({
+      where: { guildId },
+    });
+    // Prior level captured, ownership not yet claimed.
+    expect(before?.verificationLevelBeforeRaid).toBe(1);
+    expect(before?.raidVerificationChanged).toBe(false);
+    await raid.markVerificationRaised(guildId);
+    const after = await getDb().guildSettings.findUnique({
+      where: { guildId },
+    });
+    expect(after?.raidVerificationChanged).toBe(true);
+    // A confirmed owner restores to the captured level.
+    const deactivated = await raid.deactivateWithCase({
+      guildId,
+      actorUserId: '12345678901234568',
+      reason: 'off',
+    });
+    expect(deactivated.changed).toBe(true);
+    expect(deactivated.restoreLevel).toBe(1);
+  });
+
+  it('does not restore verification when ownership was never confirmed', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234580';
+    await raid.activateManual({
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'MANUAL',
+      changed: true,
+      verificationLevelBeforeRaid: 1,
+      reason: 'raid',
+    });
+    // No markVerificationRaised: the raise is treated as failed.
+    const deactivated = await raid.deactivateWithCase({
+      guildId,
+      actorUserId: '12345678901234568',
+      reason: 'off',
+    });
+    expect(deactivated.changed).toBe(true);
+    expect(deactivated.restoreLevel).toBeNull();
+  });
+
+  it('extends the auto raid deadline to the latest join and never earlier', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234581';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: false,
+      reason: 'AutoRaid',
+    };
+    const at = (seconds: number) =>
+      new Date(`2025-06-01T12:00:${String(seconds).padStart(2, '0')}.000Z`);
+    const pending = () =>
+      getDb().scheduledAction.findFirst({
+        where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+      });
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      at(0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      at(1),
+      3,
+      300,
+      activation,
+    );
+    const activated = await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      at(2),
+      3,
+      300,
+      activation,
+    );
+    expect(activated.activated).toBe(true);
+    expect((await pending())?.executeAt.getTime()).toBe(
+      at(2).getTime() + 120_000,
+    );
+    // A later join extends the deadline.
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234574',
+      at(30),
+      3,
+      300,
+      activation,
+    );
+    expect((await pending())?.executeAt.getTime()).toBe(
+      at(30).getTime() + 120_000,
+    );
+    // A stale (out-of-order) join must not move the deadline earlier.
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234575',
+      at(5),
+      3,
+      300,
+      activation,
+    );
+    expect((await pending())?.executeAt.getTime()).toBe(
+      at(30).getTime() + 120_000,
+    );
+    expect(
+      await getDb().scheduledAction.count({
+        where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+      }),
+    ).toBe(1);
+  });
+
+  it('keeps a single deadline at the latest join under concurrent extensions', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234582';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: false,
+      reason: 'AutoRaid',
+    };
+    const base = Date.parse('2025-06-01T12:00:00.000Z');
+    const at = (ms: number) => new Date(base + ms);
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      at(0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      at(1_000),
+      3,
+      300,
+      activation,
+    );
+    const activated = await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      at(2_000),
+      3,
+      300,
+      activation,
+    );
+    expect(activated.activated).toBe(true);
+    // Concurrent out-of-order extensions; the latest join is at +20s.
+    await Promise.all(
+      [10_000, 5_000, 20_000, 3_000].map((ms, index) =>
+        raid.recordJoinAndEvaluate(
+          guildId,
+          `1234567890123459${String(index)}`,
+          at(ms),
+          3,
+          300,
+          activation,
+        ),
+      ),
+    );
+    const jobs = await getDb().scheduledAction.findMany({
+      where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+    });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.executeAt.getTime()).toBe(at(20_000).getTime() + 120_000);
+  });
+
+  it('allocates exactly one OFF case under concurrent manual deactivation', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234583';
+    await raid.activateManual({
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'MANUAL',
+      changed: false,
+      reason: 'raid',
+    });
+    const results = await Promise.all([
+      raid.deactivateWithCase({
+        guildId,
+        actorUserId: '12345678901234568',
+        reason: 'off-1',
+      }),
+      raid.deactivateWithCase({
+        guildId,
+        actorUserId: '12345678901234568',
+        reason: 'off-2',
+      }),
+      raid.deactivateWithCase({
+        guildId,
+        actorUserId: '12345678901234568',
+        reason: 'off-3',
+      }),
+    ]);
+    expect(results.filter((result) => result.changed)).toHaveLength(1);
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, action: 'RAIDMODE_OFF' },
+      }),
+    ).toBe(1);
+  });
+
+  it('allocates the OFF case atomically with the auto idle disable', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234584';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: true,
+      verificationLevelBeforeRaid: 1,
+      reason: 'AutoRaid',
+    };
+    const joinAt = new Date('2025-06-01T12:00:00.000Z');
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      joinAt,
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      joinAt,
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      joinAt,
+      3,
+      300,
+      activation,
+    );
+    await raid.markVerificationRaised(guildId);
+    const result = await raid.disableAutoIfIdle(
+      guildId,
+      new Date(joinAt.getTime() + 300_000),
+      '12345678901234568',
+    );
+    expect(result.disabled).toBe(true);
+    expect(result.case?.action).toBe('RAIDMODE_OFF');
+    expect(result.restoreLevel).toBe(1);
+    expect(
+      await getDb().moderationCase.count({
+        where: { guildId, action: 'RAIDMODE_OFF' },
+      }),
+    ).toBe(1);
+    const settings = await getDb().guildSettings.findUnique({
+      where: { guildId },
+    });
+    expect(settings?.raidModeEnabled).toBe(false);
+  });
+
+  it('keeps the newer join deadline when a stale disable fires (max-only, in transaction)', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234585';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: false,
+      reason: 'AutoRaid',
+    };
+    const t0 = Date.parse('2025-06-01T12:00:00.000Z');
+    // Activate with 3 joins at t0 -> deadline t0+120s.
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    // A newer join extends the deadline to t1+120s.
+    const t1 = t0 + 30_000;
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234574',
+      new Date(t1),
+      3,
+      300,
+      activation,
+    );
+    // A stale disable fires after the ORIGINAL deadline (t0+120s) but before
+    // the newer join's deadline (t1+120s).
+    const result = await raid.disableAutoIfIdle(
+      guildId,
+      new Date(t0 + 121_000),
+      '12345678901234568',
+    );
+    expect(result.disabled).toBe(false); // not idle relative to the newer join
+    const settings = await getDb().guildSettings.findUnique({
+      where: { guildId },
+    });
+    expect(settings?.raidModeEnabled).toBe(true);
+    const jobs = await getDb().scheduledAction.findMany({
+      where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+    });
+    expect(jobs).toHaveLength(1);
+    // The newer join's deadline is preserved, not cancelled/replaced by the
+    // stale disable.
+    expect(jobs[0]?.executeAt.getTime()).toBe(t1 + 120_000);
+  });
+
+  it('never replaces a newer join deadline under concurrent stale-disable/new-join', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    const guildId = '12345678901234586';
+    const activation = {
+      guildId,
+      actorUserId: '12345678901234568',
+      source: 'AUTO' as const,
+      changed: false,
+      reason: 'AutoRaid',
+    };
+    const t0 = Date.parse('2025-06-01T12:00:00.000Z');
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234571',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234572',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    await raid.recordJoinAndEvaluate(
+      guildId,
+      '12345678901234573',
+      new Date(t0),
+      3,
+      300,
+      activation,
+    );
+    // Concurrently: a stale disable (after the original t0+120s deadline) and a
+    // newer join at t0+125s. Whichever wins the guild lock, the newer join's
+    // deadline must prevail and there must be exactly one pending job.
+    const newJoin = t0 + 125_000;
+    await Promise.all([
+      raid.disableAutoIfIdle(
+        guildId,
+        new Date(t0 + 130_000),
+        '12345678901234568',
+      ),
+      raid.recordJoinAndEvaluate(
+        guildId,
+        '12345678901234574',
+        new Date(newJoin),
+        3,
+        300,
+        activation,
+      ),
+    ]);
+    const settings = await getDb().guildSettings.findUnique({
+      where: { guildId },
+    });
+    const jobs = await getDb().scheduledAction.findMany({
+      where: { guildId, type: 'DISABLE_RAIDMODE', status: 'PENDING' },
+    });
+    expect(settings?.raidModeEnabled).toBe(true);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.executeAt.getTime()).toBe(newJoin + 120_000);
   });
 
   it('lifecycle/rejoin cleanup and retention', async () => {

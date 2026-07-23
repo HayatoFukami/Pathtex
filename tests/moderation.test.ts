@@ -635,6 +635,94 @@ describe('ModerationService P2A identity boundaries', () => {
   });
 });
 
+describe('ModerationService resolution-stage HTTP status propagation', () => {
+  const input = () => ({
+    guildId,
+    actorId,
+    targets: [{ id: targetId }],
+    reason: 'reason',
+  });
+
+  it('rethrows a direct 401 from member resolution (fatal, no outcome)', async () => {
+    const fixture = moderationDeps();
+    const fatal = Object.assign(new Error('unauthorized'), { status: 401 });
+    fixture.discord.getMember.mockRejectedValue(fatal);
+    await expect(
+      new ModerationService(fixture.deps as never).kick(input()),
+    ).rejects.toBe(fatal);
+  });
+
+  it('rethrows a wrapped (cause) 401 from member resolution via the shared classifier', async () => {
+    const fixture = moderationDeps();
+    const wrapped = Object.assign(new Error('wrapped'), {
+      cause: { status: 401 },
+    });
+    fixture.discord.getMember.mockRejectedValue(wrapped);
+    await expect(
+      new ModerationService(fixture.deps as never).kick(input()),
+    ).rejects.toBe(wrapped);
+  });
+
+  it('attaches a 403 resolution status to the outcome for definitive scheduled classification', async () => {
+    const fixture = moderationDeps();
+    fixture.discord.getMember.mockRejectedValue(
+      Object.assign(new Error('forbidden'), { status: 403 }),
+    );
+    const result = await new ModerationService(fixture.deps as never).kick(
+      input(),
+    );
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+  });
+
+  it('attaches a 5xx resolution status retaining retryable semantics', async () => {
+    const fixture = moderationDeps();
+    fixture.discord.getMember.mockRejectedValue(
+      Object.assign(new Error('server error'), { status: 500 }),
+    );
+    const result = await new ModerationService(fixture.deps as never).kick(
+      input(),
+    );
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      status: 500,
+    });
+  });
+
+  it('leaves status absent for a network resolution failure (undefined status)', async () => {
+    const fixture = moderationDeps();
+    fixture.discord.getMember.mockRejectedValue(new Error('network down'));
+    const result = await new ModerationService(fixture.deps as never).kick(
+      input(),
+    );
+    const outcome = result.ok ? result.value.outcomes[0] : undefined;
+    expect(outcome).toMatchObject({ ok: false });
+    expect(outcome?.status).toBeUndefined();
+  });
+
+  it('attaches the resolution status to a pre-created case outcome', async () => {
+    const fixture = moderationDeps();
+    fixture.discord.getMember.mockRejectedValue(
+      Object.assign(new Error('forbidden'), { status: 403 }),
+    );
+    const persisted = caseDto({
+      targetDisplay: 'Persisted Name',
+      source: 'SCHEDULED',
+    });
+    const result = await new ModerationService(fixture.deps as never).kick({
+      ...input(),
+      execution: { source: 'SCHEDULED', preCreatedCase: persisted },
+    });
+    expect(result.ok && result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      status: 403,
+      case: persisted,
+    });
+  });
+});
+
 describe('ModerationService — Phase 2 role mutation lifecycle', () => {
   const mutedRoleId = '12345678901234571';
 

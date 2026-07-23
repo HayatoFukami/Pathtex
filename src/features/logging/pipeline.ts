@@ -61,6 +61,7 @@ export class LoggingEventPipeline {
       try {
         await this.ports.automod.inspect(message);
       } catch (error: unknown) {
+        if (isUnauthorized(error)) throw error;
         this.failure('logging.pipeline.automod_create_failed', error, message);
       }
     }
@@ -100,6 +101,7 @@ export class LoggingEventPipeline {
           persistedBefore ?? undefined,
         );
       } catch (error: unknown) {
+        if (isUnauthorized(error)) throw error;
         this.failure('logging.pipeline.automod_update_failed', error, after);
       }
     }

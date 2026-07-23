@@ -94,6 +94,7 @@ import {
   ModerationService,
   DiscordModerationAdapter,
 } from './features/moderation/index.js';
+import { ScheduledModerationDispatcher } from './features/moderation/scheduled-dispatch.js';
 import {
   createModerationCommandManifest,
   createModerationUtilityCommands,
@@ -519,11 +520,21 @@ export function createBootstrapDependencies(
           );
       },
       getMember: async (guildId, userId) => {
-        const member = await (
-          await client?.client.guilds.fetch(guildId)
-        )?.members
-          .fetch(userId)
-          .catch(() => null);
+        let member: import('discord.js').GuildMember | null | undefined;
+        try {
+          member = await (
+            await client?.client.guilds.fetch(guildId)
+          )?.members.fetch(userId);
+        } catch (error) {
+          // A 401 (including shared-classifier wrapped errors) must propagate so
+          // the gateway fatal handler sees it.  Only the expected not-found code
+          // (10007 Unknown Member) collapses to null; every other failure
+          // propagates so it is visible as an error rather than masked as
+          // absence.
+          if (isUnauthorized(error)) throw error;
+          if ((error as { code?: number }).code === 10007) return null;
+          throw error;
+        }
         return member
           ? {
               isOwner: member.id === member.guild.ownerId,
@@ -546,8 +557,15 @@ export function createBootstrapDependencies(
         try {
           const invite = await client?.client.fetchInvite(code);
           return invite?.guild?.id ? { guildId: invite.guild.id } : null;
-        } catch {
-          return null;
+        } catch (error) {
+          // Rethrow 401 (including shared-classifier wrapped errors) so it
+          // reaches the gateway fatal handler.  Only the expected not-found
+          // code (10006 Unknown Invite) collapses to null; every other failure
+          // propagates so it is visible as an error rather than masked as
+          // absence.
+          if (isUnauthorized(error)) throw error;
+          if ((error as { code?: number }).code === 10006) return null;
+          throw error;
         }
       },
       getBotUserId: (guildId) => moderationDiscord.getBotUserId(guildId),
@@ -559,9 +577,8 @@ export function createBootstrapDependencies(
     repository: raidRepository,
     settings: settingsService,
     automod: automodService,
-    scheduler: schedulerService,
     moderation,
-    cases: caseService,
+    logger,
     discord: {
       getVerificationLevel: async (guildId) =>
         (await client?.client.guilds.fetch(guildId))?.verificationLevel ?? 0,
@@ -577,6 +594,16 @@ export function createBootstrapDependencies(
     },
     modlog: moderationLog,
     targetIdentityResolver,
+  });
+  const scheduledModeration = new ScheduledModerationDispatcher({
+    scheduler: schedulerService,
+    moderation,
+    discord: moderationDiscord,
+    activeMutes: activeMuteRepository,
+    settings: settingsService,
+    roleCorrelation,
+    modlog: moderationLog,
+    workerId: config.INSTANCE_ID,
   });
   const schedulerDispatcher = {
     available: true,
@@ -598,9 +625,10 @@ export function createBootstrapDependencies(
         interval?: number;
       };
       if (job.type === 'DISABLE_RAIDMODE') {
-        const actorId = await moderationDiscord.getBotUserId(job.guildId);
-        const result = await raid.off(job.guildId, actorId, 'AutoRaid自動解除');
-        if (!result.ok) throw new Error(result.error.message);
+        // disableJob performs the conditional OFF transition + single OFF case
+        // under the guild lock and throws on failure, which the scheduler
+        // classifies (401 fatal, retryable, etc.).
+        await raid.disableJob(job.guildId);
       } else if (job.type === 'RESTORE_SLOWMODE') {
         if (!payload.channelId || payload.interval === undefined)
           throw new Error('Invalid slowmode job payload');
@@ -610,112 +638,11 @@ export function createBootstrapDependencies(
           `scheduled:${job.id}`,
         );
       } else {
-        if (!payload.userId || !payload.guildId)
-          throw new Error('Invalid moderation job payload');
-        const guildId = payload.guildId;
-        const userId = payload.userId;
-        if (job.type === 'UNMUTE') {
-          await moderationDiscord.withRoleMutationLock(
-            guildId,
-            userId,
-            async () => {
-              const settingsResult = await configuration.get(guildId);
-              const roleId = settingsResult.ok
-                ? settingsResult.value.mutedRoleId
-                : null;
-              if (!roleId) throw new Error('Muted role is not configured');
-              const ownsJob = await activeMuteRepository.claimScheduledUnmute(
-                guildId,
-                userId,
-                job.id,
-                config.INSTANCE_ID,
-              );
-              if (!ownsJob)
-                throw Object.assign(new Error('Mute is no longer active'), {
-                  code: 'NOT_APPLIED',
-                });
-              try {
-                if (
-                  !(await activeMuteRepository.verifyScheduledUnmute(
-                    guildId,
-                    userId,
-                    job.id,
-                    config.INSTANCE_ID,
-                  ))
-                )
-                  throw Object.assign(
-                    new Error('Scheduled unmute was superseded'),
-                    { code: 'NOT_APPLIED' },
-                  );
-                // Check actual role presence; no-op if already removed.
-                const actuallyHas = await moderationDiscord.hasRole(
-                  guildId,
-                  userId,
-                  roleId,
-                );
-                if (!actuallyHas) {
-                  await activeMuteRepository.completeScheduledUnmute(
-                    guildId,
-                    userId,
-                    job.id,
-                    config.INSTANCE_ID,
-                  );
-                  return;
-                }
-                roleCorrelation.put(guildId, userId, roleId, 'REMOVE');
-                try {
-                  await moderationDiscord.removeRoleUnlocked(
-                    guildId,
-                    userId,
-                    roleId,
-                    `scheduled:${job.id}`,
-                  );
-                } catch (error) {
-                  roleCorrelation.remove(guildId, userId, roleId, 'REMOVE');
-                  throw error;
-                }
-                const completed =
-                  await activeMuteRepository.completeScheduledUnmute(
-                    guildId,
-                    userId,
-                    job.id,
-                    config.INSTANCE_ID,
-                  );
-                if (!completed)
-                  throw new Error('Scheduled unmute ownership was lost');
-              } catch (error: unknown) {
-                await activeMuteRepository.restoreScheduledUnmute(
-                  guildId,
-                  userId,
-                  job.id,
-                  config.INSTANCE_ID,
-                );
-                throw error;
-              }
-            },
-          );
-        } else {
-          const actorId = await moderationDiscord.getBotUserId(payload.guildId);
-          const result = await moderation.execute(
-            {
-              guildId: payload.guildId,
-              actorId,
-              targets: [{ id: payload.userId }],
-              reason: '期限到達',
-              execution: { source: 'COMMAND', sendDm: false, waitForDm: false },
-            },
-            job.type,
-            { source: 'COMMAND', sendDm: false, waitForDm: false },
-          );
-          if (
-            !result.ok ||
-            result.value.outcomes.some((outcome) => !outcome.ok)
-          )
-            throw Object.assign(
-              new Error(`Scheduled ${job.type} was not applied`),
-              { code: 'NOT_APPLIED' },
-            );
-        }
+        // Scheduled UNBAN/UNMUTE: create/claim exactly one SCHEDULED case, use
+        // it as the pre-created case for enforcement, terminalize it once, and
+        // emit modlog only for it. Idempotent across retries/crashes; preserves
+        // active-mute ownership checks (UNMUTE) and scheduler classifications.
+        await scheduledModeration.dispatch(job);
       }
       logger.info(
         {

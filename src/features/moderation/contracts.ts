@@ -118,6 +118,10 @@ export interface TargetOutcome {
   readonly targetId: string;
   readonly ok: boolean;
   readonly code?: string;
+  /** Underlying Discord HTTP status preserved from the enforcement failure (if
+   * any). Scheduled callers classify on this so a 401 stays fatal, 400/403
+   * terminalize FAILED, and 5xx/network errors stay retryable. */
+  readonly status?: number;
   readonly case?: CaseDto;
   readonly identity?: TargetIdentity;
 }

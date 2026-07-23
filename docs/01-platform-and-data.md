@@ -285,6 +285,8 @@ DBポーリング方式を採用する。
 - UNIQUE(`guild_id`,`threshold`)
 - durationはMUTE/BANのみ許可
 - KICK/SOFTBANではNULL
+- MUTEのdurationは2,419,200（28日）以下
+- BANのdurationは31,536,000（365日）以下
 - `None`はレコード削除として表現
 
 インデックス:
@@ -436,6 +438,12 @@ Mute状態の変更と、対応する`UNMUTE`予約の取消・置換は同一DB
 予約は作成元ケースを保持する。既存予約の意味・実行時刻・排他状態を変更しない。期限到来のUNBAN/UNMUTEは、originating caseの保存済みTargetIdentityをコピーした新しい`SCHEDULED`ケースを作成し、originating caseを更新しない。予約実装に不要な`scheduled_actions.source`カラムは持たない。新しいケースsourceの追加は既存ケースを壊さないadditive migrationとする。
 
 期限到来のUNBAN/UNMUTEジョブは、Discord API操作と独立したケース冪等境界を持つ。Workerはまず`scheduled_actions`行を`FOR UPDATE`またはCASでclaimし、`executed_case_id IS NULL`を確認してからケース番号を割り当てる。claimと、originating caseの保存済みTargetIdentityをコピーした`SCHEDULED`ケースの作成、およびそのIDの`executed_case_id`への保存は同一トランザクションで行う。既にclaim済み、または`executed_case_id`が存在する再試行は既存IDを再利用し、SCHEDULEDケースとmodlogを重複作成しない。これにより同時Workerもケース番号を消費して重複modlogを作らない。カラム追加と既存行へのNULL導入はadditive migrationとする。
+
+予約実行の再試行上限は共通定数`SCHEDULED_MAX_ATTEMPTS`=5である。claimのたびに`attempts`が増え、`attempts`が上限に達した後の再試行可能な失敗はジョブを`FAILED`で終端する。Worker（ディスパッチャ）はDiscord操作の成否を moderation outcome に保存された元Discord HTTPステータスで分類する。401はfatalとして伝播しケースを終端化しない（復旧可能のまま）。400/403は`FAILED`で終端化しmodlogを1回試行する。5xx/ネットワークエラーは再試行可能とし、最終試行（`attempts >= SCHEDULED_MAX_ATTEMPTS`）でのみ`FAILED`終端化とmodlog試行を行う。冪等成功（`NOT_APPLIED`/`ALREADY_APPLIED`/404）は`COMPLETED`で終端化する。UNMUTEのmute側CAS（`completeScheduledUnmute`）は一致する`ACTIVE`ミュートを`EXPIRED`にするのみで、ジョブは`RUNNING`のまま残す。ジョブの終端化とケース/modlog境界は`terminalizeScheduledCase`が担い、mute遷移とは独立させる。
+
+限定されたクラッシュウィンドウ: Discord操作成功後〜ケース終端化（`terminalizeScheduledCase`）前にWorkerがクラッシュすると、ケースは一時的に`PENDING`のまま残る。これは意図的に限定されたウィンドウである。ジョブはstale回復で再claimされ、`createScheduledCase`が既存IDを再利用して冪等に再実行されるため、ケースやmodlogは重複しない。終端化前にクラッシュし、かつ再試行が上限まで尽くされた場合（`fail`によるretry exhaustion、または`attempts >= SCHEDULED_MAX_ATTEMPTS`でのstale回復）は、リポジトリが`executed_case_id`でリンクされた`PENDING`の`SCHEDULED`ケースをジョブの`FAILED`化と同一トランザクションで`FAILED`に更新する（フォールバック）。これによりクラッシュ後も`PENDING`ケースが残存しない。modlog配信の401はfatalとして再スローされ、その他の配信失敗は非fatal（終端化済みケースが権威）。
+
+既知の無outbox制限（modlog配信ウィンドウ）: modlogはoutboxを持たず、ケース/ジョブのdurable終端化（`terminalizeScheduledCase`のコミット）の成功後、同期modlog配信（`writeCase`）の完了前にWorkerがクラッシュした場合、そのmodlogは永続的に失われる。ケースとジョブはdurableに確定済みであり権威として残るが、後続の調整（reconciliation）がこのmodlogを再送・補填することはない。つまり「ケース/ジョブは確定したがmodlogだけが届かない」状態が許容される。これはoutbox/再送キューを意図的に持たない限定設計であり、modlogのat-most-once配信とケース/ジョブのdurableな確定を分離する。ユーザー/member解決段階のDiscord HTTPステータスは共有のdirect/cause分類器で伝播し、401はfatal（終端化せず再スロー）、403/400は確定`FAILED`分類のためステータスを付与、5xx/ネットワークは再試行可能なステータス意味を維持する。
 
 ## 4.10 無視設定
 
