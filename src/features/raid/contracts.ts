@@ -1,4 +1,5 @@
 import type {
+  AutomodSettingsDto,
   CaseDto,
   GuildSettingsDto,
   RaidRepository,
@@ -53,6 +54,13 @@ export interface RaidDependencies {
 }
 
 export type RaidResult = Result<{ settings: GuildSettingsDto; case?: CaseDto }>;
+
+/** `/raidmode status` result: the guild's raid state plus the AutoRaid
+ * settings, which §5.3.12 lists among the status display items (AutoRaid設定). */
+export type RaidStatusResult = Result<{
+  readonly settings: GuildSettingsDto;
+  readonly autoRaid: AutomodSettingsDto;
+}>;
 
 export interface RaidMemberAdd {
   readonly guildId: string;

@@ -4,6 +4,47 @@ import {
 } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import type { RaidService } from './service.js';
+import type {
+  AutomodSettingsDto,
+  GuildSettingsDto,
+} from '../../repositories/contracts.js';
+/** Discord timestamp markdown seconds; renders in each viewer's timezone. */
+const epoch = (date: Date): number => Math.floor(date.getTime() / 1000);
+/** The raid state block: ON/OFF, source, start, reason, and the pre-raid
+ * verification level. Composed with the AutoRaid settings for `/raidmode
+ * status` (§5.3.12). */
+const renderRaidState = (settings: GuildSettingsDto): string => {
+  if (!settings.raidModeEnabled) return 'RaidMode: OFF';
+  const lines = [
+    `RaidMode: ON${settings.raidModeSource ? ` (${settings.raidModeSource})` : ''}`,
+  ];
+  if (settings.raidStartedAt)
+    lines.push(`発動日時: <t:${String(epoch(settings.raidStartedAt))}:F>`);
+  if (settings.raidModeReason) lines.push(`理由: ${settings.raidModeReason}`);
+  if (settings.verificationLevelBeforeRaid != null)
+    lines.push(
+      `発動前の Verification Level: ${String(settings.verificationLevelBeforeRaid)}`,
+    );
+  return lines.join('\n');
+};
+/** Renders an ON/OFF transition result. A returned case means the state changed;
+ * its absence means the idempotent no-op (already ON/OFF, §8.4). */
+const renderRaidTransition = (value: unknown, label: 'ON' | 'OFF'): string => {
+  const caseNumber = (value as { case?: { caseNumber?: number } } | undefined)
+    ?.case?.caseNumber;
+  return caseNumber === undefined
+    ? `RaidModeは既に${label}です。`
+    : `RaidModeを${label}にしました。Case #${String(caseNumber)}`;
+};
+const renderAutoRaid = (settings: AutomodSettingsDto): string =>
+  `AutoRaidMode: ${settings.autoRaidEnabled ? 'ON' : 'OFF'} (${String(settings.autoRaidJoinCount)} joins / ${String(settings.autoRaidWindowSeconds)}秒)`;
+/** Spec §5.3.12 `/raidmode status` display: the raid state plus the AutoRaid
+ * settings (AutoRaid設定). */
+const renderRaidStatus = (status: {
+  settings: GuildSettingsDto;
+  autoRaid: AutomodSettingsDto;
+}): string =>
+  `${renderRaidState(status.settings)}\n${renderAutoRaid(status.autoRaid)}`;
 const data = (
   name: string,
   description: string,
@@ -105,22 +146,22 @@ export function raidCommands(
           ]))
         )
           return;
+        const reason = interaction.options.getString('reason') ?? undefined;
+        if (sub === 'status') {
+          const result = await service.status(guildId);
+          await interaction.editReply(
+            result.ok ? renderRaidStatus(result.value) : result.error.message,
+          );
+          return;
+        }
         const result =
-          sub === 'status'
-            ? await service.status(guildId)
-            : sub === 'on'
-              ? await service.on(
-                  guildId,
-                  interaction.user.id,
-                  interaction.options.getString('reason') ?? undefined,
-                )
-              : await service.off(
-                  guildId,
-                  interaction.user.id,
-                  interaction.options.getString('reason') ?? undefined,
-                );
+          sub === 'on'
+            ? await service.on(guildId, interaction.user.id, reason)
+            : await service.off(guildId, interaction.user.id, reason);
         await interaction.editReply(
-          result.ok ? JSON.stringify(result.value) : result.error.message,
+          result.ok
+            ? renderRaidTransition(result.value, sub === 'on' ? 'ON' : 'OFF')
+            : result.error.message,
         );
       },
     ),
@@ -162,21 +203,27 @@ export function raidCommands(
       async ({ interaction }) => {
         const guildId = gid(interaction.guildId);
         const sub = interaction.options.getSubcommand();
-        const result =
-          sub === 'status'
-            ? await service.status(guildId)
-            : await service.setAutoRaid(
-                guildId,
-                sub === 'on' ? true : sub === 'off' ? false : undefined,
-                sub === 'set'
-                  ? interaction.options.getInteger('joins', true)
-                  : undefined,
-                sub === 'set'
-                  ? interaction.options.getInteger('seconds', true)
-                  : undefined,
-              );
+        if (sub === 'status') {
+          const result = await service.status(guildId);
+          await interaction.editReply(
+            result.ok
+              ? renderAutoRaid(result.value.autoRaid)
+              : result.error.message,
+          );
+          return;
+        }
+        const result = await service.setAutoRaid(
+          guildId,
+          sub === 'on' ? true : sub === 'off' ? false : undefined,
+          sub === 'set'
+            ? interaction.options.getInteger('joins', true)
+            : undefined,
+          sub === 'set'
+            ? interaction.options.getInteger('seconds', true)
+            : undefined,
+        );
         await interaction.editReply(
-          result.ok ? JSON.stringify(result.value) : result.error.message,
+          result.ok ? renderAutoRaid(result.value) : result.error.message,
         );
       },
     ),

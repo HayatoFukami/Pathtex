@@ -334,6 +334,7 @@ export function createBootstrapDependencies(
     targetIdentityResolver,
     fatal: (error) => {
       logger.fatal({ error }, 'Fatal moderation operation failure');
+      process.exitCode = 1;
       void stopLifecycle?.();
     },
     modlog: moderationLog,
@@ -665,6 +666,7 @@ export function createBootstrapDependencies(
   let removeIntake: ReturnType<typeof installInteractionIntake> | undefined;
   let stopLifecycle: (() => Promise<void>) | undefined;
   let voiceExpiryTimer: NodeJS.Timeout | undefined;
+  let gatewayReady = false;
   const rawClient = createDiscordClient((error) => {
     logger.fatal(
       { event: 'gateway.fatal', discordCode: 4014, errorName: error.name },
@@ -1237,6 +1239,7 @@ export function createBootstrapDependencies(
             },
             'Discord authentication failed',
           );
+          process.exitCode = 1;
           void stopLifecycle?.();
         },
       });
@@ -1281,8 +1284,10 @@ export function createBootstrapDependencies(
           void stopLifecycle?.();
         },
         targetIdentityResolver,
+        () => gatewayReady,
       );
       rawClient.on('voiceStateUpdate', (oldState, newState) => {
+        if (!gatewayReady) return;
         if (newState.id !== rawClient.user?.id) return;
         void voice
           .onVoiceState(
@@ -1293,6 +1298,21 @@ export function createBootstrapDependencies(
             newState.channelId,
           )
           .catch((error: unknown) => {
+            if (isUnauthorized(error)) {
+              logger.fatal(
+                {
+                  event: 'gateway.voice_move_auth_failed',
+                  errorName: error instanceof Error ? error.name : 'unknown',
+                  discordCode: 401,
+                  guildId: newState.guild.id,
+                  userId: newState.id,
+                },
+                'VoiceMove authentication failed',
+              );
+              process.exitCode = 1;
+              void stopLifecycle?.();
+              return;
+            }
             logger.error(
               {
                 event: 'gateway.voice_move_failed',
@@ -1314,7 +1334,16 @@ export function createBootstrapDependencies(
     },
     disconnectDatabase: () => prisma.disconnect(),
     setLifecycleStop: (stop: () => Promise<void>) => {
-      stopLifecycle = stop;
+      stopLifecycle = () => {
+        gatewayReady = false;
+        return stop();
+      };
+    },
+    markGatewayReady: () => {
+      gatewayReady = true;
+    },
+    closeGateway: () => {
+      gatewayReady = false;
     },
   };
 }
@@ -1499,6 +1528,7 @@ export function installMessageLoggingListeners(
   snapshots: Pick<SnapshotService, 'getMessage' | 'deleteMessage'>,
   logger: ReturnType<typeof createLogger>,
   fatal: (error: unknown) => void,
+  ready: () => boolean = () => true,
 ): void {
   const report = (event: string, operation: Promise<void>): void => {
     void operation.catch((error: unknown) => {
@@ -1532,6 +1562,7 @@ export function installMessageLoggingListeners(
   };
   const queue = new MessageLaneQueue();
   client.on('messageCreate', (message) => {
+    if (!ready()) return;
     report(
       'gateway.message_create_failed',
       queue.run(message.id, async () => {
@@ -1545,6 +1576,7 @@ export function installMessageLoggingListeners(
     );
   });
   client.on('messageUpdate', (before, after) => {
+    if (!ready()) return;
     const occurredAt = new Date();
     // discord.js types newMessage as a full Message but emits a PartialMessage
     // at runtime when the updated message is uncached; widen to handle both.
@@ -1590,6 +1622,7 @@ export function installMessageLoggingListeners(
     );
   });
   client.on('messageDelete', (message) => {
+    if (!ready()) return;
     const occurredAt = new Date();
     report(
       'gateway.message_delete_failed',
@@ -1610,6 +1643,7 @@ export function installMessageLoggingListeners(
     );
   });
   client.on('messageDeleteBulk', (messages) => {
+    if (!ready()) return;
     const occurredAt = new Date();
     const first = messages.first();
     if (!first?.guildId) return;
@@ -1672,6 +1706,7 @@ export function installGatewayListeners(
   logger: ReturnType<typeof createLogger>,
   fatal: (error: unknown) => void,
   targetIdentityResolver: TargetIdentityResolver,
+  ready: () => boolean = () => true,
 ): void {
   const report = (event: string, operation: Promise<void>): void => {
     void operation.catch((error: unknown) => {
@@ -1704,10 +1739,12 @@ export function installGatewayListeners(
     snapshots,
     logger,
     fatal,
+    ready,
   );
   client.on(
     'voiceStateUpdate',
     (oldState: VoiceState, newState: VoiceState) => {
+      if (!ready()) return;
       if (!newState.member) return;
       const voiceOccurredAt = new Date();
       report(
@@ -1724,6 +1761,7 @@ export function installGatewayListeners(
     },
   );
   client.on('guildMemberAdd', (member) => {
+    if (!ready()) return;
     const joinOccurredAt = new Date();
     report(
       'gateway.member_add_failed',
@@ -1814,6 +1852,7 @@ export function installGatewayListeners(
     );
   });
   client.on('guildMemberRemove', (member) => {
+    if (!ready()) return;
     report(
       'gateway.member_remove_failed',
       (async () => {
@@ -1837,6 +1876,7 @@ export function installGatewayListeners(
     );
   });
   client.on('guildMemberUpdate', (before, after) => {
+    if (!ready()) return;
     if (!after.user.bot)
       report(
         'gateway.member_dehoist_failed',
@@ -1988,6 +2028,7 @@ export function installGatewayListeners(
     );
   });
   client.on('userUpdate', (before, after) => {
+    if (!ready()) return;
     if (
       before.username === after.username &&
       before.globalName === after.globalName
@@ -2005,6 +2046,7 @@ export function installGatewayListeners(
     );
   });
   client.on('guildBanAdd', (ban) => {
+    if (!ready()) return;
     report(
       'gateway.ban_add_failed',
       (async () => {
@@ -2019,6 +2061,7 @@ export function installGatewayListeners(
     );
   });
   client.on('guildBanRemove', (ban) => {
+    if (!ready()) return;
     report(
       'gateway.ban_remove_failed',
       (async () => {
@@ -2033,6 +2076,7 @@ export function installGatewayListeners(
     );
   });
   client.on('channelCreate', (channel) => {
+    if (!ready()) return;
     void (async () => {
       const guild = channel.guild;
       const role = guild.roles.cache.find((item) => item.name === 'Muted');
@@ -2060,6 +2104,7 @@ export function installGatewayListeners(
     });
   });
   client.on('channelUpdate', (_before, after) => {
+    if (!ready()) return;
     const guildChannel = after as unknown as {
       guild: { id: string };
       id: string;
@@ -2077,6 +2122,7 @@ export function installGatewayListeners(
       });
   });
   client.on('channelDelete', (channel) => {
+    if (!ready()) return;
     if ('guildId' in channel && channel.guildId) {
       const guildId = channel.guildId;
       const channelId = channel.id;
@@ -2093,9 +2139,11 @@ export function installGatewayListeners(
     }
   });
   client.on('roleDelete', (role) => {
+    if (!ready()) return;
     settings.invalidate(role.guild.id);
   });
   client.on('guildDelete', (guild) => {
+    if (!ready()) return;
     settings.invalidate(guild.id);
     report(
       'gateway.guild_delete_failed',
@@ -2105,6 +2153,7 @@ export function installGatewayListeners(
     );
   });
   client.on('guildCreate', (guild) => {
+    if (!ready()) return;
     report(
       'gateway.guild_create_failed',
       lifecycle.markActive(guild.id).then(() => undefined),
@@ -2146,13 +2195,15 @@ export async function main(): Promise<void> {
   const shutdownState = { value: false };
   const requestShutdown = (): void => {
     shutdownState.value = true;
-    process.exitCode = 0;
+    dependencies.closeGateway();
+    if (!process.exitCode) process.exitCode = 0;
     void lifecycle.stop();
   };
   process.once('SIGTERM', requestShutdown);
   process.once('SIGINT', requestShutdown);
   try {
     await lifecycle.start();
+    dependencies.markGatewayReady();
   } catch (error: unknown) {
     if (!shutdownState.value) throw error;
   }

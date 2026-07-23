@@ -70,6 +70,10 @@ import {
 } from './contracts.js';
 import type { GeneralRepository } from './contracts.js';
 import type { Prisma as PrismaTypes } from '@prisma/client';
+import {
+  isUserTargetAction,
+  normalizeTargetDisplay,
+} from '../services/target-identity.js';
 
 type DbTransaction = PrismaTypes.TransactionClient;
 
@@ -182,34 +186,12 @@ export class PrismaCaseRepository implements CaseRepository {
   }
   private async allocate(input: CaseInput, attempt: number): Promise<CaseDto> {
     try {
+      // Delegate to the shared, guarded allocator so `createWithNumber`
+      // enforces the same case-number allocation and user target-display
+      // invariant as every other case-creation path (external, strike, raid,
+      // scheduled) instead of a divergent inline copy.
       return validateDbOutput(
-        await this.db.$transaction(async (tx) => {
-          const settings = await ensureSettings(tx, input.guildId);
-          const rawRows = await tx.$queryRaw<unknown[]>(
-            Prisma.sql`SELECT next_case_number FROM guild_settings WHERE guild_id = ${input.guildId} FOR UPDATE`,
-          );
-          const rows = rawRows.map((row) => CaseNumberRowSchema.parse(row));
-          const number = rows[0]?.next_case_number ?? settings.nextCaseNumber;
-          await tx.guildSettings.update({
-            where: { guildId: input.guildId },
-            data: { nextCaseNumber: { increment: 1 } },
-          });
-          return tx.moderationCase.create({
-            data: {
-              guildId: input.guildId,
-              caseNumber: number,
-              action: input.action,
-              targetUserId: input.targetUserId ?? null,
-              targetDisplay: input.targetDisplay,
-              moderatorUserId: input.moderatorUserId,
-              reason: input.reason ?? null,
-              durationSeconds: input.durationSeconds ?? null,
-              source: input.source,
-              status: input.status,
-              metadata: input.metadata ?? {},
-            },
-          });
-        }),
+        await this.db.$transaction(async (tx) => allocateCase(tx, input)),
       );
     } catch (error) {
       if (attempt < 3 && isRetryableSerialization(error))
@@ -1911,11 +1893,30 @@ async function ensureSettings(tx: DbTransaction, guildId: string) {
   });
 }
 
+/** Write-boundary guard for `moderation_cases.target_display` (spec
+ * `01-platform-and-data.md §4.7`, `00-common.md §1.7`). For user-target
+ * actions the persisted display must be a normalized name snapshot only — a
+ * Snowflake, mention, or already-formatted `name (id)` is rejected so an
+ * impossible display can never be newly persisted, even by a caller that
+ * bypasses the canonical case factory. Non-user-target cases keep their
+ * action-specific descriptor (e.g. `raidmode`) unchanged. Read schemas stay
+ * lenient so legacy rows are never rejected on load. */
+function assertUserTargetDisplay(input: CaseInput): void {
+  if (
+    isUserTargetAction(input.action) &&
+    normalizeTargetDisplay(input.targetDisplay) === null
+  )
+    throw new Error(
+      'user-target case target_display must be a normalized name snapshot (no Snowflake, mention, or formatted ID)',
+    );
+}
+
 async function allocateCase(
   tx: DbTransaction,
   input: CaseInput,
   auditEntryId?: string,
 ) {
+  assertUserTargetDisplay(input);
   const settings = await ensureSettings(tx, input.guildId);
   const rawRows = await tx.$queryRaw<unknown[]>(
     Prisma.sql`SELECT next_case_number FROM guild_settings WHERE guild_id = ${input.guildId} FOR UPDATE`,

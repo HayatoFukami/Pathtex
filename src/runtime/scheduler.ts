@@ -1,6 +1,7 @@
 import type { JobDto, SchedulerRepository } from '../repositories/contracts.js';
 import type { Logger } from 'pino';
 import { SchedulerService } from '../services/scheduler-service.js';
+import { isUnauthorized } from '../features/logging/adapters.js';
 
 export interface JobDispatcher {
   supports(job: JobDto): boolean;
@@ -22,28 +23,58 @@ export function createJobScheduler(
   logger?: Logger,
   pollTimeoutMs = 15_000,
 ): SchedulerRuntime {
+  let fatalRaised = false;
+  const fatal = (error: unknown): void => {
+    if (fatalRaised) return;
+    fatalRaised = true;
+    logger?.fatal(
+      {
+        event: 'scheduler.fatal_discord_authentication',
+        errorName: error instanceof Error ? error.name : 'unknown',
+      },
+      'Fatal Discord authentication failure; requesting runtime shutdown',
+    );
+    // Mark a nonzero exit status before requesting shutdown so the graceful
+    // SIGTERM handler (which only defaults the code to 0 when unset) preserves
+    // the failure instead of exiting cleanly.
+    process.exitCode = 1;
+    process.emit('SIGTERM');
+  };
   const service = new SchedulerService(repository, {
     workerId,
-    onFatal: (error) => {
-      logger?.fatal(
-        {
-          event: 'scheduler.fatal_discord_authentication',
-          errorName: error instanceof Error ? error.name : 'unknown',
-        },
-        'Fatal Discord authentication failure; requesting runtime shutdown',
-      );
-      process.emit('SIGTERM');
-    },
+    onFatal: fatal,
   });
+  // The scheduler service treats only a direct/cause `status === 401` as fatal
+  // and mis-classifies a `code === 401` failure as retryable. Wrap the
+  // dispatcher so any authentication failure (status or code, direct or
+  // cause-wrapped) reliably reaches the fatal handler before the job is
+  // re-queued, instead of being swallowed as an ordinary retry.
+  const guardedDispatcher: JobDispatcher = {
+    ...dispatcher,
+    dispatch: async (job: JobDto): Promise<void> => {
+      try {
+        await dispatcher.dispatch(job);
+      } catch (error) {
+        if (isUnauthorized(error)) fatal(error);
+        throw error;
+      }
+    },
+  };
   let timer: NodeJS.Timeout | undefined;
   let stopped = true;
   const activePolls = new Set<Promise<void>>();
   const poll = async (): Promise<void> => {
     if (stopped) return;
-    await service.dispatchDue(dispatcher);
+    await service.dispatchDue(guardedDispatcher);
   };
   const schedulePoll = (): Promise<void> => {
     const operation = poll().catch((error: unknown) => {
+      // A fatal authentication failure is routed to the fatal handler rather
+      // than being logged as a routine poll failure.
+      if (isUnauthorized(error)) {
+        fatal(error);
+        return;
+      }
       logger?.error(
         {
           event: 'scheduler.poll_failed',

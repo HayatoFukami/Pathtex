@@ -290,6 +290,18 @@ describe('shared services', () => {
     expect((await snapshots.getMessage('bad')).ok).toBe(false);
     expect((await snapshots.getMessages(['bad'])).ok).toBe(false);
   });
+  it('resolves CaseService.latest guild-wide and validates identity', async () => {
+    const latest = vi.fn().mockResolvedValue(null);
+    const caseService = new CaseService({ latest } as never);
+    const guildId = '12345678901234567';
+    expect((await caseService.latest(guildId)).ok).toBe(true);
+    expect(latest).toHaveBeenCalledWith(guildId);
+    // An invalid guild identity is rejected before reaching the repository.
+    latest.mockClear();
+    const invalid = await caseService.latest('not-a-snowflake');
+    expect(invalid.ok).toBe(false);
+    expect(latest).not.toHaveBeenCalled();
+  });
   it('enforces correlation capacity and per-kind value shapes', () => {
     const cache = new CorrelationCache(100, {
       moderation: 1,

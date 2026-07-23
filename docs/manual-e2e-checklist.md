@@ -148,6 +148,13 @@
 - [ ] 複数メッセージを一括削除 — `メッセージ一括削除`Embed、削除件数、チャンネル、キャッシュ取得数、投稿者別件数、最大10件のプレビューになる。footer timestampのみで人間可読の日時はない
 - [ ] メンバー参加・退出 — serverlogへアカウント年齢、在籍期間、ロール、退出理由推定が出る。人間可読の参加日時・退出日時はなく、footer timestampのみである
 - [ ] username、global name、nicknameを変更 — 「変更前」「変更後」がserverlogへ出る
+- [ ] 通常ロールの付与・除去をDiscord UIから実施 — ロールごとに1件ずつserverlogへ`ロール付与`/`ロール除去`Embedが出、`Mutedロール変更`等のMuted専用表示は出ない
+- [ ] 1イベントで複数ロールを変更 — 除去が先・付与が後、それぞれrole ID昇順の安定した順序で記録される
+- [ ] Botが`/mute`等で設定済みMutedロールを付与・除去 — 相関一致で実行者=`Bot`の汎用ロール変更ログが出、外部MUTE/UNMUTEケース・modlogは設定済みMutedロール遷移に対してのみ維持される
+- [ ] 外部（Discord UI）で設定済みMutedロールを付与・除去 — 一意なAudit executorが`displayName (userId)`（表示名取得不能時は`userId`のみ）で実行者に記録され、外部MUTE/UNMUTEケースとmodlogが作られる
+- [ ] 実行者が特定不能またはambiguousなロール変更 — 実行者=`不明`で記録され、moderation caseは作成されない
+- [ ] 非Mutedロールの変更ではmoderation caseが作成されず、serverlogだけ記録される
+- [ ] ロールログの1件送信失敗でも、他のロールログ・ケース処理は中断されない
 - [ ] VCへJoin、Leave、AからBへのMove — それぞれ対応するvoicelogが出る。同一VC内のMute/Deafen等は出ない
 - [ ] 外部BAN/Unban/KickをDiscord UIから実施 — Audit Log照合でExternalケースが作られ、内部操作と二重記録されない
 - [ ] modlog未設定でもケースが保存され、ログチャンネルを削除・権限不足にした場合は業務操作成功とログ送信失敗が分離される

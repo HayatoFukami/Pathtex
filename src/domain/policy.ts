@@ -63,6 +63,7 @@ export function canManageMember(input: unknown): Result<boolean> {
     owner: z.boolean(),
     targetOwner: z.boolean(),
     targetBot: z.boolean().optional(),
+    targetTopRoleManaged: z.boolean().default(false),
     action: actionSchema.default('MODERATION'),
   });
   const parsed = schema.safeParse(input);
@@ -72,6 +73,10 @@ export function canManageMember(input: unknown): Result<boolean> {
     return ok(false);
   if (v.targetBot === true && v.targetId === v.botId) return ok(false);
   if (v.actorId === v.targetId) return ok(false);
+  // 00-common.md §7.6: the Bot cannot operate on a managed role. This is a
+  // Bot-side capability restriction, so like the Bot-side hierarchy check it is
+  // not exempted for the guild owner nor for STRIKE/PARDON (§7.6 exceptions).
+  if (v.targetTopRoleManaged) return ok(false);
   const compareRole = (
     position: number,
     id: string,

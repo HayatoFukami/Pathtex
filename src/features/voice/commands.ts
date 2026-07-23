@@ -1,11 +1,26 @@
 import { PermissionFlagsBits } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import type { VoiceService } from './service.js';
+import type { VoiceSession } from './contracts.js';
 import { parseVoiceTargets } from './validation.js';
 import {
   fallbackTargetIdentity,
   formatTargetIdentity,
 } from '../../services/target-identity.js';
+/** Discord timestamp markdown seconds; renders in each viewer's timezone. */
+const epoch = (date: Date): number => Math.floor(date.getTime() / 1000);
+const renderVoiceStatus = (session: VoiceSession | null): string => {
+  if (!session) return 'VoiceMoveセッションはありません。';
+  return [
+    'VoiceMoveセッション中',
+    `開始者: <@${session.controllerUserId}>`,
+    `Bot現在VC: <#${session.botCurrentChannelId}>`,
+    `開始日時: <t:${String(epoch(session.startedAt))}:F>`,
+    `期限: <t:${String(epoch(session.expiresAt))}:R>`,
+  ].join('\n');
+};
+const renderVoiceStart = (session: VoiceSession): string =>
+  `VoiceMoveを開始しました。Botが <#${session.botCurrentChannelId}> に接続しました。\n期限: <t:${String(epoch(session.expiresAt))}:R>`;
 const data = (
   name: string,
   description: string,
@@ -33,7 +48,14 @@ export function voiceCommands(
       },
     ]),
     guildOnly: true,
-    requiredBotPermissions: [],
+    // Spec §5.3.15: VoiceKick creates a temporary channel and moves members, so
+    // the bot needs Move Members, Manage Channels, and View Channel. VoiceKick is
+    // a single-action command, so a static preflight set is correct.
+    requiredBotPermissions: [
+      PermissionFlagsBits.MoveMembers,
+      PermissionFlagsBits.ManageChannels,
+      PermissionFlagsBits.ViewChannel,
+    ],
     actorNativePermissions: [PermissionFlagsBits.MoveMembers],
     authorizationPolicy: 'MODERATOR',
     deferMode: 'EPHEMERAL',
@@ -80,6 +102,11 @@ export function voiceCommands(
       { name: 'status', description: '状態', type: 1 },
     ]),
     guildOnly: true,
+    // Spec §5.3.16: only `start` needs Connect/Move Members/View Channel, while
+    // `stop`/`status` do not. A static preflight set cannot vary per subcommand,
+    // so registration stays empty and `start` validates Connect/Move Members/View
+    // Channel inside the service (canViewChannel/canMoveToChannel), mirroring the
+    // RaidMode subcommand design.
     requiredBotPermissions: [],
     actorNativePermissions: [PermissionFlagsBits.MoveMembers],
     authorizationPolicy: 'MODERATOR',
@@ -88,18 +115,29 @@ export function voiceCommands(
       const guildId = interaction.guildId;
       if (!guildId) throw new Error('guild required');
       const action = interaction.options.getSubcommand();
-      const result =
-        action === 'status'
-          ? service.status(guildId)
-          : action === 'stop'
-            ? await service.stop(guildId, interaction.user.id, true)
-            : await service.start(
-                guildId,
-                interaction.user.id,
-                interaction.options.getChannel('channel')?.id,
-              );
+      if (action === 'status') {
+        const result = service.status(guildId);
+        await interaction.editReply(
+          result.ok ? renderVoiceStatus(result.value) : result.error.message,
+        );
+        return;
+      }
+      if (action === 'stop') {
+        const result = await service.stop(guildId, interaction.user.id, true);
+        await interaction.editReply(
+          result.ok
+            ? 'VoiceMoveセッションを終了しました。'
+            : result.error.message,
+        );
+        return;
+      }
+      const result = await service.start(
+        guildId,
+        interaction.user.id,
+        interaction.options.getChannel('channel')?.id,
+      );
       await interaction.editReply(
-        result.ok ? JSON.stringify(result.value) : result.error.message,
+        result.ok ? renderVoiceStart(result.value) : result.error.message,
       );
     },
   };

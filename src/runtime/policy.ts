@@ -22,6 +22,14 @@ export interface PermissionPolicy {
 const names = (permissions: readonly PermissionResolvable[]): string[] =>
   permissions.map((permission) => String(permission));
 
+/**
+ * Log configuration commands target a user-selected channel rather than the
+ * channel the command was invoked in. Their bot-permission preflight must be
+ * computed against that selected channel for `set`, and needs no channel
+ * permissions at all for `off` (which only clears the stored channel ID).
+ */
+const LOG_COMMANDS = new Set(['messagelog', 'modlog', 'serverlog', 'voicelog']);
+
 export function createPermissionPolicy(
   settings: ModRoleSettingsPort,
 ): PermissionPolicy {
@@ -57,6 +65,23 @@ export function createPermissionPolicy(
       const guild = interaction.guild;
       const me = guild?.members.me;
       if (me === null || me === undefined) return names(required);
+      if (LOG_COMMANDS.has(interaction.commandName)) {
+        let subcommand: string | null = null;
+        try {
+          subcommand = interaction.options.getSubcommand(false);
+        } catch {
+          subcommand = null;
+        }
+        // `off` performs no channel write, so no channel permission is needed.
+        if (subcommand !== 'set') return [];
+        const target = interaction.options.getChannel('channel');
+        if (target === null || !('permissionsFor' in target))
+          return names(required);
+        const effective = target.permissionsFor(me);
+        return required
+          .filter((permission) => !effective.has(permission))
+          .map((permission) => String(permission));
+      }
       const channel = interaction.channel;
       if (channel === null || !('permissionsFor' in channel))
         return names(required);

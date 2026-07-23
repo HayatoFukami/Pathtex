@@ -474,4 +474,65 @@ describe('runtime recovery and scheduler', () => {
     ).toBe(false);
     expect(getModRoleId).not.toHaveBeenCalled();
   });
+
+  it('preflights log configuration commands against the selected channel, not the invocation channel', () => {
+    const policy = createPermissionPolicy({
+      getModRoleId: () => Promise.resolve(null),
+      roleExists: () => Promise.resolve(false),
+      clearDeletedModRole: () => Promise.resolve(),
+    });
+    const required = [
+      'ViewChannel',
+      'SendMessages',
+      'EmbedLinks',
+      'ReadMessageHistory',
+    ] as const;
+    // The invocation channel grants everything; only the selected target channel
+    // is missing SendMessages. A correct preflight must report SendMessages.
+    const logInteraction = (
+      commandName: string,
+      subcommand: string,
+      targetHas: ((permission: string) => boolean) | null,
+    ) =>
+      ({
+        commandName,
+        guild: { members: { me: {} } },
+        channel: { permissionsFor: () => ({ has: () => true }) },
+        options: {
+          getSubcommand: () => subcommand,
+          getChannel: () =>
+            targetHas === null
+              ? null
+              : { permissionsFor: () => ({ has: targetHas }) },
+        },
+      }) as unknown as ChatInputCommandInteraction;
+
+    // `set` is computed against the selected channel: SendMessages is missing
+    // there even though the invocation channel has every permission.
+    expect(
+      policy.missingBotPermissions(
+        logInteraction('messagelog', 'set', (p) => p !== 'SendMessages'),
+        required,
+      ),
+    ).toEqual(['SendMessages']);
+    // `set` against a fully-permissioned target channel reports nothing.
+    expect(
+      policy.missingBotPermissions(
+        logInteraction('serverlog', 'set', () => true),
+        required,
+      ),
+    ).toEqual([]);
+    // `off` performs no channel write, so no channel permission is required.
+    expect(
+      policy.missingBotPermissions(logInteraction('modlog', 'off', null), [
+        'SendMessages',
+      ]),
+    ).toEqual([]);
+    // A `set` whose target channel cannot be resolved fails closed.
+    expect(
+      policy.missingBotPermissions(logInteraction('voicelog', 'set', null), [
+        'SendMessages',
+      ]),
+    ).toEqual(['SendMessages']);
+  });
 });

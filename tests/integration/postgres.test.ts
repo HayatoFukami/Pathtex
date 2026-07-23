@@ -960,6 +960,55 @@ integration('PostgreSQL persistence foundation', () => {
     ).toBe(true);
   });
 
+  it('rejects user-target cases whose display is an ID, mention, or formatted value', async () => {
+    const cases = new PrismaCaseRepository(getDb());
+    const guildId = '32345678901234567';
+    const base = {
+      guildId,
+      targetUserId: '12345678901234571',
+      moderatorUserId: '12345678901234568',
+      source: 'COMMAND' as const,
+      status: 'COMPLETED' as const,
+      reason: 'test',
+    };
+    await expect(
+      cases.createWithNumber({
+        ...base,
+        action: 'BAN',
+        targetDisplay: '12345678901234571',
+      }),
+    ).rejects.toThrow(/target_display/u);
+    await expect(
+      cases.createWithNumber({
+        ...base,
+        action: 'BAN',
+        targetDisplay: '<@12345678901234571>',
+      }),
+    ).rejects.toThrow(/target_display/u);
+    await expect(
+      cases.createWithNumber({
+        ...base,
+        action: 'BAN',
+        targetDisplay: 'name (12345678901234571)',
+      }),
+    ).rejects.toThrow(/target_display/u);
+    // A valid name snapshot for a user-target action persists unchanged.
+    const valid = await cases.createWithNumber({
+      ...base,
+      action: 'BAN',
+      targetDisplay: 'valid-name',
+    });
+    expect(valid.targetDisplay).toBe('valid-name');
+    // A non-user-target action keeps its action-specific descriptor.
+    const raid = await cases.createWithNumber({
+      ...base,
+      action: 'RAIDMODE_ON',
+      targetUserId: null,
+      targetDisplay: 'raidmode',
+    });
+    expect(raid.targetDisplay).toBe('raidmode');
+  });
+
   it('two workers claim disjoint due jobs concurrently', async () => {
     const scheduler = new PrismaSchedulerRepository(getDb());
     const users = [
@@ -2144,6 +2193,54 @@ integration('PostgreSQL persistence foundation', () => {
         '12345678901234568',
       ),
       'punishments_action_duration_valid',
+    );
+    await expectConstraint(
+      getDb().$executeRawUnsafe(
+        'INSERT INTO punishments (id, guild_id, threshold, action, duration_seconds, created_by, created_at, updated_at) VALUES ($1::uuid, $2, 4, $3::"PunishmentAction", 31536001, $4, now(), now())',
+        '00000000-0000-4000-8000-000000000004',
+        '12345678901234567',
+        'BAN',
+        '12345678901234568',
+      ),
+      'punishments_duration_valid',
+    );
+    await expectConstraint(
+      getDb().$executeRawUnsafe(
+        'INSERT INTO punishments (id, guild_id, threshold, action, duration_seconds, created_by, created_at, updated_at) VALUES ($1::uuid, $2, 5, $3::"PunishmentAction", 2419201, $4, now(), now())',
+        '00000000-0000-4000-8000-000000000005',
+        '12345678901234567',
+        'MUTE',
+        '12345678901234568',
+      ),
+      'punishments_mute_max_28_days',
+    );
+    await expectConstraint(
+      getDb().$executeRawUnsafe(
+        'INSERT INTO punishments (id, guild_id, threshold, action, created_by, created_at, updated_at) VALUES ($1::uuid, $2, 1000001, $3::"PunishmentAction", $4, now(), now())',
+        '00000000-0000-4000-8000-000000000006',
+        '12345678901234567',
+        'KICK',
+        '12345678901234568',
+      ),
+      'punishments_threshold_valid',
+    );
+    await expectConstraint(
+      getDb().$executeRawUnsafe(
+        'INSERT INTO user_strikes (guild_id, user_id, count, updated_at) VALUES ($1, $2, $3, now())',
+        '12345678901234567',
+        '12345678901234590',
+        1_000_001,
+      ),
+      'user_strikes_count_valid',
+    );
+    await expectConstraint(
+      getDb().$executeRawUnsafe(
+        'INSERT INTO user_strikes (guild_id, user_id, count, updated_at) VALUES ($1, $2, $3, now())',
+        '12345678901234567',
+        '12345678901234591',
+        -1,
+      ),
+      'user_strikes_count_valid',
     );
     await expectConstraint(
       getDb().$executeRawUnsafe(

@@ -1,6 +1,6 @@
 import { err, ok } from '../../domain/result.js';
 import { SnowflakeSchema } from '../../repositories/contracts.js';
-import type { RaidDependencies } from './contracts.js';
+import type { RaidDependencies, RaidStatusResult } from './contracts.js';
 import type { RaidMemberAdd } from './contracts.js';
 import {
   TargetIdentitySchema,
@@ -61,8 +61,17 @@ export class RaidService {
     }
   }
 
-  public status(guildId: string) {
-    return this.deps.settings.get(guildId);
+  /** Spec §5.3.12 `/raidmode status`: the raid state plus the AutoRaid
+   * settings. A settings read failure short-circuits; the AutoRaid read is the
+   * same idempotent get-or-create used on join, so a default configuration
+   * always renders. */
+  public async status(guildId: string): Promise<RaidStatusResult> {
+    const settings = await this.deps.settings.get(guildId);
+    if (!settings.ok) return settings;
+    return ok({
+      settings: settings.value,
+      autoRaid: await this.deps.automod.getOrCreate(guildId),
+    });
   }
 
   public async setAutoRaid(
@@ -212,17 +221,42 @@ export class RaidService {
       await this.deps.repository.recordJoin(member.guildId, member.userId, now);
     const after = await this.deps.settings.get(member.guildId);
     if (!after.ok || !after.value.raidModeEnabled) return;
-    try {
-      await Promise.race([
+    // DM the joining member that the guild is locked down. DM delivery is
+    // non-fatal (§8.2), but a Discord authentication failure (401) is fatal and
+    // must propagate (§8.5). The send is bounded by a 2s timeout, and the send
+    // promise keeps an attached handler so a rejection that settles after the
+    // timeout wins the race cannot become an unhandled rejection.
+    let dmError: unknown;
+    let dmRaceDone = false;
+    const dmSettled = this.deps.discord
+      .getGuildName(member.guildId)
+      .then((guildName) =>
         this.deps.discord.sendDm(
           member.userId,
-          `${await this.deps.discord.getGuildName(member.guildId)} は現在ロックダウン中です。\n安全確保のため新規参加を一時的に停止しています。\n時間を置いて再度参加してください。`,
+          `${guildName} は現在ロックダウン中です。\n安全確保のため新規参加を一時的に停止しています。\n時間を置いて再度参加してください。`,
         ),
-        new Promise<void>((resolve) => setTimeout(resolve, 2000)),
-      ]);
-    } catch {
-      /* DM failure is non-fatal. */
-    }
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          dmError = error;
+          // A 401 that settles after the timeout already won the race cannot be
+          // thrown (memberAdd has moved on); escalate it explicitly so a late
+          // authentication failure is not lost.
+          if (dmRaceDone && isAuthError(error)) this.escalateFatalAuth(error);
+        },
+      );
+    let dmTimeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      dmSettled,
+      new Promise<void>((resolve) => {
+        dmTimeout = setTimeout(resolve, 2000);
+      }),
+    ]);
+    if (dmTimeout !== undefined) clearTimeout(dmTimeout);
+    dmRaceDone = true;
+    if (isAuthError(dmError)) throw dmError;
+    /* Any other DM failure is non-fatal. */
     const identity = await this.resolveJoinIdentity(member);
     await this.deps.moderation.execute(
       {
@@ -343,11 +377,30 @@ export class RaidService {
     }
   }
 
+  /** Modlog delivery is best-effort, but a Discord authentication failure (401)
+   * is fatal and must propagate; every other delivery failure stays non-fatal. */
   private async writeLog(guildId: string, _title: string, caseId: string) {
     try {
       await this.deps.modlog?.writeCase(guildId, caseId);
-    } catch {
-      /* logging is non-fatal */
+    } catch (error: unknown) {
+      if (isAuthError(error)) throw error;
+      /* non-auth logging is non-fatal */
     }
+  }
+
+  /** Escalates a fatal Discord authentication failure discovered asynchronously
+   * (e.g. a lockdown DM 401 that settles after its timeout) when there is no
+   * awaiting caller to throw to. Mirrors the scheduler runtime's fatal
+   * mechanism: log fatally, mark a nonzero exit status, and request shutdown. */
+  private escalateFatalAuth(error: unknown): void {
+    this.deps.logger?.fatal(
+      {
+        event: 'raid.fatal_discord_authentication',
+        errorName: error instanceof Error ? error.name : 'unknown',
+      },
+      'Fatal Discord authentication failure; requesting runtime shutdown',
+    );
+    process.exitCode = 1;
+    process.emit('SIGTERM');
   }
 }

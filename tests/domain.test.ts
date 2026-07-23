@@ -130,3 +130,96 @@ describe('shared domain', () => {
     ).toMatchObject({ ok: true, value: true });
   });
 });
+
+describe('canManageMember authorization policy', () => {
+  const base = {
+    actorId: '200000000000000001',
+    targetId: '200000000000000002',
+    botId: '200000000000000003',
+    botTopRole: 10,
+    targetTopRole: 5,
+    actorTopRole: 8,
+    botTopRoleId: '200000000000000010',
+    targetTopRoleId: '200000000000000011',
+    actorTopRoleId: '200000000000000012',
+    owner: false,
+    targetOwner: false,
+  };
+  const allows = (input: unknown): void => {
+    expect(canManageMember(input)).toMatchObject({ ok: true, value: true });
+  };
+  const denies = (input: unknown): void => {
+    expect(canManageMember(input)).toMatchObject({ ok: true, value: false });
+  };
+
+  it('manages a non-managed target outranked by bot and actor', () => {
+    allows(base);
+    allows({ ...base, targetTopRoleManaged: false });
+  });
+
+  it('blocks every action when the target top role is managed', () => {
+    denies({ ...base, targetTopRoleManaged: true });
+    denies({ ...base, targetTopRoleManaged: true, action: 'STRIKE' });
+    denies({ ...base, targetTopRoleManaged: true, action: 'PARDON' });
+  });
+
+  it('does not exempt the managed-role guard for owner actors', () => {
+    denies({ ...base, targetTopRoleManaged: true, owner: true });
+    denies({
+      ...base,
+      targetTopRoleManaged: true,
+      owner: true,
+      action: 'STRIKE',
+    });
+  });
+
+  it('keeps self, application-bot, and owner-target protections', () => {
+    denies({ ...base, targetId: base.actorId });
+    denies({ ...base, targetId: base.botId, targetBot: true });
+    denies({ ...base, targetOwner: true });
+    allows({ ...base, targetOwner: true, action: 'STRIKE' });
+    allows({ ...base, targetOwner: true, action: 'PARDON' });
+  });
+
+  it('allows moderating other bots when hierarchy is satisfied', () => {
+    allows({ ...base, targetBot: true });
+  });
+
+  it('requires the bot to outrank the target even for owners and strikes', () => {
+    denies({ ...base, botTopRole: 3 });
+    denies({ ...base, botTopRole: 3, owner: true });
+    denies({ ...base, botTopRole: 3, action: 'STRIKE' });
+  });
+
+  it('exempts only owner actors from the actor-side hierarchy check', () => {
+    denies({ ...base, actorTopRole: 3 });
+    allows({ ...base, actorTopRole: 3, owner: true });
+    allows({ ...base, actorTopRole: 3, action: 'STRIKE' });
+    allows({ ...base, actorTopRole: 3, action: 'PARDON' });
+  });
+
+  it('breaks role-position ties by role id', () => {
+    const tied = { ...base, botTopRole: 5, targetTopRole: 5, actorTopRole: 5 };
+    allows({
+      ...tied,
+      botTopRoleId: '200000000000000099',
+      targetTopRoleId: '200000000000000011',
+      actorTopRoleId: '200000000000000098',
+    });
+    denies({
+      ...tied,
+      botTopRoleId: '200000000000000001',
+      targetTopRoleId: '200000000000000011',
+    });
+  });
+
+  it('rejects malformed hierarchy input', () => {
+    expect(canManageMember({})).toMatchObject({ ok: false });
+    expect(
+      canManageMember({ ...base, actorId: 'not-a-snowflake' }),
+    ).toMatchObject({ ok: false });
+    const result = canManageMember({ ...base, botTopRole: 'high' });
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.error.code).toBe('INVALID_INPUT');
+  });
+});

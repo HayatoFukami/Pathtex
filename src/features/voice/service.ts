@@ -13,6 +13,7 @@ import {
   TargetIdentitySchema,
   type TargetIdentity,
 } from '../../services/target-identity.js';
+import { isUnauthorized } from '../logging/adapters.js';
 
 const limit = async <T>(
   items: readonly T[],
@@ -117,6 +118,20 @@ export class VoiceService {
   public member(guildId: string, userId: string): Promise<VoiceMember | null> {
     return this.port.member(guildId, userId);
   }
+  /** Best-effort modlog write for a completed case: a Discord authentication
+   * failure (401) is fatal and propagates; any other delivery failure is
+   * swallowed so it never blocks the voice operation result. */
+  private async writeCaseBestEffort(
+    guildId: string,
+    caseId: string,
+  ): Promise<void> {
+    try {
+      await this.port.writeCase(guildId, caseId);
+    } catch (error) {
+      if (isUnauthorized(error)) throw error;
+      /* non-auth modlog delivery is non-fatal */
+    }
+  }
   public async voiceKickTargets(
     guildId: string,
     actorId: string,
@@ -134,14 +149,9 @@ export class VoiceService {
         id,
         member: await Promise.resolve(this.port.member(guildId, id)).catch(
           (error: unknown) => {
-            if (
-              error &&
-              typeof error === 'object' &&
-              (('status' in error &&
-                (error as { status?: unknown }).status === 401) ||
-                ('code' in error && (error as { code?: unknown }).code === 401))
-            )
-              throw error;
+            // A Discord authentication failure (401, direct or cause-wrapped) is
+            // fatal and must propagate; any other lookup failure is absence.
+            if (isUnauthorized(error)) throw error;
             return null;
           },
         ),
@@ -189,9 +199,7 @@ export class VoiceService {
     await Promise.all(
       missingOutcomes.map((outcome) =>
         outcome.caseId
-          ? Promise.resolve(this.port.writeCase(guildId, outcome.caseId)).catch(
-              () => undefined,
-            )
+          ? this.writeCaseBestEffort(guildId, outcome.caseId)
           : Promise.resolve(),
       ),
     );
@@ -287,6 +295,7 @@ export class VoiceService {
           return;
         }
         let temporary: string | undefined;
+        let cleanupAuthError: unknown;
         try {
           temporary = await this.port.createTemporaryChannel(
             guildId,
@@ -300,7 +309,10 @@ export class VoiceService {
               );
               success.push(member.id);
               outcomes.push({ userId: member.id, ok: true });
-            } catch {
+            } catch (error) {
+              // A 401 is a fatal authentication failure, not a per-target move
+              // failure; propagate it instead of recording DISCORD_API_ERROR.
+              if (isUnauthorized(error)) throw error;
               failed.push(member.id);
               outcomes.push({
                 userId: member.id,
@@ -309,7 +321,10 @@ export class VoiceService {
               });
             }
           });
-        } catch {
+        } catch (error) {
+          // A 401 from creating the temporary channel (or a propagated move 401)
+          // is fatal; abort rather than recording per-target failures.
+          if (isUnauthorized(error)) throw error;
           failed.push(
             ...group.filter((m) => !success.includes(m.id)).map((m) => m.id),
           );
@@ -324,18 +339,25 @@ export class VoiceService {
                 code: 'DISCORD_API_ERROR',
               });
         } finally {
+          // Cleanup must not throw inside `finally` (that would mask the try
+          // result); capture a fatal 401 and re-raise it after the block.
           if (temporary) {
             try {
               await this.port.deleteChannel(temporary);
-            } catch {
-              try {
-                await this.port.deleteChannel(temporary);
-              } catch {
-                /* best effort */
+            } catch (error) {
+              if (isUnauthorized(error)) cleanupAuthError = error;
+              else {
+                try {
+                  await this.port.deleteChannel(temporary);
+                } catch (retryError) {
+                  if (isUnauthorized(retryError)) cleanupAuthError = retryError;
+                  /* best effort */
+                }
               }
             }
           }
         }
+        if (cleanupAuthError !== undefined) throw cleanupAuthError as Error;
       });
       const identities = new Map<string, TargetIdentity>();
       await Promise.all(
@@ -393,9 +415,7 @@ export class VoiceService {
       await Promise.all(
         outcomes.map((outcome) =>
           outcome.caseId
-            ? Promise.resolve(
-                this.port.writeCase(guildId, outcome.caseId),
-              ).catch(() => undefined)
+            ? this.writeCaseBestEffort(guildId, outcome.caseId)
             : Promise.resolve(),
         ),
       );
@@ -525,7 +545,10 @@ export class VoiceService {
         try {
           await mover.run(() => this.port.move(guildId, m.id, newChannelId));
           success++;
-        } catch {
+        } catch (error) {
+          // A 401 is a fatal authentication failure; propagate it rather than
+          // counting it as an ordinary failed move.
+          if (isUnauthorized(error)) throw error;
           failed++;
         }
       });
@@ -539,7 +562,10 @@ export class VoiceService {
           session.controllerUserId,
           `VoiceMove完了: 成功 ${String(success)} / 失敗 ${String(failed)}`,
         );
-      } catch {
+      } catch (error) {
+        // DM delivery is non-fatal, but a 401 is a fatal authentication failure
+        // and must propagate.
+        if (isUnauthorized(error)) throw error;
         dmDelivered = false;
       }
       await Promise.resolve(

@@ -35,9 +35,18 @@ export function createCommandManifest(
     ...(tools ? toolsCommands(tools) : []),
     ...(voice ? voiceCommands(voice) : []),
   ];
-  const unique = new Map<string, CommandDefinition>();
-  for (const command of all) unique.set(command.name, command);
-  return [...unique.values()];
+  const seen = new Map<string, number>();
+  for (const command of all)
+    seen.set(command.name, (seen.get(command.name) ?? 0) + 1);
+  const duplicates = [...seen.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name)
+    .sort();
+  if (duplicates.length > 0)
+    throw new Error(
+      `duplicate command name(s) in manifest: ${duplicates.join(', ')}`,
+    );
+  return all;
 }
 
 export { createPingCommand } from './ping.js';

@@ -910,6 +910,10 @@ export interface CaseRepository {
     guildId: string,
     caseNumber: number,
   ): Promise<CaseDto | null>;
+  /** Selects the newest case in a guild whose reason is still missing
+   * (`NULL`, empty, or the `理由未指定` default). The selection is
+   * guild-wide: the single newest eligible missing-reason case is returned
+   * regardless of which moderator created it. */
   latest(guildId: string): Promise<CaseDto | null>;
   updateMetadata(id: string, metadata: JsonValue): Promise<CaseDto>;
   updateLog(

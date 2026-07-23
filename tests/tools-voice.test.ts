@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PermissionFlagsBits } from 'discord.js';
 import { ToolsService } from '../src/features/tools/service.js';
 import { VoiceService } from '../src/features/voice/service.js';
 import { parseVoiceTargets } from '../src/features/voice/validation.js';
@@ -11,6 +12,7 @@ import {
   toolsCommands,
   validateAuditCustomId,
 } from '../src/features/tools/commands.js';
+import { voiceCommands } from '../src/features/voice/commands.js';
 import type { ButtonInteraction } from 'discord.js';
 import type {
   ToolsPort,
@@ -867,5 +869,402 @@ describe('tools and voice services', () => {
     if (!status.ok) throw status.error;
     expect(status.value).toBeNull();
     expect(disconnect).toHaveBeenCalledWith('g');
+  });
+});
+
+describe('voice fatal-401 propagation', () => {
+  const basePort = (overrides: Partial<VoicePort> = {}): VoicePort => ({
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    move: vi.fn(),
+    createTemporaryChannel: vi.fn().mockResolvedValue('temporary'),
+    deleteChannel: vi.fn(),
+    members: vi.fn().mockResolvedValue([]),
+    member: vi.fn(),
+    dm: vi.fn(),
+    writeCase: vi.fn(),
+    ...overrides,
+  });
+  const unauthorized = () =>
+    Object.assign(new Error('unauthorized'), { status: 401 });
+  const kickMember = {
+    id: '12345678901234567',
+    bot: false,
+    channelId: 'source',
+    categoryId: null,
+  };
+
+  it('propagates a 401 from VoiceKick move instead of recording DISCORD_API_ERROR', async () => {
+    const port = basePort({ move: vi.fn().mockRejectedValue(unauthorized()) });
+    await expect(
+      new VoiceService(port).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('propagates a cause-wrapped 401 from VoiceKick move', async () => {
+    const port = basePort({
+      move: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+        ),
+    });
+    await expect(
+      new VoiceService(port).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ cause: { status: 401 } });
+  });
+
+  it('propagates a 401 from temporary channel creation', async () => {
+    const port = basePort({
+      createTemporaryChannel: vi.fn().mockRejectedValue(unauthorized()),
+    });
+    await expect(
+      new VoiceService(port).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('still records a non-auth VoiceKick move failure as DISCORD_API_ERROR', async () => {
+    const port = basePort({
+      move: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('forbidden'), { status: 403 }),
+        ),
+    });
+    const result = await new VoiceService(port).voiceKick('g', 'actor', [
+      kickMember,
+    ]);
+    if (!result.ok) throw result.error;
+    expect(result.value.outcomes[0]).toMatchObject({
+      ok: false,
+      code: 'DISCORD_API_ERROR',
+    });
+  });
+
+  it('propagates a 401 from temporary channel cleanup after successful moves', async () => {
+    const port = basePort({
+      move: vi.fn().mockResolvedValue(undefined),
+      deleteChannel: vi.fn().mockRejectedValue(unauthorized()),
+    });
+    await expect(
+      new VoiceService(port).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('keeps VoiceKick successful when temporary channel cleanup fails non-auth', async () => {
+    const port = basePort({
+      move: vi.fn().mockResolvedValue(undefined),
+      deleteChannel: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('boom'), { status: 500 })),
+    });
+    const result = await new VoiceService(port).voiceKick('g', 'actor', [
+      kickMember,
+    ]);
+    if (!result.ok) throw result.error;
+    expect(result.value.success).toEqual([kickMember.id]);
+  });
+
+  const casePort = () => ({
+    create: vi.fn().mockResolvedValue({ caseId: 'case-1', caseNumber: 1 }),
+  });
+
+  it('propagates a 401 from VoiceKick modlog writeCase after successful moves', async () => {
+    const port = basePort({
+      move: vi.fn().mockResolvedValue(undefined),
+      writeCase: vi.fn().mockRejectedValue(unauthorized()),
+    });
+    await expect(
+      new VoiceService(port, casePort()).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('propagates a cause-wrapped 401 from VoiceKick modlog writeCase', async () => {
+    const port = basePort({
+      move: vi.fn().mockResolvedValue(undefined),
+      writeCase: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+        ),
+    });
+    await expect(
+      new VoiceService(port, casePort()).voiceKick('g', 'actor', [kickMember]),
+    ).rejects.toMatchObject({ cause: { status: 401 } });
+  });
+
+  it('keeps VoiceKick successful when modlog writeCase fails non-auth', async () => {
+    const port = basePort({
+      move: vi.fn().mockResolvedValue(undefined),
+      writeCase: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('boom'), { status: 500 })),
+    });
+    const result = await new VoiceService(port, casePort()).voiceKick(
+      'g',
+      'actor',
+      [kickMember],
+    );
+    if (!result.ok) throw result.error;
+    expect(result.value.success).toEqual([kickMember.id]);
+  });
+
+  it('propagates a 401 from a VoiceMove follow-along move', async () => {
+    const port = basePort({
+      members: vi
+        .fn()
+        .mockResolvedValue([{ id: 'm1', bot: false, channelId: 'old' }]),
+      move: vi.fn().mockRejectedValue(unauthorized()),
+    });
+    const service = new VoiceService(port);
+    await service.start('g', 'controller', 'old');
+    await expect(service.onBotMoved('g', 'old', 'new')).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('counts a non-auth VoiceMove follow-along failure without aborting', async () => {
+    const port = basePort({
+      members: vi
+        .fn()
+        .mockResolvedValue([{ id: 'm1', bot: false, channelId: 'old' }]),
+      move: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('forbidden'), { status: 403 }),
+        ),
+      dm: vi.fn().mockResolvedValue(undefined),
+    });
+    const service = new VoiceService(port);
+    await service.start('g', 'controller', 'old');
+    const result = await service.onBotMoved('g', 'old', 'new');
+    if (!result.ok) throw result.error;
+    expect(result.value).toEqual({ success: 0, failed: 1 });
+  });
+
+  it('propagates a cause-wrapped code 401 from VoiceKick member resolution', async () => {
+    const port = basePort({
+      member: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+        ),
+    });
+    await expect(
+      new VoiceService(port).voiceKickTargets('g', 'actor', [
+        '12345678901234567',
+      ]),
+    ).rejects.toMatchObject({ cause: { code: 401 } });
+  });
+});
+
+describe('/announce command registration metadata', () => {
+  const commands = toolsCommands(new ToolsService(toolsPort()));
+  const announce = commands.find((c) => c.name === 'announce');
+
+  it('registers the announce command', () => {
+    expect(announce).toBeDefined();
+  });
+
+  it('declares ViewChannel, SendMessages, MentionEveryone, and ManageRoles as required bot permissions', () => {
+    if (!announce) throw new Error('announce command missing');
+    const perms = announce.requiredBotPermissions;
+    expect(perms).toContain(PermissionFlagsBits.ViewChannel);
+    expect(perms).toContain(PermissionFlagsBits.SendMessages);
+    expect(perms).toContain(PermissionFlagsBits.MentionEveryone);
+    expect(perms).toContain(PermissionFlagsBits.ManageRoles);
+    expect(perms).toHaveLength(4);
+  });
+
+  it('requires ManageMessages as the actor native permission', () => {
+    if (!announce) throw new Error('announce command missing');
+    expect(announce.actorNativePermissions).toEqual([
+      PermissionFlagsBits.ManageMessages,
+    ]);
+  });
+
+  it('uses MODERATOR authorization policy and EPHEMERAL defer mode', () => {
+    if (!announce) throw new Error('announce command missing');
+    expect(announce.authorizationPolicy).toBe('MODERATOR');
+    expect(announce.deferMode).toBe('EPHEMERAL');
+    expect(announce.guildOnly).toBe(true);
+  });
+
+  it('does not leak announce-specific bot permissions into other tool commands', () => {
+    const audit = commands.find((c) => c.name === 'audit');
+    const dehoist = commands.find((c) => c.name === 'dehoist');
+    const inviteprune = commands.find((c) => c.name === 'inviteprune');
+    const lookup = commands.find((c) => c.name === 'lookup');
+    if (!audit || !dehoist || !inviteprune || !lookup)
+      throw new Error('expected tool commands missing');
+    expect(audit.requiredBotPermissions).toEqual([
+      PermissionFlagsBits.ViewAuditLog,
+    ]);
+    expect(dehoist.requiredBotPermissions).toEqual([
+      PermissionFlagsBits.ManageNicknames,
+    ]);
+    expect(inviteprune.requiredBotPermissions).toEqual([
+      PermissionFlagsBits.ManageGuild,
+    ]);
+    expect(lookup.requiredBotPermissions).toEqual([
+      PermissionFlagsBits.ViewChannel,
+    ]);
+  });
+});
+
+describe('/voicekick and /voicemove command registration metadata', () => {
+  const port: VoicePort = {
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    move: vi.fn(),
+    createTemporaryChannel: vi.fn().mockResolvedValue('temporary'),
+    deleteChannel: vi.fn(),
+    members: vi.fn().mockResolvedValue([]),
+    member: vi.fn(),
+    dm: vi.fn(),
+    writeCase: vi.fn(),
+  };
+  const commands = voiceCommands(new VoiceService(port));
+  const voicekick = commands.find((c) => c.name === 'voicekick');
+  const voicemove = commands.find((c) => c.name === 'voicemove');
+
+  it('registers both voice commands', () => {
+    expect(voicekick).toBeDefined();
+    expect(voicemove).toBeDefined();
+  });
+
+  it('declares MoveMembers, ManageChannels, and ViewChannel for voicekick (spec 5.3.15)', () => {
+    if (!voicekick) throw new Error('voicekick command missing');
+    expect(voicekick.requiredBotPermissions).toEqual([
+      PermissionFlagsBits.MoveMembers,
+      PermissionFlagsBits.ManageChannels,
+      PermissionFlagsBits.ViewChannel,
+    ]);
+  });
+
+  it('requires MoveMembers as the voicekick actor permission with MODERATOR/EPHEMERAL', () => {
+    if (!voicekick) throw new Error('voicekick command missing');
+    expect(voicekick.actorNativePermissions).toEqual([
+      PermissionFlagsBits.MoveMembers,
+    ]);
+    expect(voicekick.authorizationPolicy).toBe('MODERATOR');
+    expect(voicekick.deferMode).toBe('EPHEMERAL');
+    expect(voicekick.guildOnly).toBe(true);
+  });
+
+  it('keeps voicemove bot permissions empty because they vary per subcommand', () => {
+    if (!voicemove) throw new Error('voicemove command missing');
+    // `start` validates Connect/MoveMembers/ViewChannel inside the service;
+    // `stop`/`status` need none, so no static preflight set is declared.
+    expect(voicemove.requiredBotPermissions).toEqual([]);
+    expect(voicemove.actorNativePermissions).toEqual([
+      PermissionFlagsBits.MoveMembers,
+    ]);
+    expect(voicemove.authorizationPolicy).toBe('MODERATOR');
+    expect(voicemove.deferMode).toBe('EPHEMERAL');
+  });
+});
+
+describe('/voicemove reply rendering', () => {
+  const GUILD = '12345678901234567';
+  const CONTROLLER = '12345678901234568';
+  const CHANNEL = '12345678901234569';
+  const startedAt = new Date('2026-01-01T00:00:00Z');
+  const startedEpoch = String(Math.floor(startedAt.getTime() / 1000));
+  const expiresEpoch = String(
+    Math.floor((startedAt.getTime() + 21_600_000) / 1000),
+  );
+
+  const moveCommand = (overrides: Partial<VoicePort> = {}) => {
+    const fullPort: VoicePort = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn().mockResolvedValue('temporary'),
+      deleteChannel: vi.fn(),
+      members: vi.fn().mockResolvedValue([]),
+      member: vi.fn(),
+      dm: vi.fn(),
+      writeCase: vi.fn(),
+      ...overrides,
+    };
+    const command = voiceCommands(
+      new VoiceService(fullPort, undefined, () => startedAt),
+    ).find((c) => c.name === 'voicemove');
+    if (!command) throw new Error('voicemove command missing');
+    return command;
+  };
+  const interaction = (sub: string, channelId: string | null = CHANNEL) => ({
+    guildId: GUILD,
+    user: { id: CONTROLLER },
+    options: {
+      getSubcommand: () => sub,
+      getChannel: () => (channelId === null ? null : { id: channelId }),
+    },
+    editReply: vi.fn(),
+  });
+
+  it('renders an empty status when no session exists', async () => {
+    const command = moveCommand();
+    const ix = interaction('status');
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      'VoiceMoveセッションはありません。',
+    );
+  });
+
+  it('renders start confirmation with the connected channel and expiry', async () => {
+    const command = moveCommand();
+    const ix = interaction('start');
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      `VoiceMoveを開始しました。Botが <#${CHANNEL}> に接続しました。\n期限: <t:${expiresEpoch}:R>`,
+    );
+  });
+
+  it('renders status with controller, channel, start time, and expiry', async () => {
+    const command = moveCommand();
+    await command.execute({ interaction: interaction('start') } as never);
+    const ix = interaction('status');
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      [
+        'VoiceMoveセッション中',
+        `開始者: <@${CONTROLLER}>`,
+        `Bot現在VC: <#${CHANNEL}>`,
+        `開始日時: <t:${startedEpoch}:F>`,
+        `期限: <t:${expiresEpoch}:R>`,
+      ].join('\n'),
+    );
+  });
+
+  it('renders stop confirmation', async () => {
+    const command = moveCommand();
+    await command.execute({ interaction: interaction('start') } as never);
+    const ix = interaction('stop');
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      'VoiceMoveセッションを終了しました。',
+    );
+  });
+
+  it('surfaces a service error message instead of JSON', async () => {
+    const command = moveCommand();
+    // No channel option and no actor channel resolver -> INVALID_INPUT.
+    const ix = interaction('start', null);
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      '接続先VCを指定するか、実行者がVCに接続してください',
+    );
+  });
+
+  it('rejects a duplicate start with the ALREADY_APPLIED message', async () => {
+    const command = moveCommand();
+    await command.execute({ interaction: interaction('start') } as never);
+    const ix = interaction('start');
+    await command.execute({ interaction: ix } as never);
+    expect(ix.editReply).toHaveBeenCalledWith(
+      '既存のVoiceMoveセッションを先に停止してください',
+    );
   });
 });

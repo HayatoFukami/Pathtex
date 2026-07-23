@@ -33,7 +33,15 @@ const command = (
   name,
   data,
   guildOnly: true,
-  requiredBotPermissions: name === 'announce' ? [] : [permission],
+  requiredBotPermissions:
+    name === 'announce'
+      ? [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.MentionEveryone,
+          PermissionFlagsBits.ManageRoles,
+        ]
+      : [permission],
   actorNativePermissions: [permission],
   authorizationPolicy: policy,
   deferMode: 'EPHEMERAL',
