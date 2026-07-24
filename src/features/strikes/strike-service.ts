@@ -27,6 +27,7 @@ import {
   createCanonicalUserCase,
   type CanonicalUserCaseInput,
 } from '../../services/case-service.js';
+import { t } from '../../i18n/index.js';
 
 const valid = (id: string) => SnowflakeSchema.safeParse(id).success;
 
@@ -173,14 +174,41 @@ export class StrikeService {
       const caseNumber = caseResult?.ok
         ? caseResult.value?.caseNumber
         : undefined;
+      const autoPunishmentSuffix = (punishment: {
+        action: string;
+        durationSeconds?: number | string | null | undefined;
+      }) =>
+        t('strikes:service.autoPunishmentSuffix', {
+          action: punishment.action,
+          duration: punishment.durationSeconds
+            ? t('strikes:service.durationSeconds', {
+                seconds: punishment.durationSeconds,
+              })
+            : '',
+        });
       let guildName = this.deps.discord.getGuildName
         ? await this.deps.discord.getGuildName(input.guildId)
-        : `${input.guildId}${selectedPunishment ? `\n自動制裁: ${selectedPunishment.action}${selectedPunishment.durationSeconds ? ` (${String(selectedPunishment.durationSeconds)}秒)` : ''}` : ''}`;
+        : `${input.guildId}${selectedPunishment ? autoPunishmentSuffix(selectedPunishment) : ''}`;
       if (selectedPunishment && this.deps.discord.getGuildName)
-        guildName += `\n自動制裁: ${selectedPunishment.action}${selectedPunishment.durationSeconds ? ` (${String(selectedPunishment.durationSeconds)}秒)` : ''}`;
+        guildName += autoPunishmentSuffix(selectedPunishment);
+      const dmAction =
+        source === 'PARDON'
+          ? t('strikes:service.dmPardoned', {
+              amount: Math.abs(result.delta),
+            })
+          : t('strikes:service.dmStriked', { amount: result.delta });
       await this.deps.discord.sendDm(
         input.userId,
-        `${guildName} で ${source === 'PARDON' ? `${String(Math.abs(result.delta))} ストライクが取り消されました。` : `${String(result.delta)} ストライクが付与されました。`}\n理由: ${reason}\n現在の合計: ${String(result.afterCount)}${caseNumber === undefined ? '' : `\nケース: #${String(caseNumber)}`}`,
+        t('strikes:service.dmMessage', {
+          guildName,
+          action: dmAction,
+          reason,
+          afterCount: result.afterCount,
+          caseSuffix:
+            caseNumber === undefined
+              ? ''
+              : t('strikes:service.dmCaseSuffix', { caseNumber }),
+        }),
       );
     } catch {
       dmDelivered = false;
@@ -202,7 +230,10 @@ export class StrikeService {
           guildId: input.guildId,
           actorId: input.actorId,
           targets: [{ id: identity.userId, identity }],
-          reason: `${String(result.afterCount)}ストライクに到達: ${reason}`,
+          reason: t('strikes:service.punishmentReachedReason', {
+            count: result.afterCount,
+            reason,
+          }),
           ...(punishment.durationSeconds === null ||
           punishment.durationSeconds === undefined
             ? {}
@@ -247,7 +278,10 @@ export class StrikeService {
             guildId: input.guildId,
             action: 'AUTO_PUNISHMENT',
             moderatorUserId: input.actorId,
-            reason: `${String(result.afterCount)}ストライクに到達: ${reason}`,
+            reason: t('strikes:service.punishmentReachedReason', {
+              count: result.afterCount,
+              reason,
+            }),
             durationSeconds: punishment.durationSeconds,
             source: 'PUNISHMENT',
             status: 'FAILED',

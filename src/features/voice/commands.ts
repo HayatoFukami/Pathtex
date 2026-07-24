@@ -8,20 +8,26 @@ import {
   fallbackTargetIdentity,
   formatTargetIdentity,
 } from '../../services/target-identity.js';
+import { t } from '../../i18n/index.js';
 /** Discord timestamp markdown seconds; renders in each viewer's timezone. */
 const epoch = (date: Date): number => Math.floor(date.getTime() / 1000);
 const renderVoiceStatus = (session: VoiceSession | null): string => {
-  if (!session) return 'VoiceMoveセッションはありません。';
+  if (!session) return t('voice:status.none');
   return [
-    'VoiceMoveセッション中',
-    `開始者: <@${session.controllerUserId}>`,
-    `Bot現在VC: <#${session.botCurrentChannelId}>`,
-    `開始日時: <t:${String(epoch(session.startedAt))}:F>`,
-    `期限: <t:${String(epoch(session.expiresAt))}:R>`,
+    t('voice:status.active'),
+    t('voice:status.controller', { userId: session.controllerUserId }),
+    t('voice:status.currentChannel', {
+      channelId: session.botCurrentChannelId,
+    }),
+    t('voice:status.startedAt', { epoch: epoch(session.startedAt) }),
+    t('voice:status.expiresAt', { epoch: epoch(session.expiresAt) }),
   ].join('\n');
 };
 const renderVoiceStart = (session: VoiceSession): string =>
-  `VoiceMoveを開始しました。Botが <#${session.botCurrentChannelId}> に接続しました。\n期限: <t:${String(epoch(session.expiresAt))}:R>`;
+  t('voice:start.confirmation', {
+    channelId: session.botCurrentChannelId,
+    epoch: epoch(session.expiresAt),
+  });
 const data = (
   name: string,
   description: string,
@@ -40,11 +46,15 @@ export function voiceCommands(
 ): readonly CommandDefinition[] {
   const command: CommandDefinition = {
     name: 'voicekick',
-    data: data('voicekick', 'ボイスから切断', [
-      { name: 'target', description: '対象', type: 6 },
+    data: data('voicekick', t('voice:commands.voicekick.description'), [
+      {
+        name: 'target',
+        description: t('voice:commands.voicekick.options.target'),
+        type: 6,
+      },
       {
         name: 'additional_targets',
-        description: '追加対象ID',
+        description: t('voice:commands.voicekick.options.additionalTargets'),
         type: 3,
         max_length: 400,
       },
@@ -80,29 +90,57 @@ export function voiceCommands(
       );
       await interaction.editReply(
         result.ok
-          ? `完了: 成功 ${String(result.value.success.length)} / 失敗 ${String(result.value.failed.length)}\n${result.value.outcomes.map((outcome) => `${formatTargetIdentity(outcome.identity ?? fallbackTargetIdentity(outcome.userId))}: ${outcome.ok ? `成功${outcome.caseNumber === undefined ? '' : ` Case #${String(outcome.caseNumber)}`}` : (outcome.code ?? '失敗')}`).join('\n')}`
+          ? t('voice:kick.summary', {
+              success: result.value.success.length,
+              failed: result.value.failed.length,
+              outcomes: result.value.outcomes
+                .map(
+                  (outcome) =>
+                    `${formatTargetIdentity(outcome.identity ?? fallbackTargetIdentity(outcome.userId))}: ${
+                      outcome.ok
+                        ? t('voice:kick.outcomeSuccess', {
+                            caseSuffix:
+                              outcome.caseNumber === undefined
+                                ? ''
+                                : t('voice:kick.caseSuffix', {
+                                    caseNumber: outcome.caseNumber,
+                                  }),
+                          })
+                        : (outcome.code ?? t('voice:kick.outcomeFailure'))
+                    }`,
+                )
+                .join('\n'),
+            })
           : result.error.message,
       );
     },
   };
   const move: CommandDefinition = {
     name: 'voicemove',
-    data: data('voicemove', 'VoiceMoveセッション', [
+    data: data('voicemove', t('voice:commands.voicemove.description'), [
       {
         name: 'start',
-        description: '開始',
+        description: t('voice:commands.voicemove.start.description'),
         type: 1,
         options: [
           {
             name: 'channel',
-            description: '接続先',
+            description: t('voice:commands.voicemove.start.options.channel'),
             type: 7,
             channel_types: [2],
           },
         ],
       },
-      { name: 'stop', description: '停止', type: 1 },
-      { name: 'status', description: '状態', type: 1 },
+      {
+        name: 'stop',
+        description: t('voice:commands.voicemove.stop.description'),
+        type: 1,
+      },
+      {
+        name: 'status',
+        description: t('voice:commands.voicemove.status.description'),
+        type: 1,
+      },
     ]),
     guildOnly: true,
     // Spec §5.3.16: only `start` needs Connect/Move Members/View Channel, while
@@ -128,9 +166,7 @@ export function voiceCommands(
       if (action === 'stop') {
         const result = await service.stop(guildId, interaction.user.id, true);
         await interaction.editReply(
-          result.ok
-            ? 'VoiceMoveセッションを終了しました。'
-            : result.error.message,
+          result.ok ? t('voice:stop.confirmation') : result.error.message,
         );
         return;
       }

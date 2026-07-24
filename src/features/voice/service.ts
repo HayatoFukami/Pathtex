@@ -18,6 +18,7 @@ import {
   DEFAULT_BULK_TARGET_LIMIT,
 } from '../../domain/parsers.js';
 import { isUnauthorized } from '../logging/adapters.js';
+import { t } from '../../i18n/index.js';
 
 const limit = async <T>(
   items: readonly T[],
@@ -47,7 +48,7 @@ const identityFor = (userId: string, displayName?: unknown): TargetIdentity => {
   } catch {
     // Legacy unit callers may use short fixture IDs.
   }
-  return { userId, displayName: '不明なユーザー' };
+  return { userId, displayName: t('system:identity.unknownUser') };
 };
 const outcomeIdentity = (
   outcomes: readonly VoiceOutcome[],
@@ -159,13 +160,13 @@ export class VoiceService {
     // Reject an empty batch before any Discord access so a targetless call can
     // never reach the API, mirroring the all-or-nothing over-limit guard below.
     if (uniqueIds.length === 0)
-      return err('INVALID_INPUT', '対象を1件以上指定してください');
+      return err('INVALID_INPUT', t('voice:errors.atLeastOneTarget'));
     // Enforce the injected configured ceiling before any Discord access so an
     // over-limit batch is rejected all-or-nothing without touching the API.
     if (uniqueIds.length > this.maxBulkTargets)
       return err(
         'INVALID_INPUT',
-        `対象は最大${String(this.maxBulkTargets)}件です`,
+        t('voice:errors.maxTargets', { max: this.maxBulkTargets }),
       );
     const resolved = await Promise.all(
       uniqueIds.map(async (id) => ({
@@ -454,36 +455,30 @@ export class VoiceService {
       const resolvedChannel =
         channelId ?? (await this.port.actorChannel?.(guildId, actorId))?.id;
       if (!resolvedChannel)
-        return err(
-          'INVALID_INPUT',
-          '接続先VCを指定するか、実行者がVCに接続してください',
-        );
+        return err('INVALID_INPUT', t('voice:errors.noChannelSpecified'));
       if (
         this.port.validateTargetChannel &&
         !(await this.port.validateTargetChannel(guildId, resolvedChannel))
       )
-        return err(
-          'INVALID_INPUT',
-          '接続先は同じギルドのVoiceチャンネルでなければなりません',
-        );
+        return err('INVALID_INPUT', t('voice:errors.invalidChannel'));
       if (
         this.port.canViewChannel &&
         !(await this.port.canViewChannel(guildId, resolvedChannel, actorId))
       )
-        return err('BOT_PERMISSION_MISSING', '接続先VCを閲覧できません');
+        return err(
+          'BOT_PERMISSION_MISSING',
+          t('voice:errors.cannotViewChannel'),
+        );
       if (
         this.port.canMoveToChannel &&
         !(await this.port.canMoveToChannel(guildId, resolvedChannel, actorId))
       )
         return err(
           'BOT_PERMISSION_MISSING',
-          '接続先VCでConnect/Move Members権限がありません',
+          t('voice:errors.missingMoveConnectPermission'),
         );
       if (this.sessions.has(guildId))
-        return err(
-          'ALREADY_APPLIED',
-          '既存のVoiceMoveセッションを先に停止してください',
-        );
+        return err('ALREADY_APPLIED', t('voice:errors.sessionAlreadyActive'));
       await this.port.connect(guildId, resolvedChannel);
       const startedAt = this.now();
       const session = {
@@ -508,14 +503,14 @@ export class VoiceService {
     moderator?: boolean,
   ): Promise<VoiceResult<boolean>> {
     const session = this.sessions.get(guildId);
-    if (!session) return err('NOT_APPLIED', 'VoiceMoveセッションはありません');
+    if (!session) return err('NOT_APPLIED', t('voice:errors.noSession'));
     const allowedModerator =
       moderator ??
       (this.port.isModerator
         ? await this.port.isModerator(guildId, actorId)
         : false);
     if (session.controllerUserId !== actorId && !allowedModerator)
-      return err('NOT_AUTHORIZED', 'セッション開始者またはModeratorのみ');
+      return err('NOT_AUTHORIZED', t('voice:errors.notAuthorized'));
     return this.locked(guildId, async () => {
       await this.port.disconnect(guildId);
       this.sessions.delete(guildId);
@@ -583,7 +578,7 @@ export class VoiceService {
       try {
         await this.port.dm(
           session.controllerUserId,
-          `VoiceMove完了: 成功 ${String(success)} / 失敗 ${String(failed)}`,
+          t('voice:dm.completion', { success, failed }),
         );
       } catch (error) {
         // DM delivery is non-fatal, but a 401 is a fatal authentication failure

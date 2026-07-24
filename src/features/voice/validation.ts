@@ -3,6 +3,7 @@ import {
   clampBulkTargetLimit,
   DEFAULT_BULK_TARGET_LIMIT,
 } from '../../domain/parsers.js';
+import { t } from '../../i18n/index.js';
 
 const snowflake = /^\d{17,20}$/u;
 export function parseVoiceTargets(
@@ -16,16 +17,16 @@ export function parseVoiceTargets(
   // tokens and 400 characters. These are independent of, and never weakened by,
   // the deployment-configurable bulk-target limit.
   if (extraText.length > 400 || extraTokens.length > 19)
-    return err('INVALID_INPUT', '追加対象が不正です');
+    return err('INVALID_INPUT', t('voice:errors.invalidAdditionalTargets'));
   const raw = [...(targetId ? [targetId] : []), ...extraTokens];
   if (raw.length === 0)
-    return err('INVALID_INPUT', '対象を1件以上指定してください');
+    return err('INVALID_INPUT', t('voice:errors.atLeastOneTarget'));
   const ids = raw.map((value) => value.replace(/^<@!?|>$/gu, ''));
   if (ids.some((id) => !snowflake.test(id)))
-    return err('INVALID_INPUT', '対象IDが不正です');
+    return err('INVALID_INPUT', t('voice:errors.invalidTargetId'));
   const unique = [...new Set(ids)];
   const limit = clampBulkTargetLimit(max);
   if (unique.length > limit)
-    return err('INVALID_INPUT', `対象は最大${String(limit)}件です`);
+    return err('INVALID_INPUT', t('voice:errors.maxTargets', { max: limit }));
   return ok(unique);
 }

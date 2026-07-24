@@ -7,9 +7,11 @@ import {
   fallbackTargetIdentity,
   type TargetIdentity,
 } from '../../services/target-identity.js';
+import { t } from '../../i18n/index.js';
 
 const validId = (value: string) => SnowflakeSchema.safeParse(value).success;
-const reasonOf = (reason?: string) => reason?.trim() || '理由未指定';
+const reasonOf = (reason?: string) =>
+  reason?.trim() || t('raid:service.reasonNotSpecified');
 
 /** Discord authentication failures (401) must propagate so the runtime can
  * treat them as fatal; every other verification-level failure is non-fatal. */
@@ -85,12 +87,12 @@ export class RaidService {
       joins !== undefined &&
       (!Number.isInteger(joins) || joins < 3 || joins > 100)
     )
-      return err('INVALID_INPUT', 'joinsは3～100です');
+      return err('INVALID_INPUT', t('raid:errors.joinsRange'));
     if (
       seconds !== undefined &&
       (!Number.isInteger(seconds) || seconds < 2 || seconds > 300)
     )
-      return err('INVALID_INPUT', 'secondsは2～300です');
+      return err('INVALID_INPUT', t('raid:errors.secondsRange'));
     if (enabled === true && joins === undefined && seconds === undefined) {
       joins = 10;
       seconds = 10;
@@ -233,7 +235,7 @@ export class RaidService {
       .then((guildName) =>
         this.deps.discord.sendDm(
           member.userId,
-          `${guildName} は現在ロックダウン中です。\n安全確保のため新規参加を一時的に停止しています。\n時間を置いて再度参加してください。`,
+          t('raid:service.lockdownDm', { guildName }),
         ),
       )
       .then(
@@ -263,7 +265,7 @@ export class RaidService {
         guildId: member.guildId,
         actorId: await this.deps.discord.getBotUserId(member.guildId),
         targets: [{ id: member.userId, identity }],
-        reason: 'RaidModeによるロックダウン',
+        reason: t('raid:service.lockdownKickReason'),
         execution: { source: 'RAIDMODE', sendDm: false, waitForDm: false },
       },
       'KICK',
@@ -333,7 +335,7 @@ export class RaidService {
           await this.restoreVerificationLevel(
             guildId,
             result.restoreLevel,
-            'AutoRaid自動解除',
+            t('raid:service.autoDisableReason'),
           );
       }
       return result;

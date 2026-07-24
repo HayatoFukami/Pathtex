@@ -3,6 +3,7 @@ import {
   type IgnoreRepository,
 } from '../../repositories/contracts.js';
 import { err, ok, type Result } from '../../domain/result.js';
+import { t } from '../../i18n/index.js';
 
 const permissions = new Set([
   'Administrator',
@@ -33,7 +34,9 @@ export class IgnoreService {
     automatic = false,
   ): Promise<Result<undefined>> {
     return automatic
-      ? Promise.resolve(err('INVALID_INPUT', '自動Ignoreは解除できません'))
+      ? Promise.resolve(
+          err('INVALID_INPUT', t('automod:errors.autoIgnoreCannotBeRemoved')),
+        )
       : this.repository.removeRole(guildId, roleId).then(() => ok(undefined));
   }
   public removeChannel(guildId: string, channelId: string) {

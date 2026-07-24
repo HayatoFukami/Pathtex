@@ -2,6 +2,7 @@ import { PermissionFlagsBits } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import { StrikeService, parseAdditionalTargets } from './strike-service.js';
 import { DEFAULT_BULK_TARGET_LIMIT } from '../../domain/parsers.js';
+import { t } from '../../i18n/index.js';
 
 const data = (name: string, description: string, options: unknown[] = []) => ({
   name,
@@ -16,32 +17,37 @@ const data = (name: string, description: string, options: unknown[] = []) => ({
 });
 const user = {
   name: 'target',
-  description: '対象ユーザー',
+  description: t('strikes:commands.options.target'),
   type: 6,
   required: false,
 };
 const checkUser = {
   name: 'user',
-  description: '確認するユーザー',
+  description: t('strikes:commands.options.checkUser'),
   type: 6,
   required: true,
 };
 const additionalTargets = {
   name: 'additional_targets',
-  description: '追加対象（最大19件）',
+  description: t('strikes:commands.options.additionalTargets'),
   type: 3,
   required: false,
   max_length: 400,
 };
 const amount = {
   name: 'amount',
-  description: 'ストライク数',
+  description: t('strikes:commands.options.amount'),
   type: 4,
   required: false,
   min_value: 1,
   max_value: 100,
 };
-const reason = { name: 'reason', description: '理由', type: 3, required: true };
+const reason = {
+  name: 'reason',
+  description: t('strikes:commands.options.reason'),
+  type: 3,
+  required: true,
+};
 const command = (
   name: string,
   definition: Record<string, unknown>,
@@ -73,7 +79,7 @@ export function strikesCommands(
   const result = [
     command(
       'strike',
-      data('strike', 'ストライクを付与', [
+      data('strike', t('strikes:commands.strike.description'), [
         reason,
         user,
         additionalTargets,
@@ -100,7 +106,7 @@ export function strikesCommands(
           await interaction.editReply(
             typeof failure.error.message === 'string'
               ? failure.error.message
-              : '処理に失敗しました。',
+              : t('strikes:reply.processingFailed'),
           );
           return;
         }
@@ -108,7 +114,10 @@ export function strikesCommands(
           results
             .map((result) =>
               result.ok
-                ? `ストライク: ${String(result.value.beforeCount)} → ${String(result.value.afterCount)}`
+                ? t('strikes:reply.delta', {
+                    before: result.value.beforeCount,
+                    after: result.value.afterCount,
+                  })
                 : result.error.message,
             )
             .join('\n'),
@@ -117,7 +126,7 @@ export function strikesCommands(
     ),
     command(
       'pardon',
-      data('pardon', 'ストライクを取り消し', [
+      data('pardon', t('strikes:commands.pardon.description'), [
         reason,
         user,
         additionalTargets,
@@ -144,7 +153,7 @@ export function strikesCommands(
           await interaction.editReply(
             typeof failure.error.message === 'string'
               ? failure.error.message
-              : '処理に失敗しました。',
+              : t('strikes:reply.processingFailed'),
           );
           return;
         }
@@ -152,7 +161,10 @@ export function strikesCommands(
           results
             .map((result) =>
               result.ok
-                ? `ストライク: ${String(result.value.beforeCount)} → ${String(result.value.afterCount)}`
+                ? t('strikes:reply.delta', {
+                    before: result.value.beforeCount,
+                    after: result.value.afterCount,
+                  })
                 : result.error.message,
             )
             .join('\n'),
@@ -161,7 +173,7 @@ export function strikesCommands(
     ),
     command(
       'check',
-      data('check', 'ストライク状況を確認', [checkUser]),
+      data('check', t('strikes:commands.check.description'), [checkUser]),
       async ({ interaction }) => {
         const result = await service.check(
           guild(interaction),
@@ -170,11 +182,23 @@ export function strikesCommands(
         await interaction.editReply(
           result.ok
             ? [
-                `ストライク: ${String(result.value.count)}`,
-                `Mute: ${result.value.muted ? '有' : '無'}${result.value.muteExpiresAt ? ` (解除: ${result.value.muteExpiresAt.toISOString()})` : ''}`,
-                `BAN: ${result.value.banned === null ? '取得失敗' : result.value.banned ? '有' : '無'}${result.value.banExpiresAt ? ` (解除: ${result.value.banExpiresAt.toISOString()})` : ''}`,
-                `次: ${result.value.next ? `${String(result.value.next.threshold)} / ${result.value.next.action}` : 'なし'}`,
-                `履歴:\n${result.value.history.map((entry) => `${entry.delta > 0 ? '+' : ''}${String(entry.delta)}: ${entry.reason} (${entry.createdAt.toISOString()})`).join('\n') || 'なし'}`,
+                t('strikes:reply.count', { count: result.value.count }),
+                `Mute: ${result.value.muted ? t('strikes:reply.yes') : t('strikes:reply.no')}${result.value.muteExpiresAt ? t('strikes:reply.expirySuffix', { date: result.value.muteExpiresAt.toISOString() }) : ''}`,
+                `BAN: ${result.value.banned === null ? t('strikes:reply.banFetchFailed') : result.value.banned ? t('strikes:reply.yes') : t('strikes:reply.no')}${result.value.banExpiresAt ? t('strikes:reply.expirySuffix', { date: result.value.banExpiresAt.toISOString() }) : ''}`,
+                t('strikes:reply.next', {
+                  value: result.value.next
+                    ? `${String(result.value.next.threshold)} / ${result.value.next.action}`
+                    : t('strikes:reply.none'),
+                }),
+                t('strikes:reply.history', {
+                  entries:
+                    result.value.history
+                      .map(
+                        (entry) =>
+                          `${entry.delta > 0 ? '+' : ''}${String(entry.delta)}: ${entry.reason} (${entry.createdAt.toISOString()})`,
+                      )
+                      .join('\n') || t('strikes:reply.none'),
+                }),
               ].join('\n')
             : result.error.message,
         );
@@ -184,15 +208,15 @@ export function strikesCommands(
   result.push(
     command(
       'punishment',
-      data('punishment', '自動制裁設定', [
+      data('punishment', t('strikes:commands.punishment.description'), [
         {
           name: 'set',
-          description: '設定',
+          description: t('strikes:commands.punishment.set.description'),
           type: 1,
           options: [
             {
               name: 'threshold',
-              description: 'しきい値',
+              description: t('strikes:commands.options.threshold'),
               type: 4,
               required: true,
               min_value: 1,
@@ -209,7 +233,7 @@ export function strikesCommands(
             },
             {
               name: 'duration',
-              description: '期間（例: 7d、2h）',
+              description: t('strikes:commands.options.duration'),
               type: 3,
               required: false,
             },
@@ -217,12 +241,12 @@ export function strikesCommands(
         },
         {
           name: 'remove',
-          description: '削除',
+          description: t('strikes:commands.punishment.remove.description'),
           type: 1,
           options: [
             {
               name: 'threshold',
-              description: 'しきい値',
+              description: t('strikes:commands.options.threshold'),
               type: 4,
               required: true,
               min_value: 1,
@@ -230,7 +254,11 @@ export function strikesCommands(
             },
           ],
         },
-        { name: 'list', description: '一覧', type: 1 },
+        {
+          name: 'list',
+          description: t('strikes:commands.punishment.list.description'),
+          type: 1,
+        },
       ]),
       async ({ interaction }) => {
         const sub = interaction.options.getSubcommand();
@@ -242,9 +270,9 @@ export function strikesCommands(
               ? r.value
                   .map(
                     (p) =>
-                      `${String(p.threshold)}: ${p.action}${p.durationSeconds ? ` (${String(p.durationSeconds)}s)` : ''} / 設定者: ${p.createdBy} / 更新: ${p.updatedAt.toISOString()}`,
+                      `${String(p.threshold)}: ${p.action}${p.durationSeconds ? ` (${String(p.durationSeconds)}s)` : ''}${t('strikes:reply.punishmentMeta', { createdBy: p.createdBy, updatedAt: p.updatedAt.toISOString() })}`,
                   )
-                  .join('\n') || '設定なし'
+                  .join('\n') || t('strikes:reply.punishmentEmpty')
               : r.error.message,
           );
           return;
@@ -264,7 +292,7 @@ export function strikesCommands(
                 durationSeconds: interaction.options.getString('duration'),
               });
         await interaction.editReply(
-          r.ok ? 'Punishment設定を更新しました。' : r.error.message,
+          r.ok ? t('strikes:reply.punishmentUpdated') : r.error.message,
         );
       },
       'MANAGE_GUILD',
@@ -288,6 +316,6 @@ function targetIds(
     ? { ok: true, value }
     : {
         ok: false,
-        error: `対象を1～${String(maxBulkTargets)}件指定してください。`,
+        error: t('strikes:reply.targetRange', { max: maxBulkTargets }),
       };
 }

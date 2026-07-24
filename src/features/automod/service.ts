@@ -22,6 +22,7 @@ import type {
 import type { MessageView } from '../logging/events.js';
 import { isUnauthorized } from '../logging/adapters.js';
 import { TargetIdentitySchema } from '../../services/target-identity.js';
+import { t } from '../../i18n/index.js';
 
 export class AutomodService {
   public readonly duplicate = new DuplicateLru();
@@ -114,24 +115,23 @@ export class AutomodService {
       enablesStrikeRule &&
       (await this.deps.punishments.list(guildId)).length === 0
     )
-      return err('CONFIGURATION_MISSING', 'Punishment設定が必要です');
+      return err(
+        'CONFIGURATION_MISSING',
+        t('automod:errors.punishmentRequired'),
+      );
     if (
       patch.autodehoistCharacter !== undefined &&
       patch.autodehoistCharacter !== null &&
       Array.from(patch.autodehoistCharacter).length !== 1
     )
-      return err(
-        'INVALID_INPUT',
-        '文字は1 Unicode code pointで指定してください',
-      );
+      return err('INVALID_INPUT', t('automod:errors.characterLength'));
     const updated = await this.deps.settings.update(guildId, patch);
     const character = patch.autodehoistCharacter;
     return ok({
       updated,
       ...(character && /[\p{L}\p{N}\s]/u.test(character)
         ? {
-            warning:
-              '空白または英数字を設定すると名前の先頭記号として機能しません',
+            warning: t('automod:warnings.dehoistCharacterConflict'),
           }
         : {}),
     });
@@ -147,7 +147,10 @@ export class AutomodService {
     remove = false,
   ): Promise<Result<undefined | { automaticIgnoreContinues: true }>> {
     if (!this.deps.ignores)
-      return err('CONFIGURATION_MISSING', 'Ignore設定が利用できません');
+      return err(
+        'CONFIGURATION_MISSING',
+        t('automod:errors.ignoreUnavailable'),
+      );
     if (kind === 'role') {
       if (remove) {
         const roles = (await this.deps.discord.listRoles?.(guildId)) ?? [];
@@ -247,7 +250,9 @@ export class AutomodService {
       if (isUnauthorized(error)) throw error;
       this.deps.warning?.(
         guildId,
-        error instanceof Error ? error.message : 'AutoDehoistに失敗しました',
+        error instanceof Error
+          ? error.message
+          : t('automod:warnings.autoDehoistFailed'),
       );
       return false;
     }
@@ -328,7 +333,7 @@ export class AutomodService {
           matched: true,
           deleteMessage: true,
           strikes: settings.antiInviteStrikes,
-          reason: 'Discord招待リンクの投稿',
+          reason: t('automod:reasons.antiInvite'),
           evidence: hits,
         });
     }
@@ -344,7 +349,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: settings.antiReferralStrikes,
-        reason: '紹介リンクの投稿',
+        reason: t('automod:reasons.antiReferral'),
       });
     const everyoneRole = await this.hasEveryoneRoleMention(message);
     if (
@@ -358,7 +363,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: settings.antiEveryoneStrikes,
-        reason: '全員メンションの投稿',
+        reason: t('automod:reasons.antiEveryone'),
       });
     if (
       settings.antiCopypastaStrikes &&
@@ -373,7 +378,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: settings.antiCopypastaStrikes,
-        reason: '定型文の投稿',
+        reason: t('automod:reasons.antiCopypasta'),
       });
     const users = mentionCount(
       (message.userMentions ?? []).map((x) => x.id),
@@ -388,7 +393,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: users - settings.maxUserMentions,
-        reason: 'ユーザーメンション数超過',
+        reason: t('automod:reasons.maxUserMentions'),
         evidence: { count: users },
       });
     const roles = new Set(message.roleMentions ?? []).size;
@@ -398,7 +403,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: roles - settings.maxRoleMentions,
-        reason: 'ロールメンション数超過',
+        reason: t('automod:reasons.maxRoleMentions'),
       });
     const lines = lineCount(message.content);
     if (
@@ -411,7 +416,7 @@ export class AutomodService {
         matched: true,
         deleteMessage: true,
         strikes: Math.ceil((lines - settings.maxLines) / settings.maxLines),
-        reason: '行数超過',
+        reason: t('automod:reasons.maxLines'),
         evidence: { count: lines },
       });
     if (
@@ -447,7 +452,7 @@ export class AutomodService {
               duplicate.ordinal >= settings.duplicateStrikeThreshold
                 ? settings.duplicateStrikes
                 : 0,
-            reason: '重複メッセージの投稿',
+            reason: t('automod:reasons.antiDuplicate'),
             evidence: {
               ordinal: duplicate.ordinal,
               deleteThreshold: settings.duplicateDeleteThreshold ?? 2,
@@ -533,7 +538,9 @@ export class AutomodService {
     } catch (error) {
       if (isUnauthorized(error)) throw error;
       warnings.push(
-        error instanceof Error ? error.message : 'メッセージ削除に失敗しました',
+        error instanceof Error
+          ? error.message
+          : t('automod:warnings.messageDeleteFailed'),
       );
     }
     const pendingCacheKeys: string[] = [];
@@ -589,7 +596,7 @@ export class AutomodService {
         warnings.push(
           error instanceof Error
             ? error.message
-            : 'ストライク付与に失敗しました',
+            : t('automod:warnings.strikeFailed'),
         );
       }
     for (const warning of warnings)
@@ -621,7 +628,7 @@ export class AutomodService {
           this.resourceCopypastas = parseCopypastaResource(copypastas);
         else
           this.resourceWarningMessages.push(
-            'AntiCopypastaリソースを読み込めませんでした',
+            t('automod:warnings.copypastaResourceLoadFailed'),
           );
         if (referrals)
           this.resourceReferralDomains = referrals
@@ -630,7 +637,7 @@ export class AutomodService {
             .filter((line) => line && !line.startsWith('#'));
         else
           this.resourceWarningMessages.push(
-            'AntiReferralリソースを読み込めませんでした',
+            t('automod:warnings.referralResourceLoadFailed'),
           );
       })();
     await this.resourcesLoad;
@@ -660,7 +667,7 @@ export class AutomodService {
     }
     throw last instanceof Error
       ? last
-      : new Error('メッセージ削除に失敗しました');
+      : new Error(t('automod:warnings.messageDeleteFailed'));
   }
   private async deleteBatchWithRetry(
     channelId: string,
@@ -686,7 +693,7 @@ export class AutomodService {
     }
     throw last instanceof Error
       ? last
-      : new Error('一括メッセージ削除に失敗しました');
+      : new Error(t('automod:warnings.batchMessageDeleteFailed'));
   }
   private duplicateEntry(message: AutomodMessage): readonly string[] {
     const key = `${message.guildId}:${message.authorId}`;

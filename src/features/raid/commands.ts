@@ -8,6 +8,7 @@ import type {
   AutomodSettingsDto,
   GuildSettingsDto,
 } from '../../repositories/contracts.js';
+import { t } from '../../i18n/index.js';
 /** Discord timestamp markdown seconds; renders in each viewer's timezone. */
 const epoch = (date: Date): number => Math.floor(date.getTime() / 1000);
 /** The raid state block: ON/OFF, source, start, reason, and the pre-raid
@@ -19,11 +20,18 @@ const renderRaidState = (settings: GuildSettingsDto): string => {
     `RaidMode: ON${settings.raidModeSource ? ` (${settings.raidModeSource})` : ''}`,
   ];
   if (settings.raidStartedAt)
-    lines.push(`発動日時: <t:${String(epoch(settings.raidStartedAt))}:F>`);
-  if (settings.raidModeReason) lines.push(`理由: ${settings.raidModeReason}`);
+    lines.push(
+      t('raid:status.startedAt', {
+        epoch: epoch(settings.raidStartedAt),
+      }),
+    );
+  if (settings.raidModeReason)
+    lines.push(t('raid:status.reason', { reason: settings.raidModeReason }));
   if (settings.verificationLevelBeforeRaid != null)
     lines.push(
-      `発動前の Verification Level: ${String(settings.verificationLevelBeforeRaid)}`,
+      t('raid:status.verificationLevelBeforeRaid', {
+        level: settings.verificationLevelBeforeRaid,
+      }),
     );
   return lines.join('\n');
 };
@@ -33,11 +41,15 @@ const renderRaidTransition = (value: unknown, label: 'ON' | 'OFF'): string => {
   const caseNumber = (value as { case?: { caseNumber?: number } } | undefined)
     ?.case?.caseNumber;
   return caseNumber === undefined
-    ? `RaidModeは既に${label}です。`
-    : `RaidModeを${label}にしました。Case #${String(caseNumber)}`;
+    ? t('raid:status.alreadyState', { label })
+    : t('raid:status.transition', { label, caseNumber });
 };
 const renderAutoRaid = (settings: AutomodSettingsDto): string =>
-  `AutoRaidMode: ${settings.autoRaidEnabled ? 'ON' : 'OFF'} (${String(settings.autoRaidJoinCount)} joins / ${String(settings.autoRaidWindowSeconds)}秒)`;
+  t('raid:status.autoRaid', {
+    state: settings.autoRaidEnabled ? 'ON' : 'OFF',
+    joins: settings.autoRaidJoinCount,
+    seconds: settings.autoRaidWindowSeconds,
+  });
 /** Spec §5.3.12 `/raidmode status` display: the raid state plus the AutoRaid
  * settings (AutoRaid設定). */
 const renderRaidStatus = (status: {
@@ -63,7 +75,7 @@ const data = (
 });
 const reason = {
   name: 'reason',
-  description: '理由',
+  description: t('raid:commands.options.reason'),
   type: 3,
   required: false,
 };
@@ -113,7 +125,7 @@ const permissionReply = async (
   const missing = missingBotPermissions(interaction, permissions);
   if (missing.length === 0) return true;
   await interaction.editReply(
-    `Botに必要な権限がありません: ${missing.join(', ')}`,
+    t('raid:errors.missingBotPermissions', { missing: missing.join(', ') }),
   );
   return false;
 };
@@ -123,10 +135,24 @@ export function raidCommands(
   const definitions = [
     command(
       'raidmode',
-      data('raidmode', 'RaidModeを管理', [
-        { name: 'status', description: '状態', type: 1 },
-        { name: 'on', description: '有効化', type: 1, options: [reason] },
-        { name: 'off', description: '無効化', type: 1, options: [reason] },
+      data('raidmode', t('raid:commands.raidmode.description'), [
+        {
+          name: 'status',
+          description: t('raid:commands.raidmode.status.description'),
+          type: 1,
+        },
+        {
+          name: 'on',
+          description: t('raid:commands.raidmode.on.description'),
+          type: 1,
+          options: [reason],
+        },
+        {
+          name: 'off',
+          description: t('raid:commands.raidmode.off.description'),
+          type: 1,
+          options: [reason],
+        },
       ]),
       async ({ interaction }) => {
         const guildId = gid(interaction.guildId);
@@ -169,18 +195,28 @@ export function raidCommands(
       'autoraidmode',
       data(
         'autoraidmode',
-        'AutoRaidModeを設定',
+        t('raid:commands.autoraidmode.description'),
         [
-          { name: 'on', description: '有効化', type: 1 },
-          { name: 'off', description: '無効化', type: 1 },
+          {
+            name: 'on',
+            description: t('raid:commands.autoraidmode.on.description'),
+            type: 1,
+          },
+          {
+            name: 'off',
+            description: t('raid:commands.autoraidmode.off.description'),
+            type: 1,
+          },
           {
             name: 'set',
-            description: '閾値設定',
+            description: t('raid:commands.autoraidmode.set.description'),
             type: 1,
             options: [
               {
                 name: 'joins',
-                description: '参加数',
+                description: t(
+                  'raid:commands.autoraidmode.set.joins.description',
+                ),
                 type: 4,
                 required: true,
                 min_value: 3,
@@ -188,7 +224,9 @@ export function raidCommands(
               },
               {
                 name: 'seconds',
-                description: '秒数',
+                description: t(
+                  'raid:commands.autoraidmode.set.seconds.description',
+                ),
                 type: 4,
                 required: true,
                 min_value: 2,
@@ -196,7 +234,11 @@ export function raidCommands(
               },
             ],
           },
-          { name: 'status', description: '状態', type: 1 },
+          {
+            name: 'status',
+            description: t('raid:commands.autoraidmode.status.description'),
+            type: 1,
+          },
         ],
         PermissionFlagsBits.ManageGuild.toString(),
       ),
