@@ -124,7 +124,7 @@ describe('scheduler fatal-401 propagation', () => {
     );
   });
 
-  it('routes a code 401 dispatch failure to fatal even though the service retries it', async () => {
+  it('routes a code 401 dispatch failure to fatal without failing/re-queueing the job', async () => {
     const emit = mockEmit();
     const log = stubLogger();
     const repo = repository();
@@ -135,19 +135,36 @@ describe('scheduler fatal-401 propagation', () => {
       log,
     );
     const { fatal } = spies(log);
-    // The runtime wrapper escalates the code-401 the service mis-classifies as
-    // retryable, so the fatal handler still fires exactly once.
+    // The service now classifies a direct/cause-wrapped status OR code 401 as
+    // fatal, so the fatal handler fires exactly once.
     expect(fatal).toHaveBeenCalledOnce();
     expect(emit).toHaveBeenCalledWith('SIGTERM');
-    // The service still re-queues the job as retryable; fatal escalation is
-    // independent of that bookkeeping.
+    // A fatal auth failure must never be recorded as a retryable fail/requeue.
     // eslint-disable-next-line @typescript-eslint/unbound-method
-    expect(repo.fail).toHaveBeenCalledWith(
-      job.id,
-      'worker',
-      'unauthorized',
-      true,
-    );
+    expect(repo.fail).not.toHaveBeenCalled();
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(repo.complete).not.toHaveBeenCalled();
+  });
+
+  it('never fails/re-queues a status 401 (direct or cause-wrapped) fatal failure', async () => {
+    for (const error of [
+      Object.assign(new Error('unauthorized'), { status: 401 }),
+      Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+      Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+    ]) {
+      const emit = mockEmit();
+      const log = stubLogger();
+      const repo = repository();
+      await run(repo, () => Promise.reject(error), log);
+      const { fatal } = spies(log);
+      expect(fatal).toHaveBeenCalledOnce();
+      expect(emit).toHaveBeenCalledWith('SIGTERM');
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(repo.fail).not.toHaveBeenCalled();
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(repo.complete).not.toHaveBeenCalled();
+      emit.mockRestore();
+    }
   });
 
   it('routes a cause-wrapped 401 dispatch failure to fatal', async () => {

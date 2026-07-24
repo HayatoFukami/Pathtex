@@ -198,22 +198,20 @@ export class SchedulerService {
       }
     }
   }
-  private status(error: unknown): number | undefined {
-    const source =
-      error instanceof Error && 'cause' in error
-        ? (error as Error & { cause?: unknown }).cause
-        : error;
-    return typeof source === 'object' && source !== null && 'status' in source
-      ? (source as { status?: number }).status
-      : undefined;
-  }
   public async start(
     dispatcher: JobDispatcher,
     intervalMs = 5_000,
   ): Promise<void> {
     await this.dispatchDue(dispatcher);
+    // Serialize interval polls: skip a tick whose predecessor is still
+    // dispatching so a slow database cannot overlap concurrent claim cycles.
+    let dispatching = false;
     this.timer = setInterval(() => {
-      void this.dispatchDue(dispatcher);
+      if (dispatching) return;
+      dispatching = true;
+      void this.dispatchDue(dispatcher).finally(() => {
+        dispatching = false;
+      });
     }, intervalMs);
   }
   public stop(): void {

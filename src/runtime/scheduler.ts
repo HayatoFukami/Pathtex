@@ -44,11 +44,11 @@ export function createJobScheduler(
     workerId,
     onFatal: fatal,
   });
-  // The scheduler service treats only a direct/cause `status === 401` as fatal
-  // and mis-classifies a `code === 401` failure as retryable. Wrap the
-  // dispatcher so any authentication failure (status or code, direct or
-  // cause-wrapped) reliably reaches the fatal handler before the job is
-  // re-queued, instead of being swallowed as an ordinary retry.
+  // Defense in depth: SchedulerService.classify already treats a direct/cause
+  // `status === 401` or `code === 401` as fatal, but wrap the dispatcher too so
+  // the fatal handler fires as early as possible (before the service's own
+  // classification runs) and stays correct even if that classification ever
+  // regresses. `fatal` is idempotent, so this can never double-report.
   const guardedDispatcher: JobDispatcher = {
     ...dispatcher,
     dispatch: async (job: JobDto): Promise<void> => {
@@ -62,10 +62,26 @@ export function createJobScheduler(
   };
   let timer: NodeJS.Timeout | undefined;
   let stopped = true;
+  // Monotonic lifecycle generation. Every start() and stop() advances it, so an
+  // initial poll that settles after a concurrent stop→restart can recognize
+  // itself as stale and refuse to install its interval. A bare `stopped` flag
+  // cannot distinguish "the stop that raced me" from "a newer start that
+  // re-cleared the flag", which previously let a stale start install a leaked
+  // (or duplicate) interval after stop() then start().
+  let generation = 0;
+  // Serializes polls: a tick that fires while a previous poll is still
+  // dispatching is skipped instead of overlapping. Overlapping polls could
+  // double-claim under a slow database and pile up unbounded in-flight work.
+  let polling = false;
   const activePolls = new Set<Promise<void>>();
   const poll = async (): Promise<void> => {
-    if (stopped) return;
-    await service.dispatchDue(guardedDispatcher);
+    if (stopped || polling) return;
+    polling = true;
+    try {
+      await service.dispatchDue(guardedDispatcher);
+    } finally {
+      polling = false;
+    }
   };
   const schedulePoll = (): Promise<void> => {
     const operation = poll().catch((error: unknown) => {
@@ -104,14 +120,33 @@ export function createJobScheduler(
         );
         return;
       }
+      // Idempotent: a second start while already running is a no-op.
+      if (!stopped) return;
       stopped = false;
+      const gen = ++generation;
       await schedulePoll();
+      // Install the interval only if this start is still the current lifecycle
+      // generation. A concurrent stop() or a newer start() advances
+      // `generation`, so a stale initial poll never installs (or overwrites)
+      // the live timer after a stop→restart race. Reading the generation (not
+      // the `stopped` flag) is what makes this race-safe: stop() always bumps
+      // the generation synchronously, so a stale start is always detectable
+      // even after a newer start has re-cleared `stopped`.
+      if (gen !== generation) return;
       timer = setInterval(tick, intervalMs);
     },
     stop: async () => {
+      // Idempotent: stopping an already-stopped scheduler only (re)drains any
+      // settled in-flight polls and clears no live timer. Advance the
+      // generation synchronously (before any await) so an in-flight initial
+      // start settles as stale and skips installing its interval.
+      generation++;
       stopped = true;
       service.stop();
-      if (timer !== undefined) clearInterval(timer);
+      if (timer !== undefined) {
+        clearInterval(timer);
+        timer = undefined;
+      }
       let timeout: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
