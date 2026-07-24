@@ -171,6 +171,32 @@ describe('gateway Ready gate: installMessageLoggingListeners', () => {
     await flush();
     expect(messageCreate).toHaveBeenCalledOnce();
   });
+
+  it('ignores interaction-response messages (e.g. a public /roleinfo reply) on create and update', async () => {
+    const client = new EventEmitter();
+    const { logging, settings, snapshots, messageCreate } =
+      buildMessageLogging();
+    const messageUpdate = logging.messageUpdate;
+    installMessageLoggingListeners(
+      client as unknown as Client,
+      logging,
+      settings,
+      snapshots,
+      silentLogger(),
+      vi.fn(),
+      () => true,
+    );
+    const interactionReply = {
+      ...mockMessage(),
+      author: { ...mockMessage().author, bot: true },
+      interactionMetadata: { id: 'interaction-1' },
+    };
+    client.emit('messageCreate', interactionReply);
+    client.emit('messageUpdate', interactionReply, interactionReply);
+    await flush();
+    expect(messageCreate).not.toHaveBeenCalled();
+    expect(messageUpdate).not.toHaveBeenCalled();
+  });
 });
 
 describe('gateway Ready gate: installGatewayListeners', () => {

@@ -1472,6 +1472,13 @@ function messageView(message: Message | PartialMessage): MessageView | null {
   // so they cannot serve as a sufficient fallback; nullable partial-only fields
   // (content, system) are required or normalized rather than passed as null.
   if (!message.guildId || !author || typeof content !== 'string') return null;
+  // Interaction responses (slash command replies/deferrals, including their
+  // own "thinking" placeholder and its subsequent edit to the final content)
+  // are not organic channel messages: excluding them here, rather than only
+  // suppressing Pathtex's own posts inside configured log channels, stops
+  // every public-deferred command (e.g. /roleinfo, /userinfo) from being
+  // logged as a spurious message create/edit in the guild's message log.
+  if (message.interactionMetadata) return null;
   return {
     guildId: message.guildId,
     channelId: message.channelId,
