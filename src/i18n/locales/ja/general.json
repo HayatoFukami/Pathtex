@@ -1,0 +1,90 @@
+{
+  "command": {
+    "about": "Botの情報を表示します",
+    "invite": "Botの招待リンクを表示します",
+    "ping": "応答を確認します",
+    "roleinfo": "ロールの情報を表示します",
+    "roleinfoRoleOption": "ロール",
+    "serverinfo": "サーバーの情報を表示します",
+    "userinfo": "ユーザーの情報を表示します",
+    "userinfoUserOption": "ユーザー"
+  },
+  "common": {
+    "none": "なし",
+    "unavailable": "取得不能",
+    "unavailableCached": "取得不能（キャッシュ外）",
+    "approximateSuffix": "（概算）"
+  },
+  "roleComparison": {
+    "higher": "Botより上位",
+    "equal": "同順位",
+    "lower": "Botより下位"
+  },
+  "invite": {
+    "title": "Botを招待",
+    "description": "Pathtexをサーバーへ招待します。",
+    "linkLabel": "招待リンク"
+  },
+  "about": {
+    "statisticsFailed": "取得失敗",
+    "statistics": "ケース {{cases}} / ストライク {{strikes}}",
+    "fields": {
+      "version": "バージョン",
+      "uptime": "稼働時間",
+      "guildCount": "ギルド数",
+      "cachedUserCount": "キャッシュユーザー数",
+      "statistics": "統計"
+    }
+  },
+  "duration": "{{days}}日 {{hours}}時間 {{minutes}}分 {{seconds}}秒",
+  "ping": {
+    "fields": {
+      "interactionLatency": "Interaction応答遅延"
+    },
+    "dbFailed": "失敗"
+  },
+  "pingCommand": {
+    "description": "Botとデータベースの応答を確認します",
+    "pong": "ポン！",
+    "interactionLabel": "インタラクション",
+    "gatewayLabel": "ゲートウェイ",
+    "databaseLabel": "データベース",
+    "dbHealthy": "正常 ({{ms}}ms)",
+    "dbUnavailable": "利用できません"
+  },
+  "roleinfo": {
+    "fields": {
+      "name": "名前",
+      "color": "色",
+      "createdAt": "作成日時",
+      "position": "順位",
+      "memberCount": "メンバー数",
+      "icon": "アイコン",
+      "botComparison": "Bot最高ロール比較",
+      "permission": "権限{{index}}"
+    }
+  },
+  "serverinfo": {
+    "fields": {
+      "name": "名前",
+      "icon": "アイコン",
+      "createdAt": "作成日時",
+      "memberCount": "メンバー",
+      "userCount": "ユーザー",
+      "textChannels": "テキスト",
+      "voiceChannels": "ボイス",
+      "categories": "カテゴリ",
+      "threads": "スレッド",
+      "roles": "ロール"
+    },
+    "approximateFooter": "一部は概算値"
+  },
+  "userinfo": {
+    "fields": {
+      "createdAt": "作成日時",
+      "joinedAt": "参加日時",
+      "highestRole": "最高ロール",
+      "roles": "ロール"
+    }
+  }
+}

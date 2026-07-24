@@ -1,0 +1,118 @@
+{
+  "action": {
+    "KICK": "キック",
+    "BAN": "BAN",
+    "SOFTBAN": "ソフトBAN",
+    "SILENTBAN": "サイレントBAN",
+    "UNBAN": "BAN解除",
+    "MUTE": "ミュート",
+    "UNMUTE": "ミュート解除",
+    "STRIKE": "ストライク",
+    "PARDON": "ストライク取消",
+    "RAIDMODE_ON": "レイドモード有効",
+    "RAIDMODE_OFF": "レイドモード解除",
+    "VOICEKICK": "ボイスキック",
+    "SLOWMODE": "スローモード",
+    "AUTO_PUNISHMENT": "自動制裁"
+  },
+  "source": {
+    "COMMAND": "コマンド",
+    "AUTOMOD": "AutoMod",
+    "PUNISHMENT": "自動制裁",
+    "RAIDMODE": "レイドモード",
+    "EXTERNAL": "外部",
+    "SCHEDULED": "予約実行"
+  },
+  "status": {
+    "PENDING": "保留",
+    "COMPLETED": "成功",
+    "FAILED": "失敗",
+    "PARTIAL": "一部失敗"
+  },
+  "dmStatus": {
+    "true": "成功",
+    "false": "失敗"
+  },
+  "duration": {
+    "seconds": "{{seconds}}秒",
+    "minutes": "{{minutes}}分",
+    "hours": "{{hours}}時間",
+    "hoursMinutes": "{{hours}}時間{{minutes}}分",
+    "days": "{{days}}日",
+    "permanent": "永続"
+  },
+  "defaultReason": "理由未指定",
+  "modlog": {
+    "fieldTarget": "対象",
+    "fieldModerator": "実行者",
+    "fieldReason": "理由",
+    "fieldDuration": "期間",
+    "fieldSource": "発生元",
+    "fieldStatus": "状態",
+    "fieldDm": "DM",
+    "fieldDmNotApplicable": "対象外",
+    "fieldError": "エラー",
+    "caseTitle": "ケース #{{caseNumber}} — {{actionLabel}}"
+  },
+  "embedFields": {
+    "author": "投稿者",
+    "channel": "チャンネル",
+    "before": "変更前",
+    "after": "変更後",
+    "attachments": "添付",
+    "message": "メッセージ",
+    "messageId": "メッセージID",
+    "deleteExecutor": "削除実行者",
+    "body": "本文",
+    "deleteCount": "削除件数",
+    "cacheCaptured": "キャッシュ取得",
+    "authorBreakdown": "投稿者別",
+    "preview": "プレビュー",
+    "user": "ユーザー",
+    "moveFrom": "移動元",
+    "moveTo": "移動先",
+    "warning": "警告",
+    "leaveRole": "退出時ロール",
+    "leaveReason": "退出理由",
+    "role": "ロール",
+    "executor": "実行者"
+  },
+  "common": {
+    "empty": "(空)",
+    "none": "なし",
+    "unknown": "不明",
+    "unavailableUnknown": "取得できないため不明",
+    "unavailableCacheless": "キャッシュに存在しないため取得できません",
+    "countUnit": "{{count}}件",
+    "othersCount": "他{{count}}名"
+  },
+  "messageEdit": {
+    "title": "メッセージ編集",
+    "attachmentAdded": "追加: {{value}}",
+    "attachmentRemoved": "削除: {{value}}"
+  },
+  "messageDelete": {
+    "title": "メッセージ削除"
+  },
+  "bulkDelete": {
+    "title": "メッセージ一括削除"
+  },
+  "voice": {
+    "join": "ボイス参加",
+    "leave": "ボイス退出",
+    "move": "ボイス移動"
+  },
+  "roleChange": {
+    "add": "追加",
+    "remove": "削除",
+    "grantTitle": "ロール付与",
+    "revokeTitle": "ロール除去"
+  },
+  "serverEvents": {
+    "usernameChange": "ユーザー名変更",
+    "globalNameChange": "グローバル表示名変更"
+  },
+  "delivery": {
+    "warningAfterFailure": "操作は成功しましたがログ送信に失敗しました"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "common": {
+    "none": "なし",
+    "unknown": "不明"
+  },
+  "completedSummary": "完了: 成功 {{success}} / 失敗 {{failed}}\n{{lines}}",
+  "announce": {
+    "command": {
+      "description": "告知を送信",
+      "channelOption": "チャンネル",
+      "roleOption": "ロール",
+      "messageOption": "本文"
+    },
+    "sent": "告知を送信しました",
+    "roleRestoreFailedSuffix": "（ロール復元に失敗）"
+  },
+  "audit": {
+    "nextLabel": "次へ",
+    "previousLabel": "前へ",
+    "command": {
+      "description": "監査ログを表示",
+      "scopeOption": "範囲",
+      "scopeAll": "すべて",
+      "scopeFrom": "実行者",
+      "scopeAction": "操作",
+      "userOption": "実行者",
+      "actionOption": "操作",
+      "limitOption": "件数"
+    },
+    "embedTitle": "監査ログ",
+    "executorLine": "実行者: {{name}} ({{id}})",
+    "targetLine": "対象: {{type}} / {{target}}",
+    "reasonLine": "理由: {{reason}}",
+    "changesLine": "変更: {{changes}}",
+    "compactHeader": "{{action}} / {{userName}} ({{userId}})",
+    "empty": "監査ログはありません",
+    "footer": "合計 {{total}}件",
+    "actorOnly": "この操作は実行者本人のみ利用できます。"
+  },
+  "dehoist": {
+    "command": {
+      "description": "名前の先頭記号を除去",
+      "symbolOption": "記号"
+    },
+    "outcomeLine": "{{userId}}: {{status}}",
+    "changed": "変更済み",
+    "failed": "失敗"
+  },
+  "inviteprune": {
+    "command": {
+      "description": "招待を整理",
+      "maxUsesOption": "最大使用回数"
+    },
+    "outcomeLine": "{{code}} ({{uses}}) {{creator}}: {{status}}",
+    "creatorUnknown": "作成者不明",
+    "deleted": "削除済み",
+    "deleteFailed": "削除失敗"
+  },
+  "lookup": {
+    "command": {
+      "description": "ユーザーまたは招待を検索",
+      "queryOption": "検索語"
+    },
+    "userTitle": "ユーザー情報",
+    "inviteTitle": "招待情報",
+    "guildTitle": "ギルド情報",
+    "yes": "はい",
+    "no": "いいえ",
+    "noDescription": "説明なし",
+    "userDescription": "ユーザー名: {{username}}\nGlobal Name: {{globalName}}\nID: {{id}}\nBot: {{bot}}\n作成日時: {{createdAt}}\nAvatar: {{avatar}}",
+    "inviteDescription": "ギルド: {{guildName}} ({{guildId}})\n招待コード: {{code}}\nチャンネル: {{channelName}}\nメンバー数: {{memberCount}} / オンライン: {{onlineCount}}\nVerification: {{verification}}\nBoost: {{boost}}\nFeatures: {{features}}\n{{description}}",
+    "guildDescription": "ギルド: {{guildName}} ({{guildId}})\n{{description}}\nメンバー数: {{memberCount}} / オンライン: {{onlineCount}}"
+  },
+  "errors": {
+    "scopeMismatch": "scopeと条件が一致しません",
+    "messageLength": "メッセージは1～2000文字です",
+    "announcementAdapterMissing": "Announcement adapterがありません",
+    "channelRoleGuildMismatch": "対象チャンネルとロールが同じギルドではありません",
+    "missingChannelPermission": "対象チャンネルに{{permission}}権限がありません",
+    "missingManageRoles": "対象チャンネルでロールの管理権限がありません",
+    "roleHierarchy": "ロール順位が不足しています",
+    "auditAdapterMissing": "Audit adapterがありません",
+    "queryLength": "検索語は2～200文字です",
+    "inviteNotFound": "招待が見つかりません",
+    "guildIdOnlyUnavailable": "このギルドはIDだけでは公開情報を取得できません。有効な招待コードを指定してください。",
+    "userOrInviteNotFound": "ユーザーまたは招待が見つかりません"
+  }
+}

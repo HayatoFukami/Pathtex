@@ -1,0 +1,45 @@
+{
+  "discord": {
+    "botMemberInfoUnavailable": "Botのメンバー情報を取得できません",
+    "missingPermissions": "Botに必要な権限がありません: {{missing}}",
+    "defaultGuildName": "このサーバー"
+  },
+  "common": {
+    "unknown": "不明"
+  },
+  "identity": {
+    "unknownUser": "不明なユーザー"
+  },
+  "eventLabels": {
+    "memberRemove": "メンバー退出",
+    "banAdd": "BAN追加",
+    "banRemove": "BAN解除",
+    "memberJoin": "メンバー参加",
+    "memberUpdate": "メンバー更新"
+  },
+  "embedFields": {
+    "user": "ユーザー",
+    "judgment": "判定",
+    "before": "変更前",
+    "after": "変更後"
+  },
+  "judgmentStatus": {
+    "internalOperation": "内部操作（Bot起因）",
+    "auditLogMatched": "Audit Log照合済み",
+    "auditLogUnmatched": "Audit Log照合不可"
+  },
+  "reason": {
+    "externalOperation": "外部操作"
+  },
+  "deploy": {
+    "devGuildJoinError": "DEV_GUILD_IDにBotアプリケーションが参加できません。DEV_GUILD_IDを確認し、Botを対象サーバーへ招待してください。"
+  },
+  "intake": {
+    "processingError": "処理中にエラーが発生しました。\n参照ID: {{correlationId}}",
+    "componentExpired": "このページは期限切れです。",
+    "componentUnavailable": "この操作は利用できません。",
+    "guildOnly": "このコマンドはギルド内でのみ使用できます。\n参照ID: {{correlationId}}",
+    "commandUnauthorized": "このコマンドを実行する権限がありません。\n参照ID: {{correlationId}}",
+    "missingBotPermissions": "Botに必要な権限がありません: {{missing}}\n参照ID: {{correlationId}}"
+  }
+}

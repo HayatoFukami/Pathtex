@@ -1,0 +1,47 @@
+{
+  "commands": {
+    "strike": { "description": "ストライクを付与" },
+    "pardon": { "description": "ストライクを取り消し" },
+    "check": { "description": "ストライク状況を確認" },
+    "punishment": {
+      "description": "自動制裁設定",
+      "set": { "description": "設定" },
+      "remove": { "description": "削除" },
+      "list": { "description": "一覧" }
+    },
+    "options": {
+      "target": "対象ユーザー",
+      "checkUser": "確認するユーザー",
+      "additionalTargets": "追加対象（最大19件）",
+      "amount": "ストライク数",
+      "reason": "理由",
+      "threshold": "しきい値",
+      "duration": "期間（例: 7d、2h）"
+    }
+  },
+  "reply": {
+    "processingFailed": "処理に失敗しました。",
+    "delta": "ストライク: {{before}} → {{after}}",
+    "count": "ストライク: {{count}}",
+    "yes": "有",
+    "no": "無",
+    "expirySuffix": " (解除: {{date}})",
+    "banFetchFailed": "取得失敗",
+    "next": "次: {{value}}",
+    "none": "なし",
+    "history": "履歴:\n{{entries}}",
+    "punishmentUpdated": "Punishment設定を更新しました。",
+    "punishmentMeta": " / 設定者: {{createdBy}} / 更新: {{updatedAt}}",
+    "punishmentEmpty": "設定なし",
+    "targetRange": "対象を1～{{max}}件指定してください。"
+  },
+  "service": {
+    "autoPunishmentSuffix": "\n自動制裁: {{action}}{{duration}}",
+    "durationSeconds": " ({{seconds}}秒)",
+    "dmMessage": "{{guildName}} で {{action}}\n理由: {{reason}}\n現在の合計: {{afterCount}}{{caseSuffix}}",
+    "dmPardoned": "{{amount}} ストライクが取り消されました。",
+    "dmStriked": "{{amount}} ストライクが付与されました。",
+    "dmCaseSuffix": "\nケース: #{{caseNumber}}",
+    "punishmentReachedReason": "{{count}}ストライクに到達: {{reason}}"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "options": {
+    "target": "主対象",
+    "additionalTargets": "追加対象Snowflake",
+    "reason": "理由",
+    "duration": "期間",
+    "deleteMessages": "削除日数",
+    "unbanUserIds": "1～20件のSnowflake",
+    "cleanLimit": "検索件数",
+    "cleanBots": "Bot投稿",
+    "cleanEmbeds": "Embed付き",
+    "cleanLinks": "リンク付き",
+    "cleanImages": "画像・動画付き",
+    "cleanUserId": "投稿者Snowflake",
+    "cleanContains": "本文部分一致",
+    "cleanRegex": "RE2正規表現",
+    "reasonNew": "新しい理由",
+    "reasonCaseNumber": "ケース番号",
+    "slowmodeSetSubcommand": "slowmodeを設定",
+    "slowmodeInterval": "秒",
+    "slowmodeSetDuration": "復元期間",
+    "slowmodeOffSubcommand": "slowmodeを解除",
+    "slowmodeStatusSubcommand": "slowmode状態"
+  },
+  "reply": {
+    "result": "処理結果: {{action}}",
+    "resultWithSummary": "処理結果: {{action}}\n成功: {{success}} / 失敗: {{failed}}{{details}}",
+    "outcomeSuccess": "成功",
+    "outcomeFailed": "失敗: {{code}}",
+    "outcomeFooter": "成功 {{success}} / 失敗 {{failed}} / 合計 {{total}}",
+    "reasonUpdated": "ケース #{{caseNumber}} の理由を更新しました。",
+    "invalidRegex": "正規表現が不正です。",
+    "cleanResult": "検索: {{searched}}件 / 一致: {{matched}}件 / 削除成功: {{deleted}}件 / 失敗: {{failed}}件",
+    "slowmodeStatusHint": "Slowmode status は現在のチャンネルで確認してください。",
+    "intervalRequired": "interval は必須です。",
+    "slowmodeResult": "処理結果: slowmode ({{mode}})"
+  },
+  "dm": {
+    "actionLabel": {
+      "kick": "キック",
+      "mute": "ミュート",
+      "other": "制裁"
+    },
+    "body": "{{guildId}} から{{actionLabel}}されました。\n理由: {{reason}}\nケース: #{{caseNumber}}"
+  },
+  "defaultReason": "理由未指定"
+}

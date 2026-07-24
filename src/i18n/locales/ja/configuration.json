@@ -1,0 +1,104 @@
+{
+  "common": {
+    "unknown": "不明",
+    "notSet": "未設定",
+    "none": "なし",
+    "genericUpdateFailure": "設定を更新できませんでした。",
+    "modRoleUpdated": "MODロールを更新しました。"
+  },
+  "settingsText": {
+    "log": "ログ: message={{message}} mod={{mod}} server={{server}} voice={{voice}}",
+    "role": "ロール: MOD={{mod}} Muted={{muted}}",
+    "timezone": "Timezone: {{timezone}}",
+    "automod": "AutoMod: {{status}}",
+    "automodConfigured": "設定済み",
+    "punishment": "Punishment: {{count}}件",
+    "ignore": "Ignore: role {{roles}} / channel {{channels}}",
+    "automaticIgnoreRoles": "自動Ignoreロール: {{value}}",
+    "botWarnings": "Bot権限警告: {{value}}",
+    "resourceWarnings": "AutoMod resource warnings: {{value}}"
+  },
+  "log": {
+    "channelOption": "ログチャンネル",
+    "setDescription": "ログチャンネルを設定",
+    "offDescription": "ログを無効化",
+    "commandDescription": "{{name}}設定",
+    "updated": "ログ設定を更新しました。"
+  },
+  "setup": {
+    "description": "Mutedロールと権限上書きを準備",
+    "success": "Mutedロールを設定しました（成功 {{succeeded}} / 失敗 {{failed}}）"
+  },
+  "timezone": {
+    "description": "表示タイムゾーン",
+    "zoneOption": "IANAタイムゾーン",
+    "result": "Timezone: {{timezone}}\n現在時刻: {{time}}"
+  },
+  "modrole": {
+    "description": "MODロール",
+    "setDescription": "ロールを設定",
+    "roleOption": "ロール",
+    "offDescription": "解除"
+  },
+  "settings": {
+    "description": "サーバー設定を表示"
+  },
+  "service": {
+    "automodInitFailed": "AutoMod設定の初期化に失敗しました",
+    "missingBotPermissions": "Botに次の権限がありません: {{missing}}"
+  },
+  "dashboard": {
+    "logLabels": {
+      "message": "メッセージ",
+      "moderation": "モデレーション",
+      "server": "サーバー",
+      "voice": "ボイス"
+    },
+    "channelSelectorPlaceholder": "{{label}}ログのチャンネルを選択",
+    "omittedSuffix": "…他{{count}}件",
+    "boundedSection": "{{heading}}（{{count}}件）\n{{entries}}",
+    "logsHeading": "### ログの状態\nメッセージ：{{message}}\nモデレーション：{{moderation}}\nサーバー：{{server}}\nボイス：{{voice}}",
+    "basicHeading": "### 基本設定\nMODロール：{{modRole}}\nMutedロール：{{mutedRole}}\nタイムゾーン：{{timezone}}",
+    "automationHeading": "### 自動化と制裁\nRaidMode：{{raidMode}}\nAutoRaid：{{autoRaid}}\nAutoMod：{{automod}}\n{{punishmentSection}}",
+    "ignoreHeading": "### Ignore\n{{explicit}}\n{{automatic}}",
+    "explicitHeading": "明示",
+    "automaticHeading": "自動",
+    "warningsHeading": "⚠️ ### 確認が必要\n{{entries}}",
+    "advancedNote": "高度なAutoMod・Punishment・Ignore設定は、既存のスラッシュコマンドから変更できます。",
+    "notInitialized": "未初期化",
+    "duplicateOn": "ON（削除 {{deleteThreshold}}・警告 {{strikeThreshold}}・加算 {{strikes}}）",
+    "automodStatus": "Invite {{invite}} / Referral {{referral}} / Everyone {{everyone}} / Copypasta {{copypasta}}\nMention {{userMentions}} users・{{roleMentions}} roles / Lines {{lines}}\nDuplicate {{duplicateStatus}} / Dehoist {{dehoist}}",
+    "autoRaidEnabled": "有効（{{count}}人 / {{window}}秒）",
+    "disabled": "無効",
+    "raidEnabled": "有効（{{source}}）",
+    "raidManual": "手動",
+    "punishmentEntry": "{{threshold}}→{{action}}{{duration}}",
+    "punishmentDuration": "（{{seconds}}秒）",
+    "homeHeading": "## サーバー設定",
+    "logsPageHeading": "## ログチャンネル",
+    "accessPageHeading": "## 権限と表示",
+    "navLogs": "ログを設定",
+    "navAccess": "ロール・時刻",
+    "refresh": "再読み込み",
+    "initialSetup": "初期設定",
+    "navHome": "設定概要へ",
+    "modRoleSelectPlaceholder": "MODロールを選択",
+    "modRoleClear": "MODロールを解除",
+    "timezoneChange": "タイムゾーンを変更",
+    "errorHeading": "## 設定を表示できません",
+    "errorBody": "設定情報を読み込めませんでした。設定画面を開き直してください。",
+    "ephemeralError": "設定の更新に失敗しました。{{message}}\nもう一度お試しください。",
+    "safeOperationFailure": "設定を更新できませんでした。入力と権限を確認して、もう一度お試しください。",
+    "expiredOrForeign": "この設定画面は期限切れ、または別の利用者のものです。",
+    "unauthorized": "現在の権限では設定を変更できません。",
+    "missingBotPermissions": "Botに必要な権限がありません：{{missing}}",
+    "listSeparator": "、",
+    "timezoneModalLabel": "IANAタイムゾーン（例：Asia/Tokyo）",
+    "setupCompleted": "初期設定を完了しました。成功 {{succeeded}} / 失敗 {{failed}}",
+    "channelUpdated": "{{label}}ログのチャンネルを更新しました。",
+    "roleNotEligible": "このロールはMODロールに設定できません。",
+    "modRoleCleared": "MODロールを解除しました。",
+    "timezoneChanged": "タイムゾーンを{{timezone}}に変更しました。",
+    "genericError": "設定の更新中に問題が発生しました。設定画面を開き直してください。"
+  }
+}

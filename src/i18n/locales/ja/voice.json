@@ -1,0 +1,56 @@
+{
+  "commands": {
+    "voicekick": {
+      "description": "ボイスから切断",
+      "options": {
+        "target": "対象",
+        "additionalTargets": "追加対象ID"
+      }
+    },
+    "voicemove": {
+      "description": "VoiceMoveセッション",
+      "start": {
+        "description": "開始",
+        "options": { "channel": "接続先" }
+      },
+      "stop": { "description": "停止" },
+      "status": { "description": "状態" }
+    }
+  },
+  "status": {
+    "none": "VoiceMoveセッションはありません。",
+    "active": "VoiceMoveセッション中",
+    "controller": "開始者: <@{{userId}}>",
+    "currentChannel": "Bot現在VC: <#{{channelId}}>",
+    "startedAt": "開始日時: <t:{{epoch}}:F>",
+    "expiresAt": "期限: <t:{{epoch}}:R>"
+  },
+  "start": {
+    "confirmation": "VoiceMoveを開始しました。Botが <#{{channelId}}> に接続しました。\n期限: <t:{{epoch}}:R>"
+  },
+  "stop": {
+    "confirmation": "VoiceMoveセッションを終了しました。"
+  },
+  "kick": {
+    "summary": "完了: 成功 {{success}} / 失敗 {{failed}}\n{{outcomes}}",
+    "outcomeSuccess": "成功{{caseSuffix}}",
+    "caseSuffix": " Case #{{caseNumber}}",
+    "outcomeFailure": "失敗"
+  },
+  "errors": {
+    "atLeastOneTarget": "対象を1件以上指定してください",
+    "maxTargets": "対象は最大{{max}}件です",
+    "invalidAdditionalTargets": "追加対象が不正です",
+    "invalidTargetId": "対象IDが不正です",
+    "noChannelSpecified": "接続先VCを指定するか、実行者がVCに接続してください",
+    "invalidChannel": "接続先は同じギルドのVoiceチャンネルでなければなりません",
+    "cannotViewChannel": "接続先VCを閲覧できません",
+    "missingMoveConnectPermission": "接続先VCでConnect/Move Members権限がありません",
+    "sessionAlreadyActive": "既存のVoiceMoveセッションを先に停止してください",
+    "noSession": "VoiceMoveセッションはありません",
+    "notAuthorized": "セッション開始者またはModeratorのみ"
+  },
+  "dm": {
+    "completion": "VoiceMove完了: 成功 {{success}} / 失敗 {{failed}}"
+  }
+}

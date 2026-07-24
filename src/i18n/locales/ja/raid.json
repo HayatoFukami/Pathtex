@@ -1,0 +1,43 @@
+{
+  "commands": {
+    "raidmode": {
+      "description": "RaidModeを管理",
+      "status": { "description": "状態" },
+      "on": { "description": "有効化" },
+      "off": { "description": "無効化" }
+    },
+    "autoraidmode": {
+      "description": "AutoRaidModeを設定",
+      "on": { "description": "有効化" },
+      "off": { "description": "無効化" },
+      "set": {
+        "description": "閾値設定",
+        "joins": { "description": "参加数" },
+        "seconds": { "description": "秒数" }
+      },
+      "status": { "description": "状態" }
+    },
+    "options": {
+      "reason": "理由"
+    }
+  },
+  "status": {
+    "startedAt": "発動日時: <t:{{epoch}}:F>",
+    "reason": "理由: {{reason}}",
+    "verificationLevelBeforeRaid": "発動前の Verification Level: {{level}}",
+    "alreadyState": "RaidModeは既に{{label}}です。",
+    "transition": "RaidModeを{{label}}にしました。Case #{{caseNumber}}",
+    "autoRaid": "AutoRaidMode: {{state}} ({{joins}} joins / {{seconds}}秒)"
+  },
+  "errors": {
+    "missingBotPermissions": "Botに必要な権限がありません: {{missing}}",
+    "joinsRange": "joinsは3～100です",
+    "secondsRange": "secondsは2～300です"
+  },
+  "service": {
+    "reasonNotSpecified": "理由未指定",
+    "lockdownDm": "{{guildName}} は現在ロックダウン中です。\n安全確保のため新規参加を一時的に停止しています。\n時間を置いて再度参加してください。",
+    "lockdownKickReason": "RaidModeによるロックダウン",
+    "autoDisableReason": "AutoRaid自動解除"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "commands": {
+    "fixedDescription": "{{name}}設定",
+    "labels": {
+      "enable": "有効化",
+      "disable": "無効化",
+      "configure": "設定",
+      "strikeCount": "ストライク数",
+      "maximum": "最大数",
+      "maxLines": "最大行数",
+      "strikeThresholdCount": "ストライク開始件数",
+      "deleteThresholdCount": "削除開始件数",
+      "leadingCharacter": "先頭文字",
+      "defaultValue": "既定値",
+      "role": "ロール",
+      "channel": "チャンネル",
+      "list": "一覧"
+    },
+    "maxmentions": {
+      "description": "メンション数設定",
+      "user": "ユーザーメンション",
+      "role": "ロールメンション"
+    },
+    "maxlines": { "description": "行数設定" },
+    "antiduplicate": { "description": "重複設定" },
+    "autodehoist": { "description": "名前の自動修正" },
+    "ignore": {
+      "description": "AutoMod無視設定",
+      "channel": "チャンネルまたはカテゴリ"
+    },
+    "unignore": { "description": "AutoMod無視解除" }
+  },
+  "ignoreResult": {
+    "autoContinues": "明示Ignoreを解除しました。自動Ignoreは継続します。",
+    "list": "明示Ignoreロール: {{roles}}\n明示Ignoreチャンネル: {{channels}}\nBot階層による自動Ignore: {{hierarchyRoles}}\n強権限による自動Ignore: {{strongPermissionRoles}}\nリソース警告: {{resourceWarnings}}",
+    "none": "なし"
+  },
+  "result": {
+    "updateFailed": "設定に失敗しました: {{message}}",
+    "updatedWithWarning": "設定を更新しました。警告: {{warning}}",
+    "updated": "設定を更新しました。"
+  },
+  "errors": {
+    "characterLength": "文字は1 Unicode code pointで指定してください",
+    "punishmentRequired": "Punishment設定が必要です",
+    "ignoreUnavailable": "Ignore設定が利用できません",
+    "autoIgnoreCannotBeRemoved": "自動Ignoreは解除できません"
+  },
+  "warnings": {
+    "dehoistCharacterConflict": "空白または英数字を設定すると名前の先頭記号として機能しません",
+    "autoDehoistFailed": "AutoDehoistに失敗しました",
+    "copypastaResourceLoadFailed": "AntiCopypastaリソースを読み込めませんでした",
+    "referralResourceLoadFailed": "AntiReferralリソースを読み込めませんでした",
+    "messageDeleteFailed": "メッセージ削除に失敗しました",
+    "batchMessageDeleteFailed": "一括メッセージ削除に失敗しました",
+    "strikeFailed": "ストライク付与に失敗しました"
+  },
+  "reasons": {
+    "antiInvite": "Discord招待リンクの投稿",
+    "antiReferral": "紹介リンクの投稿",
+    "antiEveryone": "全員メンションの投稿",
+    "antiCopypasta": "定型文の投稿",
+    "maxUserMentions": "ユーザーメンション数超過",
+    "maxRoleMentions": "ロールメンション数超過",
+    "maxLines": "行数超過",
+    "antiDuplicate": "重複メッセージの投稿"
+  }
+}
