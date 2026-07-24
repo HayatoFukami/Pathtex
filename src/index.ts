@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { t } from './i18n/index.js';
 import { PrismaClient } from '@prisma/client';
 import {
   ChannelType,
@@ -269,7 +270,7 @@ export function createBootstrapDependencies(
       getBotWarnings: async (guildId) => {
         const guild = await client?.client.guilds.fetch(guildId);
         const member = guild?.members.me;
-        if (!member) return ['Botのメンバー情報を取得できません'];
+        if (!member) return [t('system:discord.botMemberInfoUnavailable')];
         const required = [
           'ViewChannel',
           'SendMessages',
@@ -280,7 +281,11 @@ export function createBootstrapDependencies(
         ] as const;
         const missing = member.permissions.missing(required);
         return missing.length > 0
-          ? [`Botに必要な権限がありません: ${missing.join(', ')}`]
+          ? [
+              t('system:discord.missingPermissions', {
+                missing: missing.join(', '),
+              }),
+            ]
           : [];
       },
     },
@@ -600,7 +605,8 @@ export function createBootstrapDependencies(
       getBotUserId: (guildId) => moderationDiscord.getBotUserId(guildId),
       sendDm: (userId, content) => moderationDiscord.sendDm(userId, content),
       getGuildName: async (guildId) =>
-        (await client?.client.guilds.fetch(guildId))?.name ?? 'このサーバー',
+        (await client?.client.guilds.fetch(guildId))?.name ??
+        t('system:discord.defaultGuildName'),
     },
     modlog: moderationLog,
     targetIdentityResolver,
@@ -730,7 +736,7 @@ export function createBootstrapDependencies(
             action: input.action,
             identity: input.identity ?? {
               userId: input.targetUserId,
-              displayName: '不明なユーザー',
+              displayName: t('system:identity.unknownUser'),
             },
             moderatorUserId: input.moderatorUserId,
             reason: null,
@@ -919,7 +925,7 @@ export function createBootstrapDependencies(
             `${guildId}:${messageId}`,
           );
           return value && 'reason' in value
-            ? { executor: '不明', reason: value.reason }
+            ? { executor: t('system:common.unknown'), reason: value.reason }
             : null;
         },
         consume: (guildId, messageId) => {
@@ -928,7 +934,7 @@ export function createBootstrapDependencies(
             `${guildId}:${messageId}`,
           );
           return value && 'reason' in value
-            ? { executor: '不明', reason: value.reason }
+            ? { executor: t('system:common.unknown'), reason: value.reason }
             : null;
         },
       },
@@ -1143,9 +1149,9 @@ export function createBootstrapDependencies(
     },
     serverLog: async (event: ExternalEvent, result: ExternalEventResult) => {
       const labels: Record<string, string> = {
-        MEMBER_REMOVE: 'メンバー退出',
-        BAN_ADD: 'BAN追加',
-        BAN_REMOVE: 'BAN解除',
+        MEMBER_REMOVE: t('system:eventLabels.memberRemove'),
+        BAN_ADD: t('system:eventLabels.banAdd'),
+        BAN_REMOVE: t('system:eventLabels.banRemove'),
       };
       if (event.kind === 'MUTED_ROLE_UPDATE') return;
       const snapshot = event.snapshot;
@@ -1154,7 +1160,7 @@ export function createBootstrapDependencies(
         snapshot?.nickname ||
         snapshot?.globalName ||
         snapshot?.username ||
-        '不明なユーザー';
+        t('system:identity.unknownUser');
       const label = labels[event.kind];
       if (!label) return;
       await logging.server(
@@ -1162,19 +1168,19 @@ export function createBootstrapDependencies(
         label,
         [
           {
-            name: 'ユーザー',
+            name: t('system:embedFields.user'),
             value: `${displayName} (${event.targetUserId})`,
           },
           ...(event.kind === 'MEMBER_REMOVE'
             ? []
             : [
                 {
-                  name: '判定',
+                  name: t('system:embedFields.judgment'),
                   value: result.correlated
-                    ? '内部操作（Bot起因）'
+                    ? t('system:judgmentStatus.internalOperation')
                     : result.auditEntryId
-                      ? 'Audit Log照合済み'
-                      : 'Audit Log照合不可',
+                      ? t('system:judgmentStatus.auditLogMatched')
+                      : t('system:judgmentStatus.auditLogUnmatched'),
                 },
               ]),
         ],
@@ -1216,7 +1222,7 @@ export function createBootstrapDependencies(
     resolveExecutorDisplay: async (guildId, userId) => {
       const identity = await targetIdentityResolver.resolve(guildId, userId);
       // Fallback display must be bare userId, not TargetIdentity's fallback string.
-      return identity.displayName === '不明なユーザー'
+      return identity.displayName === t('system:identity.unknownUser')
         ? null
         : identity.displayName;
     },
@@ -1569,8 +1575,9 @@ export function matchMessageDeleteAudit(
   const match = matches.length === 1 ? matches[0] : undefined;
   return match
     ? {
-        executor: match.executor?.tag ?? match.executorId ?? '不明',
-        reason: match.reason ?? '不明',
+        executor:
+          match.executor?.tag ?? match.executorId ?? t('system:common.unknown'),
+        reason: match.reason ?? t('system:common.unknown'),
       }
     : null;
 }
@@ -1855,8 +1862,13 @@ export function installGatewayListeners(
       });
       await logging.server(
         member.guild.id,
-        'メンバー参加',
-        [{ name: 'ユーザー', value: `${member.user.tag} (${member.id})` }],
+        t('system:eventLabels.memberJoin'),
+        [
+          {
+            name: t('system:embedFields.user'),
+            value: `${member.user.tag} (${member.id})`,
+          },
+        ],
         joinOccurredAt,
         0x3498db,
       );
@@ -2047,7 +2059,7 @@ export function installGatewayListeners(
             moderatorUserId: executorUserId,
             source: 'EXTERNAL',
             status: 'COMPLETED',
-            reason: '外部操作',
+            reason: t('system:reason.externalOperation'),
             discordAuditLogEntryId: auditEntryId,
           });
           if (created.ok && created.value.created) {
@@ -2081,11 +2093,14 @@ export function installGatewayListeners(
     report('gateway.member_update_failed', () =>
       logging.server(
         after.guild.id,
-        'メンバー更新',
+        t('system:eventLabels.memberUpdate'),
         [
-          { name: 'ユーザー', value: `${after.user.tag} (${after.id})` },
-          { name: '変更前', value: before.displayName },
-          { name: '変更後', value: after.displayName },
+          {
+            name: t('system:embedFields.user'),
+            value: `${after.user.tag} (${after.id})`,
+          },
+          { name: t('system:embedFields.before'), value: before.displayName },
+          { name: t('system:embedFields.after'), value: after.displayName },
         ],
         occurredAt,
         0x3498db,

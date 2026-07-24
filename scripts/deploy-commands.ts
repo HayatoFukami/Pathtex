@@ -3,6 +3,7 @@ import { commandManifest, registerCommands } from '../src/runtime/index.js';
 import { DiscordRestAdapter } from '../src/adapters/index.js';
 import { createBootstrapDependencies } from '../src/index.js';
 import { createLogger } from '../src/logging/logger.js';
+import { t } from '../src/i18n/index.js';
 
 const config = loadConfig();
 const logger = createLogger(config, {
@@ -33,9 +34,7 @@ try {
     'code' in error &&
     error.code === 50001
   ) {
-    throw new Error(
-      'DEV_GUILD_IDにBotアプリケーションが参加できません。DEV_GUILD_IDを確認し、Botを対象サーバーへ招待してください。',
-    );
+    throw new Error(t('system:deploy.devGuildJoinError'));
   }
   throw error;
 }
