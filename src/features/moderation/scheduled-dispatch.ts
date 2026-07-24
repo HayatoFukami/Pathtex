@@ -4,8 +4,9 @@ import { SCHEDULED_MAX_ATTEMPTS } from '../../repositories/contracts.js';
 import type { Result } from '../../domain/result.js';
 import type { SchedulerService } from '../../services/scheduler-service.js';
 import type { ModerationService } from './moderation-service.js';
+import { t } from '../../i18n/index.js';
 
-const DEFAULT_REASON = '理由未指定';
+const DEFAULT_REASON = t('moderation:defaultReason');
 
 export interface ScheduledModerationDiscordPort {
   getBotUserId(guildId: string): Promise<string>;

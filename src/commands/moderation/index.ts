@@ -16,6 +16,7 @@ import {
   TargetIdentitySchema,
   type TargetIdentity,
 } from '../../services/target-identity.js';
+import { t } from '../../i18n/index.js';
 
 type Options = {
   getUser(name: string): {
@@ -43,18 +44,23 @@ const guildCommand = (
   integration_types: [0],
 });
 const targetOptions = [
-  { name: 'target', type: 6, description: '主対象', required: false },
+  {
+    name: 'target',
+    type: 6,
+    description: t('moderation:options.target'),
+    required: false,
+  },
   {
     name: 'additional_targets',
     type: 3,
-    description: '追加対象Snowflake',
+    description: t('moderation:options.additionalTargets'),
     required: false,
     max_length: 400,
   },
   {
     name: 'reason',
     type: 3,
-    description: '理由',
+    description: t('moderation:options.reason'),
     required: false,
     max_length: 1000,
   },
@@ -72,7 +78,7 @@ const resultText = (action: string, result: unknown): string => {
     !('ok' in result) ||
     !(result as { ok: boolean }).ok
   )
-    return `処理結果: ${action}`;
+    return t('moderation:reply.result', { action });
   const outcomes = (
     result as unknown as {
       value: {
@@ -86,7 +92,12 @@ const resultText = (action: string, result: unknown): string => {
     .filter((item) => !item.ok)
     .map((item) => `${item.targetId}: ${item.code ?? 'FAILED'}`)
     .join('\n');
-  return `処理結果: ${action}\n成功: ${String(success)} / 失敗: ${String(failed)}${details ? `\n${details}` : ''}`;
+  return t('moderation:reply.resultWithSummary', {
+    action,
+    success: String(success),
+    failed: String(failed),
+    details: details ? `\n${details}` : '',
+  });
 };
 const targetLabel = (
   targetId: string,
@@ -124,7 +135,7 @@ const replyOutcome = async (
   await interaction.editReply({
     embeds: [
       {
-        title: `処理結果: ${action}`,
+        title: t('moderation:reply.result', { action }),
         color: failed === 0 ? 0x2ecc71 : success === 0 ? 0xe74c3c : 0xf1c40f,
         fields: outcomes.map((item) => ({
           name: targetLabel(
@@ -132,10 +143,18 @@ const replyOutcome = async (
             names,
             (item as { identity?: TargetIdentity }).identity,
           ),
-          value: item.ok ? '成功' : `失敗: ${item.code ?? 'FAILED'}`,
+          value: item.ok
+            ? t('moderation:reply.outcomeSuccess')
+            : t('moderation:reply.outcomeFailed', {
+                code: item.code ?? 'FAILED',
+              }),
         })),
         footer: {
-          text: `成功 ${String(success)} / 失敗 ${String(failed)} / 合計 ${String(outcomes.length)}`,
+          text: t('moderation:reply.outcomeFooter', {
+            success: String(success),
+            failed: String(failed),
+            total: String(outcomes.length),
+          }),
         },
       },
     ],
@@ -177,11 +196,16 @@ function command(
       action === 'ban'
         ? [
             ...targetOptions,
-            { name: 'duration', type: 3, description: '期間', required: false },
+            {
+              name: 'duration',
+              type: 3,
+              description: t('moderation:options.duration'),
+              required: false,
+            },
             {
               name: 'delete_messages',
               type: 4,
-              description: '削除日数',
+              description: t('moderation:options.deleteMessages'),
               required: false,
               min_value: 0,
               max_value: 7,
@@ -193,7 +217,7 @@ function command(
               {
                 name: 'duration',
                 type: 3,
-                description: '期間',
+                description: t('moderation:options.duration'),
                 required: false,
               },
             ]
@@ -203,7 +227,7 @@ function command(
                 {
                   name: 'delete_messages',
                   type: 4,
-                  description: '削除日数',
+                  description: t('moderation:options.deleteMessages'),
                   required: false,
                   min_value: 0,
                   max_value: 7,
@@ -215,7 +239,7 @@ function command(
                   {
                     name: 'duration',
                     type: 3,
-                    description: '期間',
+                    description: t('moderation:options.duration'),
                     required: false,
                   },
                 ]
@@ -328,14 +352,14 @@ export function createUnbanCommand(
       {
         name: 'user_ids',
         type: 3,
-        description: '1～20件のSnowflake',
+        description: t('moderation:options.unbanUserIds'),
         required: true,
         max_length: 400,
       },
       {
         name: 'reason',
         type: 3,
-        description: '理由',
+        description: t('moderation:options.reason'),
         required: false,
         max_length: 1000,
       },
@@ -399,47 +423,52 @@ export function createModerationUtilityCommands(
             {
               name: 'limit',
               type: 4,
-              description: '検索件数',
+              description: t('moderation:options.cleanLimit'),
               required: false,
               min_value: 2,
               max_value: 1000,
             },
-            { name: 'bots', type: 5, description: 'Bot投稿', required: false },
+            {
+              name: 'bots',
+              type: 5,
+              description: t('moderation:options.cleanBots'),
+              required: false,
+            },
             {
               name: 'embeds',
               type: 5,
-              description: 'Embed付き',
+              description: t('moderation:options.cleanEmbeds'),
               required: false,
             },
             {
               name: 'links',
               type: 5,
-              description: 'リンク付き',
+              description: t('moderation:options.cleanLinks'),
               required: false,
             },
             {
               name: 'images',
               type: 5,
-              description: '画像・動画付き',
+              description: t('moderation:options.cleanImages'),
               required: false,
             },
             {
               name: 'user_id',
               type: 3,
-              description: '投稿者Snowflake',
+              description: t('moderation:options.cleanUserId'),
               required: false,
             },
             {
               name: 'contains',
               type: 3,
-              description: '本文部分一致',
+              description: t('moderation:options.cleanContains'),
               required: false,
               max_length: 500,
             },
             {
               name: 'regex',
               type: 3,
-              description: 'RE2正規表現',
+              description: t('moderation:options.cleanRegex'),
               required: false,
               max_length: 500,
             },
@@ -449,14 +478,14 @@ export function createModerationUtilityCommands(
               {
                 name: 'reason',
                 type: 3,
-                description: '新しい理由',
+                description: t('moderation:options.reasonNew'),
                 required: true,
                 max_length: 1000,
               },
               {
                 name: 'case_number',
                 type: 4,
-                description: 'ケース番号',
+                description: t('moderation:options.reasonCaseNumber'),
                 required: false,
                 min_value: 1,
               },
@@ -465,12 +494,12 @@ export function createModerationUtilityCommands(
               {
                 name: 'set',
                 type: 1,
-                description: 'slowmodeを設定',
+                description: t('moderation:options.slowmodeSetSubcommand'),
                 options: [
                   {
                     name: 'interval',
                     type: 4,
-                    description: '秒',
+                    description: t('moderation:options.slowmodeInterval'),
                     required: true,
                     min_value: 0,
                     max_value: 21600,
@@ -478,7 +507,7 @@ export function createModerationUtilityCommands(
                   {
                     name: 'duration',
                     type: 3,
-                    description: '復元期間',
+                    description: t('moderation:options.slowmodeSetDuration'),
                     required: false,
                   },
                 ],
@@ -486,20 +515,20 @@ export function createModerationUtilityCommands(
               {
                 name: 'off',
                 type: 1,
-                description: 'slowmodeを解除',
+                description: t('moderation:options.slowmodeOffSubcommand'),
                 options: [],
               },
               {
                 name: 'status',
                 type: 1,
-                description: 'slowmode状態',
+                description: t('moderation:options.slowmodeStatusSubcommand'),
                 options: [],
               },
             ],
     ),
     async execute({ interaction }) {
       if (!service) {
-        await reply(interaction, `処理結果: ${name}`);
+        await reply(interaction, t('moderation:reply.result', { action: name }));
         return;
       }
       if (name === 'reason') {
@@ -512,7 +541,9 @@ export function createModerationUtilityCommands(
         await reply(
           interaction,
           result.ok
-            ? `ケース #${String(result.value.caseNumber)} の理由を更新しました。`
+            ? t('moderation:reply.reasonUpdated', {
+                caseNumber: String(result.value.caseNumber),
+              })
             : result.error.message,
         );
         return;
@@ -553,7 +584,7 @@ export function createModerationUtilityCommands(
           try {
             cleanInput.regex = new RE2(regexText);
           } catch {
-            await reply(interaction, '正規表現が不正です。');
+            await reply(interaction, t('moderation:reply.invalidRegex'));
             return;
           }
         }
@@ -561,7 +592,12 @@ export function createModerationUtilityCommands(
         await reply(
           interaction,
           result.ok
-            ? `検索: ${String(result.value.searched)}件 / 一致: ${String(result.value.matched)}件 / 削除成功: ${String(result.value.deleted)}件 / 失敗: ${String(result.value.failed)}件`
+            ? t('moderation:reply.cleanResult', {
+                searched: String(result.value.searched),
+                matched: String(result.value.matched),
+                deleted: String(result.value.deleted),
+                failed: String(result.value.failed),
+              })
             : result.error.message,
         );
         return;
@@ -570,15 +606,12 @@ export function createModerationUtilityCommands(
       const mode =
         options.getString('mode') ?? options.getSubcommand?.() ?? 'status';
       if (mode === 'status') {
-        await reply(
-          interaction,
-          'Slowmode status は現在のチャンネルで確認してください。',
-        );
+        await reply(interaction, t('moderation:reply.slowmodeStatusHint'));
         return;
       }
       const interval = mode === 'off' ? 0 : options.getInteger('interval');
       if (interval === null) {
-        await reply(interaction, 'interval は必須です。');
+        await reply(interaction, t('moderation:reply.intervalRequired'));
         return;
       }
       const durationText = options.getString('duration');
@@ -599,7 +632,9 @@ export function createModerationUtilityCommands(
       );
       await reply(
         interaction,
-        slowmode.ok ? `処理結果: slowmode (${mode})` : slowmode.error.message,
+        slowmode.ok
+          ? t('moderation:reply.slowmodeResult', { mode })
+          : slowmode.error.message,
       );
     },
   }));

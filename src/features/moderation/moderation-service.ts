@@ -24,6 +24,7 @@ import {
 } from '../../services/target-identity.js';
 import { createCanonicalUserCase } from '../../services/case-service.js';
 import { isUnauthorized } from '../logging/adapters.js';
+import { t } from '../../i18n/index.js';
 
 const DAY = 86_400;
 const validId = (id: string) => SnowflakeSchema.safeParse(id).success;
@@ -82,7 +83,11 @@ export class ModerationService {
       return err('INVALID_INPUT', 'Invalid moderation input');
     const context = input.execution;
     const effectiveAction = context?.action ?? action;
-    const reason = (context?.reason ?? input.reason ?? '理由未指定').trim();
+    const reason = (
+      context?.reason ??
+      input.reason ??
+      t('moderation:defaultReason')
+    ).trim();
     if (!reason || Array.from(reason).length > 1000)
       return err('INVALID_INPUT', 'Invalid reason');
     if (input.targets.some((target) => !validId(target.id)))
@@ -117,7 +122,7 @@ export class ModerationService {
         parsedCase.data.source !== expectedSource ||
         parsedCase.data.status !== 'PENDING' ||
         parsedCase.data.moderatorUserId !== input.actorId ||
-        (parsedCase.data.reason ?? '理由未指定') !== reason ||
+        (parsedCase.data.reason ?? t('moderation:defaultReason')) !== reason ||
         (parsedCase.data.durationSeconds ?? undefined) !==
           input.durationSeconds ||
         !parsedIdentity?.success ||
@@ -414,9 +419,20 @@ export class ModerationService {
         input.execution?.sendDm !== false &&
         ['KICK', 'BAN', 'SILENTBAN', 'SOFTBAN', 'MUTE'].includes(action)
       ) {
+        const dmActionLabel =
+          action === 'KICK'
+            ? t('moderation:dm.actionLabel.kick')
+            : action === 'MUTE'
+              ? t('moderation:dm.actionLabel.mute')
+              : t('moderation:dm.actionLabel.other');
         const dm = this.deps.discord.sendDm(
           target.id,
-          `${input.guildId} から${action === 'KICK' ? 'キック' : action === 'MUTE' ? 'ミュート' : '制裁'}されました。\n理由: ${reason}\nケース: #${String(pending.value.caseNumber)}`,
+          t('moderation:dm.body', {
+            guildId: input.guildId,
+            actionLabel: dmActionLabel,
+            reason,
+            caseNumber: String(pending.value.caseNumber),
+          }),
         );
         if (input.execution?.waitForDm === false)
           detachedDm = dm.catch(async (error: unknown) => {
@@ -1051,7 +1067,7 @@ export class ModerationService {
     channelId: string,
     interval: number,
     durationSeconds?: number,
-    reason = '理由未指定',
+    reason = t('moderation:defaultReason'),
   ): Promise<Result<CaseDto | null>> {
     if (
       !validId(guildId) ||
