@@ -340,10 +340,19 @@ export class RaidService {
     });
   }
 
-  /** Raises the verification level after the raid transition is persisted and
-   * claims verification ownership only on success. A non-auth Discord failure
-   * leaves ownership cleared (and warns) without rolling back the transition or
-   * blocking the downstream kick/scheduling; a 401 is propagated as fatal. */
+  /** Raises the verification level after the raid transition is persisted.
+   *
+   * Crash-safe intent/ownership protocol: the ownership intent
+   * (`raidVerificationChanged`) is recorded durably at activation, BEFORE this
+   * Discord call, so a crash after the raise succeeds can still restore the
+   * pre-raid level on a later OFF. On success the intent is re-asserted
+   * (`markVerificationRaised`, idempotent). On a definitive non-auth failure the
+   * intent is relinquished (`revokeVerificationRaised`) so a later OFF does not
+   * restore a level the bot never raised. A crash before that revoke is still
+   * safe: the OFF restore is guarded by the live "still HIGH" check, so an
+   * unrevoked intent for a guild that is not at HIGH never restores. A 401 is
+   * propagated as fatal without relinquishing (the process is going down, and
+   * the live guard reconciles the intent on recovery). */
   private async raiseAndConfirmOwnership(
     guildId: string,
     reason: string,
@@ -352,9 +361,10 @@ export class RaidService {
       await this.deps.discord.setVerificationLevel(guildId, 3, reason);
     } catch (error: unknown) {
       if (isAuthError(error)) throw error;
+      await this.deps.repository.revokeVerificationRaised(guildId);
       this.deps.logger?.warn(
         { event: 'raid.verification_raise_failed', guildId },
-        'Verification raise failed; raid verification ownership not claimed',
+        'Verification raise failed; raid verification ownership relinquished',
       );
       return;
     }

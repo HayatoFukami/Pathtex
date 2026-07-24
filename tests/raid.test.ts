@@ -347,11 +347,20 @@ describe('raid state integrity', () => {
         baseSettings({ raidModeEnabled: true, raidVerificationChanged: true }),
       ),
     );
+    const revokeVerificationRaised = vi.fn(() =>
+      Promise.resolve(
+        baseSettings({ raidModeEnabled: true, raidVerificationChanged: false }),
+      ),
+    );
     const setVerificationLevel = vi.fn(() => httpError(500));
     const logger = { warn: vi.fn() };
     const service = new RaidService({
       settings,
-      repository: { activateManual, markVerificationRaised },
+      repository: {
+        activateManual,
+        markVerificationRaised,
+        revokeVerificationRaised,
+      },
       automod: {},
       scheduler: {},
       moderation: {},
@@ -372,8 +381,10 @@ describe('raid state integrity', () => {
       setVerificationLevel.mock.invocationCallOrder[0] ??
         Number.POSITIVE_INFINITY,
     );
-    // Ownership is claimed only after a successful raise.
+    // A definitive raise failure relinquishes the upfront ownership intent and
+    // never confirms it.
     expect(markVerificationRaised).not.toHaveBeenCalled();
+    expect(revokeVerificationRaised).toHaveBeenCalledWith(GUILD);
     expect(logger.warn).toHaveBeenCalled(); // operational warning emitted
     // The cache was invalidated before the failing Discord call, so joins
     // observe the persisted ON state even though verification failed.
@@ -381,7 +392,7 @@ describe('raid state integrity', () => {
     expect(fresh.ok && fresh.value.raidModeEnabled).toBe(true);
   });
 
-  it('claims verification ownership only after a successful raise', async () => {
+  it('records the raise intent at activation and confirms ownership after a successful raise', async () => {
     const settings = {
       get: vi.fn(() => Promise.resolve({ ok: true, value: baseSettings() })),
       invalidate: vi.fn(),
@@ -399,10 +410,15 @@ describe('raid state integrity', () => {
         baseSettings({ raidModeEnabled: true, raidVerificationChanged: true }),
       ),
     );
+    const revokeVerificationRaised = vi.fn();
     const setVerificationLevel = vi.fn(() => Promise.resolve());
     const service = new RaidService({
       settings,
-      repository: { activateManual, markVerificationRaised },
+      repository: {
+        activateManual,
+        markVerificationRaised,
+        revokeVerificationRaised,
+      },
       automod: {},
       scheduler: {},
       moderation: {},
@@ -417,15 +433,17 @@ describe('raid state integrity', () => {
     const result = await service.on(GUILD, ACTOR, 'raid');
 
     expect(result.ok).toBe(true);
-    // The prior level is captured for the activation...
+    // The prior level and the raise intent (changed) are captured at activation
+    // so the intent is durable before the Discord raise...
     expect(activateManual).toHaveBeenCalledWith(
       expect.objectContaining({
         verificationLevelBeforeRaid: 1,
         changed: true,
       }),
     );
-    // ...and ownership is confirmed only after the raise succeeds.
+    // ...ownership is confirmed after the raise succeeds, never relinquished.
     expect(setVerificationLevel).toHaveBeenCalledWith(GUILD, 3, 'raid');
+    expect(revokeVerificationRaised).not.toHaveBeenCalled();
     expect(markVerificationRaised).toHaveBeenCalledWith(GUILD);
   });
 
@@ -443,9 +461,14 @@ describe('raid state integrity', () => {
       }),
     );
     const markVerificationRaised = vi.fn();
+    const revokeVerificationRaised = vi.fn();
     const service = new RaidService({
       settings,
-      repository: { activateManual, markVerificationRaised },
+      repository: {
+        activateManual,
+        markVerificationRaised,
+        revokeVerificationRaised,
+      },
       automod: {},
       scheduler: {},
       moderation: {},
@@ -461,6 +484,9 @@ describe('raid state integrity', () => {
     });
     expect(activateManual).toHaveBeenCalledTimes(1); // persisted, no rollback
     expect(markVerificationRaised).not.toHaveBeenCalled();
+    // A fatal 401 propagates before relinquishing: the durable intent is left in
+    // place and reconciled by the live "still HIGH" guard on recovery.
+    expect(revokeVerificationRaised).not.toHaveBeenCalled();
   });
 
   const autoActivationService = (setVerificationLevel: () => Promise<void>) => {
@@ -476,6 +502,9 @@ describe('raid state integrity', () => {
       }),
     );
     const markVerificationRaised = vi.fn(() =>
+      Promise.resolve(baseSettings({ raidModeEnabled: true })),
+    );
+    const revokeVerificationRaised = vi.fn(() =>
       Promise.resolve(baseSettings({ raidModeEnabled: true })),
     );
     const invalidate = vi.fn();
@@ -502,6 +531,7 @@ describe('raid state integrity', () => {
         recordJoinAndEvaluate,
         recordJoin: vi.fn(() => Promise.resolve()),
         markVerificationRaised,
+        revokeVerificationRaised,
       },
       scheduler: { schedule },
       moderation: { execute },
@@ -513,12 +543,25 @@ describe('raid state integrity', () => {
         sendDm: vi.fn(() => Promise.resolve()),
       },
     } as never);
-    return { service, execute, schedule, invalidate, markVerificationRaised };
+    return {
+      service,
+      execute,
+      schedule,
+      invalidate,
+      markVerificationRaised,
+      revokeVerificationRaised,
+    };
   };
 
   it('still kicks on auto activation when raising verification fails non-auth and never schedules from the service', async () => {
-    const { service, execute, schedule, invalidate, markVerificationRaised } =
-      autoActivationService(() => httpError(500));
+    const {
+      service,
+      execute,
+      schedule,
+      invalidate,
+      markVerificationRaised,
+      revokeVerificationRaised,
+    } = autoActivationService(() => httpError(500));
     await expect(
       service.memberAdd({
         guildId: GUILD,
@@ -528,6 +571,8 @@ describe('raid state integrity', () => {
     ).resolves.toBeUndefined();
     expect(invalidate).toHaveBeenCalledWith(GUILD);
     expect(markVerificationRaised).not.toHaveBeenCalled();
+    // A definitive raise failure relinquishes the upfront ownership intent.
+    expect(revokeVerificationRaised).toHaveBeenCalledWith(GUILD);
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({ guildId: GUILD }),
       'KICK',

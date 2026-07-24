@@ -1454,7 +1454,7 @@ integration('PostgreSQL persistence foundation', () => {
     expect(job?.executeAt.getTime()).not.toBe(staleInput.getTime() + 120_000);
   });
 
-  it('claims raid verification ownership only after confirmation', async () => {
+  it('records the raid verification intent at activation and confirms idempotently', async () => {
     const raid = new PrismaRaidRepository(getDb());
     const guildId = '12345678901234579';
     await raid.activateManual({
@@ -1468,9 +1468,11 @@ integration('PostgreSQL persistence foundation', () => {
     const before = await getDb().guildSettings.findUnique({
       where: { guildId },
     });
-    // Prior level captured, ownership not yet claimed.
+    // The prior level is captured and the raise intent (ownership) is recorded
+    // durably at activation, BEFORE the Discord raise.
     expect(before?.verificationLevelBeforeRaid).toBe(1);
-    expect(before?.raidVerificationChanged).toBe(false);
+    expect(before?.raidVerificationChanged).toBe(true);
+    // The post-raise confirmation is an idempotent re-assertion.
     await raid.markVerificationRaised(guildId);
     const after = await getDb().guildSettings.findUnique({
       where: { guildId },
@@ -1486,9 +1488,9 @@ integration('PostgreSQL persistence foundation', () => {
     expect(deactivated.restoreLevel).toBe(1);
   });
 
-  it('does not restore verification when ownership was never confirmed', async () => {
+  it('restores verification even when a crash skips the post-raise confirmation', async () => {
     const raid = new PrismaRaidRepository(getDb());
-    const guildId = '12345678901234580';
+    const guildId = '12345678901234660';
     await raid.activateManual({
       guildId,
       actorUserId: '12345678901234568',
@@ -1497,14 +1499,61 @@ integration('PostgreSQL persistence foundation', () => {
       verificationLevelBeforeRaid: 1,
       reason: 'raid',
     });
-    // No markVerificationRaised: the raise is treated as failed.
+    // Simulate a crash after the Discord raise succeeded but before
+    // markVerificationRaised ran: the intent is already durable, so a later OFF
+    // still restores the captured level instead of stranding the guild at HIGH.
     const deactivated = await raid.deactivateWithCase({
       guildId,
       actorUserId: '12345678901234568',
       reason: 'off',
     });
     expect(deactivated.changed).toBe(true);
-    expect(deactivated.restoreLevel).toBeNull();
+    expect(deactivated.restoreLevel).toBe(1);
+  });
+
+  it('does not restore verification when no raise was intended or the raise was relinquished', async () => {
+    const raid = new PrismaRaidRepository(getDb());
+    // (a) No raise intended (already HIGH before the raid): nothing to restore.
+    const noRaiseGuild = '12345678901234580';
+    await raid.activateManual({
+      guildId: noRaiseGuild,
+      actorUserId: '12345678901234568',
+      source: 'MANUAL',
+      changed: false,
+      verificationLevelBeforeRaid: 3,
+      reason: 'raid',
+    });
+    const noRaise = await raid.deactivateWithCase({
+      guildId: noRaiseGuild,
+      actorUserId: '12345678901234568',
+      reason: 'off',
+    });
+    expect(noRaise.changed).toBe(true);
+    expect(noRaise.restoreLevel).toBeNull();
+
+    // (b) Raise intended but definitively failed: the service relinquishes the
+    // intent, so OFF must not restore a level the bot never raised.
+    const revokedGuild = '12345678901234661';
+    await raid.activateManual({
+      guildId: revokedGuild,
+      actorUserId: '12345678901234568',
+      source: 'MANUAL',
+      changed: true,
+      verificationLevelBeforeRaid: 1,
+      reason: 'raid',
+    });
+    await raid.revokeVerificationRaised(revokedGuild);
+    const revoked = await getDb().guildSettings.findUnique({
+      where: { guildId: revokedGuild },
+    });
+    expect(revoked?.raidVerificationChanged).toBe(false);
+    const revokedOff = await raid.deactivateWithCase({
+      guildId: revokedGuild,
+      actorUserId: '12345678901234568',
+      reason: 'off',
+    });
+    expect(revokedOff.changed).toBe(true);
+    expect(revokedOff.restoreLevel).toBeNull();
   });
 
   it('extends the auto raid deadline to the latest join and never earlier', async () => {
@@ -2076,6 +2125,64 @@ integration('PostgreSQL persistence foundation', () => {
         where: { guildId: '12345678901234575' },
       }),
     ).not.toBeNull();
+  });
+
+  it('preserves snapshot createdAt on edit and bulk-deletes by id', async () => {
+    const snapshots = new PrismaSnapshotRepository(getDb());
+    const guildId = '12345678901234662';
+    const channelId = '12345678901234663';
+    const originalCreatedAt = new Date('2025-12-01T09:30:00.000Z');
+    await snapshots.upsertMessage({
+      messageId: '12345678901234664',
+      guildId,
+      channelId,
+      authorUserId: '12345678901234568',
+      authorDisplay: 'user',
+      content: 'original',
+      attachments: [],
+      embedsSummary: {},
+      createdAt: originalCreatedAt,
+      expiresAt: new Date('2026-01-08T00:00:00.000Z'),
+    });
+    // An edit upsert that omits createdAt must not reset the creation time.
+    await snapshots.upsertMessage({
+      messageId: '12345678901234664',
+      guildId,
+      channelId,
+      authorUserId: '12345678901234568',
+      authorDisplay: 'user',
+      content: 'edited',
+      attachments: [],
+      embedsSummary: {},
+      editedAt: new Date('2026-02-02T00:00:00.000Z'),
+      expiresAt: new Date('2026-02-09T00:00:00.000Z'),
+    });
+    const edited = await snapshots.getMessage('12345678901234664');
+    expect(edited?.content).toBe('edited');
+    expect(edited?.createdAt.getTime()).toBe(originalCreatedAt.getTime());
+    expect(edited?.editedAt).not.toBeNull();
+
+    // Bulk deletion removes exactly the requested ids and reports the count.
+    await snapshots.upsertMessage({
+      messageId: '12345678901234665',
+      guildId,
+      channelId,
+      authorUserId: '12345678901234568',
+      authorDisplay: 'user',
+      content: 'second',
+      attachments: [],
+      embedsSummary: {},
+      expiresAt: new Date('2026-01-08T00:00:00.000Z'),
+    });
+    const deleted = await snapshots.deleteMessages([
+      '12345678901234664',
+      '12345678901234665',
+      '12345678901234699', // not present
+    ]);
+    expect(deleted).toBe(2);
+    expect(await snapshots.getMessage('12345678901234664')).toBeNull();
+    expect(await snapshots.getMessage('12345678901234665')).toBeNull();
+    expect(await snapshots.deleteMessages([])).toBe(0);
   });
 
   it('lists member snapshots for a user ordered by guildId', async () => {

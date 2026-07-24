@@ -831,8 +831,17 @@ export interface RaidRepository {
   ): Promise<RaidResultDto>;
   activate(input: RaidActivation): Promise<GuildSettingsDto>;
   activateManual(input: RaidActivation): Promise<RaidResultDto>;
-  /** Confirms verification ownership after a successful Discord raise. */
+  /** Confirms verification ownership after a successful Discord raise.
+   * Idempotent: the ownership intent is already recorded at activation, so this
+   * only re-asserts `raidVerificationChanged` for the still-active raid. */
   markVerificationRaised(guildId: string): Promise<GuildSettingsDto>;
+  /** Relinquishes the verification-raise ownership intent recorded at
+   * activation when the Discord raise definitively failed (non-auth), so a
+   * later OFF does not restore a level the bot never raised. A crash before this
+   * revoke is still safe: the OFF restore is guarded by the live "still HIGH"
+   * check, so an unrevoked intent for a guild that is not at HIGH never
+   * restores. */
+  revokeVerificationRaised(guildId: string): Promise<GuildSettingsDto>;
   /** Conditional, idempotent OFF transition + single OFF case under the lock. */
   deactivateWithCase(input: {
     guildId: string;

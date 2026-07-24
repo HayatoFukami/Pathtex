@@ -1497,8 +1497,11 @@ export class PrismaRaidRepository implements RaidRepository {
             raidStartedAt: new Date(),
             verificationLevelBeforeRaid:
               input.verificationLevelBeforeRaid ?? null,
-            // Ownership is confirmed only after a successful Discord raise.
-            raidVerificationChanged: false,
+            // Record the verification-raise intent (ownership) durably BEFORE
+            // the Discord raise so a crash after the raise succeeds can still
+            // restore. The OFF restore stays guarded by the live "still HIGH"
+            // check, so an intent whose raise never took effect is harmless.
+            raidVerificationChanged: input.changed,
           },
         }),
       );
@@ -1529,11 +1532,14 @@ export class PrismaRaidRepository implements RaidRepository {
           raidModeSource: 'MANUAL',
           raidModeReason: input.reason ?? null,
           raidStartedAt: new Date(),
-          // Capture the prior level but claim ownership only after a
-          // successful Discord raise (see markVerificationRaised).
+          // Capture the prior level and record the verification-raise intent
+          // (ownership) durably BEFORE the Discord raise so a crash after the
+          // raise succeeds can still restore. A definitive raise failure is
+          // relinquished via revokeVerificationRaised; the OFF restore stays
+          // guarded by the live "still HIGH" check (see markVerificationRaised).
           verificationLevelBeforeRaid:
             input.verificationLevelBeforeRaid ?? null,
-          raidVerificationChanged: false,
+          raidVerificationChanged: input.changed,
         },
       });
       const createdCase = await allocateCase(tx, {
@@ -1575,14 +1581,39 @@ export class PrismaRaidRepository implements RaidRepository {
       });
       if (!current)
         return GuildSettingsDtoSchema.parse(await ensureSettings(tx, guildId));
-      // Claim ownership only while the raid is still active; a concurrent OFF
-      // owns restoration and must not be second-guessed.
+      // Confirm ownership only while the raid is still active; a concurrent OFF
+      // owns restoration and must not be second-guessed. The intent is already
+      // recorded at activation, so this is an idempotent re-assertion.
       if (!current.raidModeEnabled)
         return GuildSettingsDtoSchema.parse(current);
       return GuildSettingsDtoSchema.parse(
         await tx.guildSettings.update({
           where: { guildId },
           data: { raidVerificationChanged: true },
+        }),
+      );
+    });
+  }
+  public revokeVerificationRaised(guildId: string) {
+    SnowflakeSchema.parse(guildId);
+    return this.db.$transaction(async (tx) => {
+      await ensureSettings(tx, guildId);
+      await tx.$queryRaw(
+        Prisma.sql`SELECT guild_id FROM guild_settings WHERE guild_id = ${guildId} FOR UPDATE`,
+      );
+      const current = await tx.guildSettings.findUnique({
+        where: { guildId },
+      });
+      if (!current)
+        return GuildSettingsDtoSchema.parse(await ensureSettings(tx, guildId));
+      // Relinquish ownership only while the raid is still active; a concurrent
+      // OFF owns restoration and must not be second-guessed.
+      if (!current.raidModeEnabled)
+        return GuildSettingsDtoSchema.parse(current);
+      return GuildSettingsDtoSchema.parse(
+        await tx.guildSettings.update({
+          where: { guildId },
+          data: { raidVerificationChanged: false },
         }),
       );
     });
@@ -1762,11 +1793,12 @@ export class PrismaRaidRepository implements RaidRepository {
           raidModeSource: activation.source,
           raidModeReason: activation.reason ?? null,
           raidStartedAt: windowEnd,
-          // Capture the prior level but claim ownership only after a
-          // successful Discord raise (see markVerificationRaised).
+          // Capture the prior level and record the verification-raise intent
+          // (ownership) durably BEFORE the Discord raise so a crash after the
+          // raise succeeds can still restore (see markVerificationRaised).
           verificationLevelBeforeRaid:
             activation.verificationLevelBeforeRaid ?? null,
-          raidVerificationChanged: false,
+          raidVerificationChanged: activation.changed,
         },
       });
       const createdCase = await allocateCase(tx, {
