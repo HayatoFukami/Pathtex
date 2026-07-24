@@ -1,4 +1,5 @@
 import { discordTimestamp, truncate, type LogEmbed } from './service.js';
+import { t } from '../../i18n/index.js';
 
 export function isConfiguredLogChannel(
   channelId: string,
@@ -85,7 +86,7 @@ export function messageEditEmbed(
 ): LogEmbed | null {
   if (before && !messageChanged(before, after)) return null;
   return {
-    title: 'メッセージ編集',
+    title: t('logging:messageEdit.title'),
     timestamp: discordTimestamp(occurredAt),
     color: 0xf1c40f,
     author: {
@@ -94,37 +95,37 @@ export function messageEditEmbed(
     },
     fields: [
       {
-        name: '投稿者',
+        name: t('logging:embedFields.author'),
         value: `${after.author} (${after.authorId})`,
         inline: true,
       },
       {
-        name: 'チャンネル',
+        name: t('logging:embedFields.channel'),
         value: `<#${after.channelId}> (${after.channelId})`,
         inline: true,
       },
       {
-        name: '変更前',
+        name: t('logging:embedFields.before'),
         value: before
-          ? truncate(before.content) || '(空)'
-          : '取得できないため不明',
+          ? truncate(before.content) || t('logging:common.empty')
+          : t('logging:common.unavailableUnknown'),
         inline: false,
       },
       {
-        name: '変更後',
-        value: truncate(after.content) || '(空)',
+        name: t('logging:embedFields.after'),
+        value: truncate(after.content) || t('logging:common.empty'),
         inline: false,
       },
       {
-        name: '添付',
+        name: t('logging:embedFields.attachments'),
         value:
           (before
             ? attachmentDelta(before.attachments ?? [], after.attachments ?? [])
-            : '') || 'なし',
+            : '') || t('logging:common.none'),
         inline: false,
       },
       {
-        name: 'メッセージ',
+        name: t('logging:embedFields.message'),
         value: after.url ?? after.messageId,
         inline: true,
       },
@@ -140,10 +141,16 @@ function attachmentDelta(
   return [
     ...after
       .filter((item) => !oldSet.has(stableStringify(item)))
-      .map((item) => `追加: ${renderValue(item)}`),
+      .map((item) =>
+        t('logging:messageEdit.attachmentAdded', { value: renderValue(item) }),
+      ),
     ...before
       .filter((item) => !newSet.has(stableStringify(item)))
-      .map((item) => `削除: ${renderValue(item)}`),
+      .map((item) =>
+        t('logging:messageEdit.attachmentRemoved', {
+          value: renderValue(item),
+        }),
+      ),
   ].join('\n');
 }
 function renderValue(value: string | Record<string, unknown>): string {
@@ -151,12 +158,12 @@ function renderValue(value: string | Record<string, unknown>): string {
 }
 export function messageDeleteEmbed(
   message: MessageView | null,
-  executor = '不明',
-  reason = '不明',
+  executor = t('logging:common.unknown'),
+  reason = t('logging:common.unknown'),
   occurredAt: Date,
 ): LogEmbed {
   return {
-    title: 'メッセージ削除',
+    title: t('logging:messageDelete.title'),
     timestamp: discordTimestamp(occurredAt),
     color: 0xe74c3c,
     author: message
@@ -167,48 +174,50 @@ export function messageDeleteEmbed(
       : undefined,
     fields: [
       {
-        name: '投稿者',
-        value: message ? `${message.author} (${message.authorId})` : '不明',
+        name: t('logging:embedFields.author'),
+        value: message
+          ? `${message.author} (${message.authorId})`
+          : t('logging:common.unknown'),
         inline: true,
       },
       {
-        name: 'チャンネル',
+        name: t('logging:embedFields.channel'),
         value: message
           ? `<#${message.channelId}> (${message.channelId})`
-          : '不明',
+          : t('logging:common.unknown'),
         inline: true,
       },
       {
-        name: 'メッセージID',
-        value: message?.messageId ?? '不明',
+        name: t('logging:embedFields.messageId'),
+        value: message?.messageId ?? t('logging:common.unknown'),
         inline: true,
       },
       {
-        name: '削除実行者',
+        name: t('logging:embedFields.deleteExecutor'),
         value: executor,
         inline: true,
       },
       {
-        name: '理由',
+        name: t('logging:modlog.fieldReason'),
         value: reason,
         inline: false,
       },
       {
-        name: '本文',
+        name: t('logging:embedFields.body'),
         value: message
-          ? truncate(message.content) || '(空)'
-          : 'キャッシュに存在しないため取得できません',
+          ? truncate(message.content) || t('logging:common.empty')
+          : t('logging:common.unavailableCacheless'),
         inline: false,
       },
       {
-        name: '添付',
+        name: t('logging:embedFields.attachments'),
         value:
           message?.attachments && message.attachments.length > 0
             ? truncate(
                 message.attachments.map((a) => renderValue(a)).join('\n'),
                 1024,
-              ) || 'なし'
-            : 'なし',
+              ) || t('logging:common.none')
+            : t('logging:common.none'),
         inline: false,
       },
     ],
@@ -218,22 +227,27 @@ export function bulkDeleteEmbed(
   channelId: string,
   count: number,
   cached: readonly MessageView[],
-  executor = '不明',
+  executor = t('logging:common.unknown'),
   occurredAt: Date,
   reason?: string,
 ): LogEmbed {
   const fields: Array<{ name: string; value: string; inline?: boolean }> = [
-    { name: '削除件数', value: String(count), inline: true },
+    { name: t('logging:embedFields.deleteCount'), value: String(count), inline: true },
     {
-      name: 'チャンネル',
+      name: t('logging:embedFields.channel'),
       value: `<#${channelId}> (${channelId})`,
       inline: true,
     },
-    { name: '削除実行者', value: executor, inline: true },
+    { name: t('logging:embedFields.deleteExecutor'), value: executor, inline: true },
   ];
-  if (reason) fields.push({ name: '理由', value: reason, inline: false });
+  if (reason)
+    fields.push({
+      name: t('logging:modlog.fieldReason'),
+      value: reason,
+      inline: false,
+    });
   fields.push({
-    name: 'キャッシュ取得',
+    name: t('logging:embedFields.cacheCaptured'),
     value: String(cached.length),
     inline: true,
   });
@@ -248,24 +262,30 @@ export function bulkDeleteEmbed(
   const top = sorted.slice(0, 10);
   const others = sorted.length - top.length;
   const authorLine =
-    top.map(([label, n]) => `${label}: ${String(n)}件`).join('\n') +
-    (others > 0 ? `\n他${String(others)}名` : '');
+    top
+      .map(([label, n]) =>
+        `${label}: ${t('logging:common.countUnit', { count: String(n) })}`,
+      )
+      .join('\n') +
+    (others > 0
+      ? `\n${t('logging:common.othersCount', { count: String(others) })}`
+      : '');
   fields.push({
-    name: '投稿者別',
-    value: authorLine || 'なし',
+    name: t('logging:embedFields.authorBreakdown'),
+    value: authorLine || t('logging:common.none'),
     inline: false,
   });
   fields.push({
-    name: 'プレビュー',
+    name: t('logging:embedFields.preview'),
     value:
       cached
         .slice(0, 10)
         .map((m) => truncate(m.content, 100))
-        .join('\n') || 'なし',
+        .join('\n') || t('logging:common.none'),
     inline: false,
   });
   return {
-    title: 'メッセージ一括削除',
+    title: t('logging:bulkDelete.title'),
     timestamp: discordTimestamp(occurredAt),
     color: 0xe74c3c,
     fields,
@@ -281,35 +301,39 @@ export function voiceEmbed(
 ): LogEmbed {
   const title =
     kind === 'Join'
-      ? 'ボイス参加'
+      ? t('logging:voice.join')
       : kind === 'Leave'
-        ? 'ボイス退出'
-        : 'ボイス移動';
+        ? t('logging:voice.leave')
+        : t('logging:voice.move');
   const fields: Array<{ name: string; value: string; inline?: boolean }> = [
-    { name: 'ユーザー', value: `${user} (${userId})`, inline: true },
+    {
+      name: t('logging:embedFields.user'),
+      value: `${user} (${userId})`,
+      inline: true,
+    },
   ];
   if (kind === 'Join')
     fields.push({
-      name: 'チャンネル',
-      value: newChannel ?? '不明',
+      name: t('logging:embedFields.channel'),
+      value: newChannel ?? t('logging:common.unknown'),
       inline: true,
     });
   else if (kind === 'Leave')
     fields.push({
-      name: 'チャンネル',
-      value: oldChannel ?? '不明',
+      name: t('logging:embedFields.channel'),
+      value: oldChannel ?? t('logging:common.unknown'),
       inline: true,
     });
   else {
     fields.push(
       {
-        name: '移動元',
-        value: oldChannel ?? '不明',
+        name: t('logging:embedFields.moveFrom'),
+        value: oldChannel ?? t('logging:common.unknown'),
         inline: true,
       },
       {
-        name: '移動先',
-        value: newChannel ?? '不明',
+        name: t('logging:embedFields.moveTo'),
+        value: newChannel ?? t('logging:common.unknown'),
         inline: true,
       },
     );
@@ -336,24 +360,35 @@ export function moderationEmbed(input: {
   zone: string;
 }): LogEmbed {
   return {
-    title: `ケース #${String(input.caseNumber)} — ${input.action}`,
+    title: t('logging:modlog.caseTitle', {
+      caseNumber: input.caseNumber,
+      actionLabel: input.action,
+    }),
     timestamp: discordTimestamp(input.date),
     fields: [
-      { name: '対象', value: input.target, inline: true },
-      { name: '実行者', value: input.moderator, inline: true },
+      { name: t('logging:modlog.fieldTarget'), value: input.target, inline: true },
       {
-        name: '理由',
-        value: input.reason ?? '理由未指定',
+        name: t('logging:modlog.fieldModerator'),
+        value: input.moderator,
+        inline: true,
+      },
+      {
+        name: t('logging:modlog.fieldReason'),
+        value: input.reason ?? t('logging:defaultReason'),
         inline: false,
       },
       {
-        name: '期間',
-        value: input.duration ?? '永続',
+        name: t('logging:modlog.fieldDuration'),
+        value: input.duration ?? t('logging:duration.permanent'),
         inline: true,
       },
-      { name: '発生元', value: input.source, inline: true },
-      { name: '状態', value: input.status, inline: true },
-      { name: 'DM', value: input.dm ?? '対象外', inline: true },
+      { name: t('logging:modlog.fieldSource'), value: input.source, inline: true },
+      { name: t('logging:modlog.fieldStatus'), value: input.status, inline: true },
+      {
+        name: t('logging:modlog.fieldDm'),
+        value: input.dm ?? t('logging:modlog.fieldDmNotApplicable'),
+        inline: true,
+      },
     ],
   };
 }
@@ -364,16 +399,16 @@ export function serverEmbed(
   color?: number,
 ): LogEmbed {
   const fullWidthLabels = new Set([
-    '理由',
-    '変更前',
-    '変更後',
-    '本文',
-    '添付',
-    '警告',
-    '退出時ロール',
-    '退出理由',
-    'プレビュー',
-    '投稿者別',
+    t('logging:modlog.fieldReason'),
+    t('logging:embedFields.before'),
+    t('logging:embedFields.after'),
+    t('logging:embedFields.body'),
+    t('logging:embedFields.attachments'),
+    t('logging:embedFields.warning'),
+    t('logging:embedFields.leaveRole'),
+    t('logging:embedFields.leaveReason'),
+    t('logging:embedFields.preview'),
+    t('logging:embedFields.authorBreakdown'),
   ]);
   return {
     title,

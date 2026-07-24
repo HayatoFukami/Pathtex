@@ -6,6 +6,7 @@ import type {
   ConfigurationService,
   LogKind,
 } from '../configuration/service.js';
+import { t } from '../../i18n/index.js';
 
 export const LogEmbedSchema = z.object({
   title: z.string().max(256),
@@ -152,7 +153,7 @@ export class LogDeliveryService {
       return {
         status: 'failed',
         errorCode: 'DISCORD_ERROR',
-        warning: '操作は成功しましたがログ送信に失敗しました',
+        warning: t('logging:delivery.warningAfterFailure'),
       };
     }
   }

@@ -9,51 +9,22 @@ import {
   isUserTargetAction,
 } from './target-identity.js';
 import type { CaseDto } from '../repositories/contracts.js';
+import { t } from '../i18n/index.js';
 
 // ---------------------------------------------------------------
 // Japanese render helpers — maps internal enums to display labels
 // per docs/40 §8.9.0
 // ---------------------------------------------------------------
-const ACTION_JA: Record<string, string> = {
-  KICK: 'キック',
-  BAN: 'BAN',
-  SOFTBAN: 'ソフトBAN',
-  SILENTBAN: 'サイレントBAN',
-  UNBAN: 'BAN解除',
-  MUTE: 'ミュート',
-  UNMUTE: 'ミュート解除',
-  STRIKE: 'ストライク',
-  PARDON: 'ストライク取消',
-  RAIDMODE_ON: 'レイドモード有効',
-  RAIDMODE_OFF: 'レイドモード解除',
-  VOICEKICK: 'ボイスキック',
-  SLOWMODE: 'スローモード',
-  AUTO_PUNISHMENT: '自動制裁',
-};
 export function translateAction(a: string): string {
-  return ACTION_JA[a] ?? a;
+  return t(`logging:action.${a}`, { defaultValue: a });
 }
 
-const SOURCE_JA: Record<string, string> = {
-  COMMAND: 'コマンド',
-  AUTOMOD: 'AutoMod',
-  PUNISHMENT: '自動制裁',
-  RAIDMODE: 'レイドモード',
-  EXTERNAL: '外部',
-  SCHEDULED: '予約実行',
-};
 function translateSource(s: string): string {
-  return SOURCE_JA[s] ?? s;
+  return t(`logging:source.${s}`, { defaultValue: s });
 }
 
-const STATUS_JA: Record<string, string> = {
-  PENDING: '保留',
-  COMPLETED: '成功',
-  FAILED: '失敗',
-  PARTIAL: '一部失敗',
-};
 function translateStatus(s: string): string {
-  return STATUS_JA[s] ?? s;
+  return t(`logging:status.${s}`, { defaultValue: s });
 }
 
 const ACTION_COLOR: Record<string, number> = {
@@ -80,15 +51,32 @@ function actionColor(action: string, status: string): number | undefined {
 }
 
 function translateDm(d: string): string {
-  return d === 'true' ? '成功' : d === 'false' ? '失敗' : d;
+  return d === 'true'
+    ? t('logging:dmStatus.true')
+    : d === 'false'
+      ? t('logging:dmStatus.false')
+      : d;
 }
 
 function humanDuration(seconds: number): string {
-  if (seconds < 60) return `${String(seconds)}秒`;
-  if (seconds < 3600) return `${String(Math.floor(seconds / 60))}分`;
+  if (seconds < 60)
+    return t('logging:duration.seconds', { seconds: String(seconds) });
+  if (seconds < 3600)
+    return t('logging:duration.minutes', {
+      minutes: String(Math.floor(seconds / 60)),
+    });
   if (seconds < 86400)
-    return `${String(Math.floor(seconds / 3600))}時間${seconds % 3600 >= 60 ? `${String(Math.floor((seconds % 3600) / 60))}分` : ''}`;
-  return `${String(Math.floor(seconds / 86400))}日`;
+    return seconds % 3600 >= 60
+      ? t('logging:duration.hoursMinutes', {
+          hours: String(Math.floor(seconds / 3600)),
+          minutes: String(Math.floor((seconds % 3600) / 60)),
+        })
+      : t('logging:duration.hours', {
+          hours: String(Math.floor(seconds / 3600)),
+        });
+  return t('logging:duration.days', {
+    days: String(Math.floor(seconds / 86400)),
+  });
 }
 
 export const LogEventSchema = z.object({
@@ -243,37 +231,53 @@ export class ModerationLogService extends IsolatedLogService {
         ? (current.metadata as Record<string, unknown>)
         : {};
     const fields: Array<{ name: string; value: string; inline?: boolean }> = [
-      { name: '対象', value: renderCaseTarget(current), inline: true },
-      { name: '実行者', value: current.moderatorUserId, inline: true },
       {
-        name: '理由',
-        value: current.reason ?? '理由未指定',
+        name: t('logging:modlog.fieldTarget'),
+        value: renderCaseTarget(current),
+        inline: true,
+      },
+      {
+        name: t('logging:modlog.fieldModerator'),
+        value: current.moderatorUserId,
+        inline: true,
+      },
+      {
+        name: t('logging:modlog.fieldReason'),
+        value: current.reason ?? t('logging:defaultReason'),
         inline: false,
       },
       {
-        name: '期間',
+        name: t('logging:modlog.fieldDuration'),
         value:
           current.durationSeconds === null ||
           current.durationSeconds === undefined
-            ? '永続'
+            ? t('logging:duration.permanent')
             : humanDuration(current.durationSeconds),
         inline: true,
       },
-      { name: '発生元', value: translateSource(current.source), inline: true },
-      { name: '状態', value: translateStatus(current.status), inline: true },
+      {
+        name: t('logging:modlog.fieldSource'),
+        value: translateSource(current.source),
+        inline: true,
+      },
+      {
+        name: t('logging:modlog.fieldStatus'),
+        value: translateStatus(current.status),
+        inline: true,
+      },
     ];
     fields.push({
-      name: 'DM',
+      name: t('logging:modlog.fieldDm'),
       value:
         'dmDelivered' in metadata
           ? translateDm(String(metadata.dmDelivered))
-          : '対象外',
+          : t('logging:modlog.fieldDmNotApplicable'),
       inline: true,
     });
     if ('errorCode' in metadata || current.errorCode) {
       const errorValue = metadata.errorCode ?? current.errorCode;
       fields.push({
-        name: 'エラー',
+        name: t('logging:modlog.fieldError'),
         value: typeof errorValue === 'string' ? errorValue : 'unknown',
         inline: true,
       });
@@ -287,7 +291,10 @@ export class ModerationLogService extends IsolatedLogService {
         occurredAt: current.createdAt,
         timezone: 'UTC',
         embed: {
-          title: `ケース #${String(current.caseNumber)} — ${translateAction(current.action)}`,
+          title: t('logging:modlog.caseTitle', {
+            caseNumber: String(current.caseNumber),
+            actionLabel: translateAction(current.action),
+          }),
           timestamp: current.createdAt.toISOString(),
           color: actionColor(current.action, current.status),
           footer: { text: current.id },

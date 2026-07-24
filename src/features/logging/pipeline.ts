@@ -2,6 +2,7 @@ import type { SnapshotService } from '../../services/snapshot-service.js';
 import { isUnauthorized, type LoggingEventAdapter } from './adapters.js';
 import type { LogDeliveryService } from './service.js';
 import { serverEmbed, type MessageView } from './events.js';
+import { t } from '../../i18n/index.js';
 import type {
   JsonValue,
   MemberSnapshotDto,
@@ -290,11 +291,11 @@ export class LoggingEventPipeline {
     if (usernameChanged)
       await this.server(
         member.guildId,
-        'ユーザー名変更',
+        t('logging:serverEvents.usernameChange'),
         [
-          { name: 'ユーザー', value: user },
-          { name: '変更前', value: member.username },
-          { name: '変更後', value: username },
+          { name: t('logging:embedFields.user'), value: user },
+          { name: t('logging:embedFields.before'), value: member.username },
+          { name: t('logging:embedFields.after'), value: username },
         ],
         occurredAt,
         0x3498db,
@@ -302,11 +303,17 @@ export class LoggingEventPipeline {
     if (globalNameChanged)
       await this.server(
         member.guildId,
-        'グローバル表示名変更',
+        t('logging:serverEvents.globalNameChange'),
         [
-          { name: 'ユーザー', value: user },
-          { name: '変更前', value: member.globalName ?? 'なし' },
-          { name: '変更後', value: globalName ?? 'なし' },
+          { name: t('logging:embedFields.user'), value: user },
+          {
+            name: t('logging:embedFields.before'),
+            value: member.globalName ?? t('logging:common.none'),
+          },
+          {
+            name: t('logging:embedFields.after'),
+            value: globalName ?? t('logging:common.none'),
+          },
         ],
         occurredAt,
         0x3498db,
