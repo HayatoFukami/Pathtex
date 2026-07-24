@@ -6,6 +6,7 @@ import type {
   ToolsPort,
   LookupResult,
 } from './contracts.js';
+import { t } from '../../i18n/index.js';
 
 const parallel = async <T>(
   items: readonly T[],
@@ -38,7 +39,7 @@ export class ToolsService {
       (scope === 'action') !== (options.action !== undefined) ||
       (scope === 'all' && (options.userId || options.action))
     )
-      return err('INVALID_INPUT', 'scopeと条件が一致しません');
+      return err('INVALID_INPUT', t('tools:errors.scopeMismatch'));
     return ok(true);
   }
   public async announce(
@@ -47,17 +48,17 @@ export class ToolsService {
     message: string,
   ): Promise<Result<{ restored: boolean }>> {
     if (message.length < 1 || message.length > 2000)
-      return err('INVALID_INPUT', 'メッセージは1～2000文字です');
+      return err('INVALID_INPUT', t('tools:errors.messageLength'));
     if (!this.announcement)
-      return err('DISCORD_API_ERROR', 'Announcement adapterがありません');
+      return err(
+        'DISCORD_API_ERROR',
+        t('tools:errors.announcementAdapterMissing'),
+      );
     if (
       this.announcement.sameGuild &&
       !(await this.announcement.sameGuild(channelId, roleId))
     )
-      return err(
-        'INVALID_INPUT',
-        '対象チャンネルとロールが同じギルドではありません',
-      );
+      return err('INVALID_INPUT', t('tools:errors.channelRoleGuildMismatch'));
     const role = await this.announcement.getRole(roleId);
     let channelPermissions: ReadonlySet<string> | undefined;
     if (this.announcement.channelPermissions) {
@@ -67,16 +68,13 @@ export class ToolsService {
         if (!channelPermissions.has(permission))
           return err(
             'BOT_PERMISSION_MISSING',
-            `対象チャンネルに${permission}権限がありません`,
+            t('tools:errors.missingChannelPermission', { permission }),
           );
     }
     const original = role.mentionable;
     const changed = !original && !channelPermissions?.has('MentionEveryone');
     if (changed && channelPermissions && !channelPermissions.has('ManageRoles'))
-      return err(
-        'BOT_PERMISSION_MISSING',
-        '対象チャンネルでロールの管理権限がありません',
-      );
+      return err('BOT_PERMISSION_MISSING', t('tools:errors.missingManageRoles'));
     let restored = true;
     try {
       if (changed) {
@@ -84,7 +82,7 @@ export class ToolsService {
           ? await this.announcement.botPositionFor(channelId)
           : await this.announcement.botPosition();
         if (botPosition <= role.position)
-          return err('ROLE_HIERARCHY', 'ロール順位が不足しています');
+          return err('ROLE_HIERARCHY', t('tools:errors.roleHierarchy'));
         await this.announcement.setMentionable(roleId, true);
       }
       await this.announcement.send(channelId, `<@&${roleId}> ${message}`, {
@@ -111,7 +109,7 @@ export class ToolsService {
     const valid = this.validateAudit(scope, options);
     if (!valid.ok) return valid;
     if (!this.auditPort)
-      return err('DISCORD_API_ERROR', 'Audit adapterがありません');
+      return err('DISCORD_API_ERROR', t('tools:errors.auditAdapterMissing'));
     return ok(
       await this.auditPort.list(guildId, {
         ...(options.userId ? { userId: options.userId } : {}),
@@ -269,7 +267,7 @@ export class ToolsService {
   }
   public async lookup(query: string): Promise<Result<LookupResult>> {
     if (query.length < 2 || query.length > 200)
-      return err('INVALID_INPUT', '検索語は2～200文字です');
+      return err('INVALID_INPUT', t('tools:errors.queryLength'));
     const normalized = query.trim().replace(/^<|>$/gu, '').replace(/\/$/u, '');
     const match = normalized.match(
       /^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([\w-]+)$/iu,
@@ -279,7 +277,7 @@ export class ToolsService {
       const invite = await this.port.invite(candidate);
       return invite
         ? ok({ kind: 'invite', ...invite })
-        : err('USER_NOT_FOUND', '招待が見つかりません');
+        : err('USER_NOT_FOUND', t('tools:errors.inviteNotFound'));
     }
     const bareInvite = await this.port.invite(normalized);
     if (bareInvite) return ok({ kind: 'invite', ...bareInvite });
@@ -288,11 +286,8 @@ export class ToolsService {
       if (user) return ok({ kind: 'user', ...user });
       const preview = await this.port.preview(normalized);
       if (preview) return ok({ kind: 'preview', ...preview });
-      return err(
-        'USER_NOT_FOUND',
-        'このギルドはIDだけでは公開情報を取得できません。有効な招待コードを指定してください。',
-      );
+      return err('USER_NOT_FOUND', t('tools:errors.guildIdOnlyUnavailable'));
     }
-    return err('USER_NOT_FOUND', 'ユーザーまたは招待が見つかりません');
+    return err('USER_NOT_FOUND', t('tools:errors.userOrInviteNotFound'));
   }
 }

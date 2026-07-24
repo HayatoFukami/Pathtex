@@ -9,6 +9,7 @@ import {
 import type { CommandDefinition } from '../../commands/contract.js';
 import { splitList, type GeneralService } from './service.js';
 import type { DiscordGeneralAdapter } from './adapters.js';
+import { t } from '../../i18n/index.js';
 
 const base = (
   name: string,
@@ -49,7 +50,7 @@ const response = async (
       .addFields(
         chunk.map(([name, value]) => ({
           name,
-          value: value || 'なし',
+          value: value || t('general:common.none'),
           inline: true,
         })),
       );
@@ -82,26 +83,42 @@ export function generalCommands(
   service: GeneralService,
   adapter: DiscordGeneralAdapter,
 ): readonly CommandDefinition[] {
-  const about = base('about', 'Botの情報を表示します');
-  const invite = base('invite', 'Botの招待リンクを表示します');
-  const ping = base('ping', '応答を確認します');
+  const aboutDescription = t('general:command.about');
+  const inviteDescription = t('general:command.invite');
+  const pingDescription = t('general:command.ping');
+  const roleinfoDescription = t('general:command.roleinfo');
+  const serverinfoDescription = t('general:command.serverinfo');
+  const userinfoDescription = t('general:command.userinfo');
+  const about = base('about', aboutDescription);
+  const invite = base('invite', inviteDescription);
+  const ping = base('ping', pingDescription);
   const roleinfo = {
-    ...base('roleinfo', 'ロールの情報を表示します'),
+    ...base('roleinfo', roleinfoDescription),
     data: {
-      ...base('roleinfo', 'ロールの情報を表示します').data,
+      ...base('roleinfo', roleinfoDescription).data,
       options: [
-        { name: 'role', description: 'ロール', type: 8, required: true },
+        {
+          name: 'role',
+          description: t('general:command.roleinfoRoleOption'),
+          type: 8,
+          required: true,
+        },
       ],
     },
     deferMode: 'PUBLIC' as const,
   };
-  const serverinfo = base('serverinfo', 'サーバーの情報を表示します');
+  const serverinfo = base('serverinfo', serverinfoDescription);
   const userinfo = {
-    ...base('userinfo', 'ユーザーの情報を表示します'),
+    ...base('userinfo', userinfoDescription),
     data: {
-      ...base('userinfo', 'ユーザーの情報を表示します').data,
+      ...base('userinfo', userinfoDescription).data,
       options: [
-        { name: 'user', description: 'ユーザー', type: 6, required: false },
+        {
+          name: 'user',
+          description: t('general:command.userinfoUserOption'),
+          type: 6,
+          required: false,
+        },
       ],
     },
     deferMode: 'PUBLIC' as const,
@@ -120,14 +137,14 @@ export function generalCommands(
       await interaction.reply({
         embeds: [
           new EmbedBuilder()
-            .setTitle('Botを招待')
+            .setTitle(t('general:invite.title'))
             .setColor(0x3498db)
-            .setDescription('Pathtexをサーバーへ招待します。'),
+            .setDescription(t('general:invite.description')),
         ],
         components: [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
-              .setLabel('招待リンク')
+              .setLabel(t('general:invite.linkLabel'))
               .setStyle(ButtonStyle.Link)
               .setURL(service.invite()),
           ),
@@ -140,10 +157,12 @@ export function generalCommands(
         interaction,
         'Ping',
         {
-          Interaction応答遅延: `${String(p.interactionMs)}ms`,
+          [t('general:ping.fields.interactionLatency')]: `${String(p.interactionMs)}ms`,
           'Gateway ping': `${String(p.gatewayMs)}ms`,
           'DB ping':
-            p.databaseMs === null ? '失敗' : `${String(p.databaseMs)}ms`,
+            p.databaseMs === null
+              ? t('general:ping.dbFailed')
+              : `${String(p.databaseMs)}ms`,
         },
         undefined,
         service.runtime.avatarUrl,
@@ -162,23 +181,27 @@ export function generalCommands(
           : adapter.role(resolvedRole),
       );
       const fields: Record<string, string> = {
-        名前: info.name,
+        [t('general:roleinfo.fields.name')]: info.name,
         ID: info.id,
-        色: info.color,
-        作成日時: info.createdAt,
-        順位: info.position === null ? '取得不能' : String(info.position),
-        メンバー数:
+        [t('general:roleinfo.fields.color')]: info.color,
+        [t('general:roleinfo.fields.createdAt')]: info.createdAt,
+        [t('general:roleinfo.fields.position')]:
+          info.position === null
+            ? t('general:common.unavailable')
+            : String(info.position),
+        [t('general:roleinfo.fields.memberCount')]:
           info.members === null
-            ? '取得不能（キャッシュ外）'
-            : `${String(info.members)}${info.memberCountApproximate ? '（概算）' : ''}`,
+            ? t('general:common.unavailableCached')
+            : `${String(info.members)}${info.memberCountApproximate ? t('general:common.approximateSuffix') : ''}`,
         mentionable: String(info.mentionable),
         hoist: String(info.hoist),
         managed: String(info.managed),
-        アイコン: info.icon,
-        Bot最高ロール比較: info.botComparison,
+        [t('general:roleinfo.fields.icon')]: info.icon,
+        [t('general:roleinfo.fields.botComparison')]: info.botComparison,
       };
       splitList(info.permissions).forEach((value, index) => {
-        fields[`権限${String(index + 1)}`] = value;
+        fields[t('general:roleinfo.fields.permission', { index: index + 1 })] =
+          value;
       });
       await response(
         interaction,
@@ -196,27 +219,37 @@ export function generalCommands(
         interaction,
         'Server Info',
         {
-          名前: info.name,
+          [t('general:serverinfo.fields.name')]: info.name,
           ID: info.id,
-          アイコン: info.icon,
+          [t('general:serverinfo.fields.icon')]: info.icon,
           Owner: info.owner,
-          作成日時: info.createdAt,
-          メンバー: String(info.memberCount),
-          ユーザー: String(info.userCount),
+          [t('general:serverinfo.fields.createdAt')]: info.createdAt,
+          [t('general:serverinfo.fields.memberCount')]: String(
+            info.memberCount,
+          ),
+          [t('general:serverinfo.fields.userCount')]: String(info.userCount),
           Bot: String(info.botCount),
-          テキスト: String(info.textChannels),
-          ボイス: String(info.voiceChannels),
-          カテゴリ: String(info.categories),
-          スレッド: String(info.threads),
-          ロール: String(info.roles),
+          [t('general:serverinfo.fields.textChannels')]: String(
+            info.textChannels,
+          ),
+          [t('general:serverinfo.fields.voiceChannels')]: String(
+            info.voiceChannels,
+          ),
+          [t('general:serverinfo.fields.categories')]: String(
+            info.categories,
+          ),
+          [t('general:serverinfo.fields.threads')]: String(info.threads),
+          [t('general:serverinfo.fields.roles')]: String(info.roles),
           Boost: `${String(info.boosts)} (Tier ${info.tier})`,
           Verification: info.verification,
           'Explicit Filter': info.filter,
           Locale: info.locale,
-          Features: info.features.join(', ') || 'なし',
+          Features: info.features.join(', ') || t('general:common.none'),
           Vanity: info.vanity,
         },
-        info.approximate ? '一部は概算値' : undefined,
+        info.approximate
+          ? t('general:serverinfo.approximateFooter')
+          : undefined,
         service.runtime.avatarUrl,
       );
     }),
@@ -241,11 +274,12 @@ export function generalCommands(
           ID: info.id,
           Bot: String(info.bot),
           System: String(info.system),
-          作成日時: info.createdAt,
-          参加日時: info.joinedAt,
+          [t('general:userinfo.fields.createdAt')]: info.createdAt,
+          [t('general:userinfo.fields.joinedAt')]: info.joinedAt,
           Nickname: info.nickname,
-          最高ロール: info.highestRole,
-          ロール: info.roles.join(', ') || '@everyone',
+          [t('general:userinfo.fields.highestRole')]: info.highestRole,
+          [t('general:userinfo.fields.roles')]:
+            info.roles.join(', ') || '@everyone',
           Avatar: info.avatar,
           'Guild Avatar': info.guildAvatar,
           'Guild Avatar available': String(info.guildAvatarAvailable),
@@ -254,7 +288,8 @@ export function generalCommands(
           Timeout: info.timeout,
         },
         undefined,
-        info.guildAvatarAvailable && info.guildAvatar !== 'なし'
+        info.guildAvatarAvailable &&
+        info.guildAvatar !== t('general:common.none')
           ? info.guildAvatar
           : info.avatar,
       );

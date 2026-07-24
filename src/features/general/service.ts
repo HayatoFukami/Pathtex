@@ -5,6 +5,7 @@ import type {
   ServerInfo,
   UserInfo,
 } from './contracts.js';
+import { t } from '../../i18n/index.js';
 
 export class GeneralService {
   public constructor(private readonly deps: GeneralServiceDependencies) {}
@@ -14,27 +15,32 @@ export class GeneralService {
   }
 
   public async about(): Promise<Record<string, string>> {
-    let statistics = '取得失敗';
+    let statistics = t('general:about.statisticsFailed');
     try {
       const value = await withDeadlineValue(
         (this.deps.stats ?? this.deps.database)?.getStats(),
         1_500,
       );
       if (value)
-        statistics = `ケース ${String(value.cases)} / ストライク ${String(value.strikes)}`;
+        statistics = t('general:about.statistics', {
+          cases: value.cases,
+          strikes: value.strikes,
+        });
     } catch {
       /* safe fallback is part of the public contract */
     }
     const r = this.deps.runtime;
     return {
       Bot: r.botName,
-      バージョン: r.version,
+      [t('general:about.fields.version')]: r.version,
       Node: r.nodeVersion,
       'discord.js': r.discordVersion,
-      稼働時間: formatDuration(r.uptimeMs),
-      ギルド数: String(r.guildCount),
-      キャッシュユーザー数: String(r.cachedUserCount),
-      統計: statistics,
+      [t('general:about.fields.uptime')]: formatDuration(r.uptimeMs),
+      [t('general:about.fields.guildCount')]: String(r.guildCount),
+      [t('general:about.fields.cachedUserCount')]: String(
+        r.cachedUserCount,
+      ),
+      [t('general:about.fields.statistics')]: statistics,
       GitHub: 'https://github.com/HayatoFukami/Pathtex',
     };
   }
@@ -87,7 +93,7 @@ export const formatDuration = (milliseconds: number): string => {
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const rest = seconds % 60;
-  return `${String(days)}日 ${String(hours)}時間 ${String(minutes)}分 ${String(rest)}秒`;
+  return t('general:duration', { days, hours, minutes, seconds: rest });
 };
 
 const withDeadline = async (

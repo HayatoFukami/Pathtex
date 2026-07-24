@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import type { ToolsService } from './service.js';
+import { t } from '../../i18n/index.js';
 const definition = (
   name: string,
   description: string,
@@ -203,7 +204,9 @@ const auditButton = (
   depth = 0,
   backTotal = total,
   priorBackTotal = 0,
-  label = direction === 'next' ? '次へ' : '前へ',
+  label = direction === 'next'
+    ? t('tools:audit.nextLabel')
+    : t('tools:audit.previousLabel'),
 ): ButtonBuilder | null => {
   const id = createAuditCustomId(
     direction,
@@ -230,18 +233,23 @@ export function toolsCommands(
   return [
     command(
       'announce',
-      definition('announce', '告知を送信', [
+      definition('announce', t('tools:announce.command.description'), [
         {
           name: 'channel',
-          description: 'チャンネル',
+          description: t('tools:announce.command.channelOption'),
           type: 7,
           required: true,
           channel_types: [0],
         },
-        { name: 'role', description: 'ロール', type: 8, required: true },
+        {
+          name: 'role',
+          description: t('tools:announce.command.roleOption'),
+          type: 8,
+          required: true,
+        },
         {
           name: 'message',
-          description: '本文',
+          description: t('tools:announce.command.messageOption'),
           type: 3,
           required: true,
           min_length: 1,
@@ -256,7 +264,7 @@ export function toolsCommands(
         );
         await interaction.editReply(
           result.ok
-            ? `告知を送信しました${result.value.restored ? '' : '（ロール復元に失敗）'}`
+            ? `${t('tools:announce.sent')}${result.value.restored ? '' : t('tools:announce.roleRestoreFailedSuffix')}`
             : result.error.message,
         );
       },
@@ -264,23 +272,32 @@ export function toolsCommands(
     ),
     command(
       'audit',
-      definition('audit', '監査ログを表示', [
+      definition('audit', t('tools:audit.command.description'), [
         {
           name: 'scope',
-          description: '範囲',
+          description: t('tools:audit.command.scopeOption'),
           type: 3,
           required: true,
           choices: [
-            { name: 'すべて', value: 'all' },
-            { name: '実行者', value: 'from' },
-            { name: '操作', value: 'action' },
+            { name: t('tools:audit.command.scopeAll'), value: 'all' },
+            { name: t('tools:audit.command.scopeFrom'), value: 'from' },
+            { name: t('tools:audit.command.scopeAction'), value: 'action' },
           ],
         },
-        { name: 'user', description: '実行者', type: 6 },
-        { name: 'action', description: '操作', type: 3, autocomplete: true },
+        {
+          name: 'user',
+          description: t('tools:audit.command.userOption'),
+          type: 6,
+        },
+        {
+          name: 'action',
+          description: t('tools:audit.command.actionOption'),
+          type: 3,
+          autocomplete: true,
+        },
         {
           name: 'limit',
-          description: '件数',
+          description: t('tools:audit.command.limitOption'),
           type: 4,
           min_value: 1,
           max_value: 100,
@@ -342,27 +359,43 @@ export function toolsCommands(
           embeds: result.ok
             ? [
                 new EmbedBuilder()
-                  .setTitle('監査ログ')
+                  .setTitle(t('tools:audit.embedTitle'))
                   .setDescription(
                     result.value.entries
                       .map((e) =>
                         [
                           `[${e.createdAt.toISOString()}] ${e.action}`,
-                          `実行者: ${e.userName} (${e.userId})`,
-                          `対象: ${e.targetType ?? '不明'} / ${e.target ?? 'なし'}`,
-                          `理由: ${e.reason ?? 'なし'}`,
+                          t('tools:audit.executorLine', {
+                            name: e.userName,
+                            id: e.userId,
+                          }),
+                          t('tools:audit.targetLine', {
+                            type: e.targetType ?? t('tools:common.unknown'),
+                            target: e.target ?? t('tools:common.none'),
+                          }),
+                          t('tools:audit.reasonLine', {
+                            reason: e.reason ?? t('tools:common.none'),
+                          }),
                           ...(e.changes
                             ? [
-                                `変更: ${Object.entries(e.changes)
-                                  .map(([key, change]) => `${key}: ${change}`)
-                                  .join(', ')}`,
+                                t('tools:audit.changesLine', {
+                                  changes: Object.entries(e.changes)
+                                    .map(
+                                      ([key, change]) => `${key}: ${change}`,
+                                    )
+                                    .join(', '),
+                                }),
                               ]
                             : []),
                         ].join('\n'),
                       )
-                      .join('\n\n') || '監査ログはありません',
+                      .join('\n\n') || t('tools:audit.empty'),
                   )
-                  .setFooter({ text: `合計 ${String(result.value.total)}件` }),
+                  .setFooter({
+                    text: t('tools:audit.footer', {
+                      total: result.value.total,
+                    }),
+                  }),
               ]
             : [],
           ...(result.ok ? {} : { content: result.error.message }),
@@ -382,8 +415,13 @@ export function toolsCommands(
     ),
     command(
       'dehoist',
-      definition('dehoist', '名前の先頭記号を除去', [
-        { name: 'symbol', description: '記号', type: 3, max_length: 8 },
+      definition('dehoist', t('tools:dehoist.command.description'), [
+        {
+          name: 'symbol',
+          description: t('tools:dehoist.command.symbolOption'),
+          type: 3,
+          max_length: 8,
+        },
       ]),
       async ({ interaction }) => {
         const result = await service.dehoist(
@@ -392,17 +430,30 @@ export function toolsCommands(
         );
         await replySplit(
           interaction,
-          `完了: 成功 ${String(result.success.length)} / 失敗 ${String(result.failed.length)}\n${result.outcomes.map((item) => `${item.userId}: ${item.ok ? (item.nickname ?? '変更済み') : (item.code ?? '失敗')}`).join('\n')}`,
+          t('tools:completedSummary', {
+            success: result.success.length,
+            failed: result.failed.length,
+            lines: result.outcomes
+              .map((item) =>
+                t('tools:dehoist.outcomeLine', {
+                  userId: item.userId,
+                  status: item.ok
+                    ? (item.nickname ?? t('tools:dehoist.changed'))
+                    : (item.code ?? t('tools:dehoist.failed')),
+                }),
+              )
+              .join('\n'),
+          }),
         );
       },
       PermissionFlagsBits.ManageNicknames,
     ),
     command(
       'inviteprune',
-      definition('inviteprune', '招待を整理', [
+      definition('inviteprune', t('tools:inviteprune.command.description'), [
         {
           name: 'max_uses',
-          description: '最大使用回数',
+          description: t('tools:inviteprune.command.maxUsesOption'),
           type: 4,
           min_value: 0,
         },
@@ -414,17 +465,32 @@ export function toolsCommands(
         );
         await replySplit(
           interaction,
-          `完了: 成功 ${String(result.success.length)} / 失敗 ${String(result.failed.length)}\n${result.details.map((item) => `${item.code} (${String(item.uses)}) ${item.creator ?? '作成者不明'}: ${item.ok ? '削除済み' : '削除失敗'}`).join('\n')}`,
+          t('tools:completedSummary', {
+            success: result.success.length,
+            failed: result.failed.length,
+            lines: result.details
+              .map((item) =>
+                t('tools:inviteprune.outcomeLine', {
+                  code: item.code,
+                  uses: item.uses,
+                  creator: item.creator ?? t('tools:inviteprune.creatorUnknown'),
+                  status: item.ok
+                    ? t('tools:inviteprune.deleted')
+                    : t('tools:inviteprune.deleteFailed'),
+                }),
+              )
+              .join('\n'),
+          }),
         );
       },
       PermissionFlagsBits.ManageGuild,
     ),
     command(
       'lookup',
-      definition('lookup', 'ユーザーまたは招待を検索', [
+      definition('lookup', t('tools:lookup.command.description'), [
         {
           name: 'query',
-          description: '検索語',
+          description: t('tools:lookup.command.queryOption'),
           type: 3,
           required: true,
           min_length: 2,
@@ -442,17 +508,53 @@ export function toolsCommands(
         const embed = new EmbedBuilder()
           .setTitle(
             result.value.kind === 'user'
-              ? 'ユーザー情報'
+              ? t('tools:lookup.userTitle')
               : result.value.kind === 'invite'
-                ? '招待情報'
-                : 'ギルド情報',
+                ? t('tools:lookup.inviteTitle')
+                : t('tools:lookup.guildTitle'),
           )
           .setDescription(
             result.value.kind === 'user'
-              ? `ユーザー名: ${result.value.username}\nGlobal Name: ${result.value.globalName ?? 'なし'}\nID: ${result.value.id}\nBot: ${result.value.bot ? 'はい' : 'いいえ'}\n作成日時: ${result.value.createdAt.toISOString()}\nAvatar: ${result.value.avatarUrl ?? 'なし'}`
+              ? t('tools:lookup.userDescription', {
+                  username: result.value.username,
+                  globalName: result.value.globalName ?? t('tools:common.none'),
+                  id: result.value.id,
+                  bot: result.value.bot
+                    ? t('tools:lookup.yes')
+                    : t('tools:lookup.no'),
+                  createdAt: result.value.createdAt.toISOString(),
+                  avatar: result.value.avatarUrl ?? t('tools:common.none'),
+                })
               : result.value.kind === 'invite'
-                ? `ギルド: ${result.value.guildName} (${result.value.guildId})\n招待コード: ${result.value.code}\nチャンネル: ${result.value.channelName ?? 'なし'}\nメンバー数: ${String(result.value.memberCount ?? '不明')} / オンライン: ${String(result.value.onlineCount ?? '不明')}\nVerification: ${result.value.verification ?? '不明'}\nBoost: ${String(result.value.boost ?? '不明')}\nFeatures: ${result.value.features.join(', ') || 'なし'}\n${result.value.description ?? '説明なし'}`
-                : `ギルド: ${result.value.guildName} (${result.value.guildId})\n${result.value.description ?? '説明なし'}\nメンバー数: ${String(result.value.memberCount ?? '不明')} / オンライン: ${String(result.value.onlineCount ?? '不明')}`,
+                ? t('tools:lookup.inviteDescription', {
+                    guildName: result.value.guildName,
+                    guildId: result.value.guildId,
+                    code: result.value.code,
+                    channelName:
+                      result.value.channelName ?? t('tools:common.none'),
+                    memberCount:
+                      result.value.memberCount ?? t('tools:common.unknown'),
+                    onlineCount:
+                      result.value.onlineCount ?? t('tools:common.unknown'),
+                    verification:
+                      result.value.verification ?? t('tools:common.unknown'),
+                    boost: result.value.boost ?? t('tools:common.unknown'),
+                    features:
+                      result.value.features.join(', ') ||
+                      t('tools:common.none'),
+                    description:
+                      result.value.description ?? t('tools:lookup.noDescription'),
+                  })
+                : t('tools:lookup.guildDescription', {
+                    guildName: result.value.guildName,
+                    guildId: result.value.guildId,
+                    description:
+                      result.value.description ?? t('tools:lookup.noDescription'),
+                    memberCount:
+                      result.value.memberCount ?? t('tools:common.unknown'),
+                    onlineCount:
+                      result.value.onlineCount ?? t('tools:common.unknown'),
+                  }),
           );
         const icon =
           result.value.kind === 'user'
@@ -479,7 +581,7 @@ export async function handleToolsComponent(
     return false;
   if (interaction.user.id !== actorId || !interaction.guildId) {
     await interaction.reply({
-      content: 'この操作は実行者本人のみ利用できます。',
+      content: t('tools:audit.actorOnly'),
       ephemeral: true,
     });
     return true;
@@ -567,23 +669,34 @@ export async function handleToolsComponent(
       ? {
           embeds: [
             new EmbedBuilder()
-              .setTitle('監査ログ')
+              .setTitle(t('tools:audit.embedTitle'))
               .setDescription(
                 result.value.entries
                   .map(
                     (entry) =>
-                      `${entry.action} / ${entry.userName} (${entry.userId})\n対象: ${entry.targetType ?? '不明'} / ${entry.target ?? 'なし'}\n理由: ${entry.reason ?? 'なし'}${
+                      `${t('tools:audit.compactHeader', {
+                        action: entry.action,
+                        userName: entry.userName,
+                        userId: entry.userId,
+                      })}\n${t('tools:audit.targetLine', {
+                        type: entry.targetType ?? t('tools:common.unknown'),
+                        target: entry.target ?? t('tools:common.none'),
+                      })}\n${t('tools:audit.reasonLine', {
+                        reason: entry.reason ?? t('tools:common.none'),
+                      })}${
                         entry.changes
-                          ? `\n変更: ${Object.entries(entry.changes)
-                              .map(([key, change]) => `${key}: ${change}`)
-                              .join(', ')}`
+                          ? `\n${t('tools:audit.changesLine', {
+                              changes: Object.entries(entry.changes)
+                                .map(([key, change]) => `${key}: ${change}`)
+                                .join(', '),
+                            })}`
                           : ''
                       }`,
                   )
-                  .join('\n\n') || '監査ログはありません',
+                  .join('\n\n') || t('tools:audit.empty'),
               )
               .setFooter({
-                text: `合計 ${String(currentTotal)}件`,
+                text: t('tools:audit.footer', { total: currentTotal }),
               }),
           ],
         }

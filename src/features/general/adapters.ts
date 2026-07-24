@@ -16,6 +16,7 @@ import type {
   ServerInfo,
   UserInfo,
 } from './contracts.js';
+import { t } from '../../i18n/index.js';
 
 export class DiscordGeneralAdapter {
   public constructor(
@@ -101,12 +102,12 @@ export class DiscordGeneralAdapter {
           ? `https://cdn.discordapp.com/role-icons/${role.id}/${role.icon}.png`
           : 'unicode_emoji' in role && role.unicode_emoji
             ? role.unicode_emoji
-            : 'なし'),
+            : t('general:common.none')),
       permissions,
       botComparison:
         botRole && position !== null
           ? comparison(position, botRole.position)
-          : '取得不能',
+          : t('general:common.unavailable'),
     };
   }
   public async roleWithMemberCount(
@@ -130,13 +131,14 @@ export class DiscordGeneralAdapter {
   public user(user: User, member?: GuildMember): UserInfo {
     return {
       username: user.username,
-      globalName: user.globalName ?? 'なし',
+      globalName: user.globalName ?? t('general:common.none'),
       id: user.id,
       bot: user.bot,
       system: user.system,
       createdAt: user.createdAt.toISOString(),
-      joinedAt: member?.joinedAt?.toISOString() ?? '取得不能',
-      nickname: member?.nickname ?? 'なし',
+      joinedAt:
+        member?.joinedAt?.toISOString() ?? t('general:common.unavailable'),
+      nickname: member?.nickname ?? t('general:common.none'),
       highestRole: member?.roles.highest.name ?? '@everyone',
       roles:
         member?.roles.cache
@@ -144,12 +146,16 @@ export class DiscordGeneralAdapter {
           .map((r) => r.name)
           .slice(0, 30) ?? [],
       avatar: user.displayAvatarURL(),
-      guildAvatar: member?.avatar ? member.displayAvatarURL() : 'なし',
+      guildAvatar: member?.avatar
+        ? member.displayAvatarURL()
+        : t('general:common.none'),
       guildAvatarAvailable:
         member?.avatar !== null && member?.avatar !== undefined,
-      banner: user.bannerURL() ?? '取得不能',
-      accent: user.hexAccentColor ?? '取得不能',
-      timeout: member?.communicationDisabledUntil?.toISOString() ?? 'なし',
+      banner: user.bannerURL() ?? t('general:common.unavailable'),
+      accent: user.hexAccentColor ?? t('general:common.unavailable'),
+      timeout:
+        member?.communicationDisabledUntil?.toISOString() ??
+        t('general:common.none'),
     };
   }
   public async resolveMember(
@@ -183,7 +189,7 @@ export class DiscordGeneralAdapter {
     return {
       name: guild.name,
       id: guild.id,
-      icon: guild.iconURL() ?? 'なし',
+      icon: guild.iconURL() ?? t('general:common.none'),
       owner: guild.ownerId,
       createdAt: guild.createdAt.toISOString(),
       memberCount: guild.memberCount,
@@ -204,7 +210,7 @@ export class DiscordGeneralAdapter {
       features: guild.features,
       vanity: guild.vanityURLCode
         ? `https://discord.gg/${guild.vanityURLCode}`
-        : 'なし',
+        : t('general:common.none'),
       approximate: members.length < guild.memberCount,
     };
   }
@@ -212,7 +218,7 @@ export class DiscordGeneralAdapter {
 
 const comparison = (position: number, botPosition: number): string =>
   position > botPosition
-    ? 'Botより上位'
+    ? t('general:roleComparison.higher')
     : position === botPosition
-      ? '同順位'
-      : 'Botより下位';
+      ? t('general:roleComparison.equal')
+      : t('general:roleComparison.lower');

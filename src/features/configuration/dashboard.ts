@@ -17,6 +17,7 @@ import {
   type ModalSubmitInteraction,
 } from 'discord.js';
 import type { ConfigurationService, LogKind } from './service.js';
+import { t } from '../../i18n/index.js';
 
 const DASHBOARD_TTL_MS = 15 * 60 * 1000;
 const LOG_KINDS: readonly LogKind[] = [
@@ -26,10 +27,10 @@ const LOG_KINDS: readonly LogKind[] = [
   'voice',
 ];
 const LOG_LABELS: Record<LogKind, string> = {
-  message: 'メッセージ',
-  moderation: 'モデレーション',
-  server: 'サーバー',
-  voice: 'ボイス',
+  message: t('configuration:dashboard.logLabels.message'),
+  moderation: t('configuration:dashboard.logLabels.moderation'),
+  server: t('configuration:dashboard.logLabels.server'),
+  voice: t('configuration:dashboard.logLabels.voice'),
 };
 const isComponent = (
   interaction: ConfigurationInteraction,
@@ -180,6 +181,8 @@ const button = (
 function boundedEntries(entries: readonly string[], limit = 3600): string {
   const shown: string[] = [];
   let omitted = 0;
+  const omittedMarker = (count: number): string =>
+    t('configuration:dashboard.omittedSuffix', { count });
   for (const entry of entries) {
     const candidate = [...shown, entry].join('\n');
     if (candidate.length <= limit) shown.push(entry);
@@ -188,12 +191,12 @@ function boundedEntries(entries: readonly string[], limit = 3600): string {
   if (omitted === 0) return shown.join('\n');
   while (
     shown.length > 0 &&
-    [...shown, `…他${String(omitted)}件`].join('\n').length > limit
+    [...shown, omittedMarker(omitted)].join('\n').length > limit
   ) {
     shown.pop();
     omitted++;
   }
-  return [...shown, `…他${String(omitted)}件`].join('\n');
+  return [...shown, omittedMarker(omitted)].join('\n');
 }
 
 function boundedSection(
@@ -202,7 +205,11 @@ function boundedSection(
   count: number,
   limit = 3600,
 ): string {
-  return `${heading}（${String(count)}件）\n${boundedEntries(entries, limit)}`;
+  return t('configuration:dashboard.boundedSection', {
+    heading,
+    count,
+    entries: boundedEntries(entries, limit),
+  });
 }
 
 function channelSelector(
@@ -212,7 +219,11 @@ function channelSelector(
 ): ChannelSelectMenuBuilder {
   const selector = new ChannelSelectMenuBuilder()
     .setCustomId(actionId(`channel-${kind}`, context))
-    .setPlaceholder(`${LOG_LABELS[kind]}ログのチャンネルを選択`)
+    .setPlaceholder(
+      t('configuration:dashboard.channelSelectorPlaceholder', {
+        label: LOG_LABELS[kind],
+      }),
+    )
     .setMinValues(1)
     .setMaxValues(1)
     .setChannelTypes([0, 5]);
@@ -226,8 +237,11 @@ function channelSelector(
 
 function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
   const settings = (overview.settings ?? {}) as Record<string, unknown>;
+  const notSet = t('configuration:common.notSet');
+  const unknown = t('configuration:common.unknown');
+  const disabled = t('configuration:dashboard.disabled');
   const mention = (key: string, prefix: string): string =>
-    typeof settings[key] === 'string' ? `${prefix}${settings[key]}>` : '未設定';
+    typeof settings[key] === 'string' ? `${prefix}${settings[key]}>` : notSet;
   const list = (key: string): string[] =>
     Array.isArray(overview[key])
       ? overview[key].filter((item): item is string => typeof item === 'string')
@@ -240,7 +254,7 @@ function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
         )
       : [];
   const identity = (kind: 'role' | 'channel', id: unknown): string => {
-    if (typeof id !== 'string') return '不明';
+    if (typeof id !== 'string') return unknown;
     return kind === 'role' ? `<@&${id}>` : `<#${id}>`;
   };
   const automod = overview.automod as Record<string, unknown> | null;
@@ -249,16 +263,44 @@ function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
     return typeof value === 'number' ? String(value) : '—';
   };
   const automodStatus = automod
-    ? `Invite ${numberOrDash('antiInviteStrikes')} / Referral ${numberOrDash('antiReferralStrikes')} / Everyone ${numberOrDash('antiEveryoneStrikes')} / Copypasta ${numberOrDash('antiCopypastaStrikes')}\nMention ${numberOrDash('maxUserMentions')} users・${numberOrDash('maxRoleMentions')} roles / Lines ${numberOrDash('maxLines')}\nDuplicate ${automod.duplicateEnabled === true ? `ON（削除 ${numberOrDash('duplicateDeleteThreshold')}・警告 ${numberOrDash('duplicateStrikeThreshold')}・加算 ${numberOrDash('duplicateStrikes')}）` : 'OFF'} / Dehoist ${typeof automod.autodehoistCharacter === 'string' ? automod.autodehoistCharacter : 'OFF'}`
-    : '未初期化';
+    ? t('configuration:dashboard.automodStatus', {
+        invite: numberOrDash('antiInviteStrikes'),
+        referral: numberOrDash('antiReferralStrikes'),
+        everyone: numberOrDash('antiEveryoneStrikes'),
+        copypasta: numberOrDash('antiCopypastaStrikes'),
+        userMentions: numberOrDash('maxUserMentions'),
+        roleMentions: numberOrDash('maxRoleMentions'),
+        lines: numberOrDash('maxLines'),
+        duplicateStatus:
+          automod.duplicateEnabled === true
+            ? t('configuration:dashboard.duplicateOn', {
+                deleteThreshold: numberOrDash('duplicateDeleteThreshold'),
+                strikeThreshold: numberOrDash('duplicateStrikeThreshold'),
+                strikes: numberOrDash('duplicateStrikes'),
+              })
+            : 'OFF',
+        dehoist:
+          typeof automod.autodehoistCharacter === 'string'
+            ? automod.autodehoistCharacter
+            : 'OFF',
+      })
+    : t('configuration:dashboard.notInitialized');
   const autoRaid =
     automod?.autoRaidEnabled === true
-      ? `有効（${numberOrDash('autoRaidJoinCount')}人 / ${numberOrDash('autoRaidWindowSeconds')}秒）`
-      : '無効';
+      ? t('configuration:dashboard.autoRaidEnabled', {
+          count: numberOrDash('autoRaidJoinCount'),
+          window: numberOrDash('autoRaidWindowSeconds'),
+        })
+      : disabled;
   const settingsRaid =
     settings.raidModeEnabled === true
-      ? `有効（${typeof settings.raidModeSource === 'string' ? settings.raidModeSource : '手動'}）`
-      : '無効';
+      ? t('configuration:dashboard.raidEnabled', {
+          source:
+            typeof settings.raidModeSource === 'string'
+              ? settings.raidModeSource
+              : t('configuration:dashboard.raidManual'),
+        })
+      : disabled;
   const punishments = recordList('punishments');
   const explicitRoles = recordList('ignoredRoles');
   const explicitChannels = recordList('ignoredChannels');
@@ -272,9 +314,15 @@ function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
     const action = typeof item.action === 'string' ? item.action : '?';
     const duration =
       typeof item.durationSeconds === 'number'
-        ? `（${String(item.durationSeconds)}秒）`
+        ? t('configuration:dashboard.punishmentDuration', {
+            seconds: item.durationSeconds,
+          })
         : '';
-    return `${threshold}→${action}${duration}`;
+    return t('configuration:dashboard.punishmentEntry', {
+      threshold,
+      action,
+      duration,
+    });
   });
   const explicitIgnoreText = [
     ...explicitRoles.map((item) => identity('role', item.roleId)),
@@ -282,28 +330,59 @@ function details(overview: Record<string, unknown>): TextDisplayBuilder[] {
   ];
   return [
     text(
-      `### ログの状態\nメッセージ：${mention('messageLogChannelId', '<#')}\nモデレーション：${mention('modlogChannelId', '<#')}\nサーバー：${mention('serverLogChannelId', '<#')}\nボイス：${mention('voiceLogChannelId', '<#')}`,
+      t('configuration:dashboard.logsHeading', {
+        message: mention('messageLogChannelId', '<#'),
+        moderation: mention('modlogChannelId', '<#'),
+        server: mention('serverLogChannelId', '<#'),
+        voice: mention('voiceLogChannelId', '<#'),
+      }),
     ),
     text(
-      `### 基本設定\nMODロール：${mention('modRoleId', '<@&')}\nMutedロール：${mention('mutedRoleId', '<@&')}\nタイムゾーン：${typeof settings.timezone === 'string' ? settings.timezone : 'UTC'}`,
+      t('configuration:dashboard.basicHeading', {
+        modRole: mention('modRoleId', '<@&'),
+        mutedRole: mention('mutedRoleId', '<@&'),
+        timezone:
+          typeof settings.timezone === 'string' ? settings.timezone : 'UTC',
+      }),
     ),
     text(
-      `### 自動化と制裁\nRaidMode：${settingsRaid}\nAutoRaid：${autoRaid}\nAutoMod：${automodStatus}\n${boundedSection('Punishment', punishmentEntries, punishments.length)}`,
+      t('configuration:dashboard.automationHeading', {
+        raidMode: settingsRaid,
+        autoRaid,
+        automod: automodStatus,
+        punishmentSection: boundedSection(
+          'Punishment',
+          punishmentEntries,
+          punishments.length,
+        ),
+      }),
     ),
     text(
-      `### Ignore\n${boundedSection('明示', explicitIgnoreText, explicitIgnoreText.length, 1700)}\n${boundedSection(
-        '自動',
-        automaticIgnore.map((id) => identity('role', id)),
-        automaticIgnore.length,
-        1700,
-      )}`,
+      t('configuration:dashboard.ignoreHeading', {
+        explicit: boundedSection(
+          t('configuration:dashboard.explicitHeading'),
+          explicitIgnoreText,
+          explicitIgnoreText.length,
+          1700,
+        ),
+        automatic: boundedSection(
+          t('configuration:dashboard.automaticHeading'),
+          automaticIgnore.map((id) => identity('role', id)),
+          automaticIgnore.length,
+          1700,
+        ),
+      }),
     ),
     ...(warnings.length > 0
-      ? [text(`⚠️ ### 確認が必要\n${boundedEntries(warnings)}`)]
+      ? [
+          text(
+            t('configuration:dashboard.warningsHeading', {
+              entries: boundedEntries(warnings),
+            }),
+          ),
+        ]
       : []),
-    text(
-      '高度なAutoMod・Punishment・Ignore設定は、既存のスラッシュコマンドから変更できます。',
-    ),
+    text(t('configuration:dashboard.advancedNote')),
   ];
 }
 
@@ -316,10 +395,10 @@ export function configurationDashboard(
   const components: TextDisplayBuilder[] = [
     text(
       page === 'home'
-        ? '## サーバー設定'
+        ? t('configuration:dashboard.homeHeading')
         : page === 'logs'
-          ? '## ログチャンネル'
-          : '## 権限と表示',
+          ? t('configuration:dashboard.logsPageHeading')
+          : t('configuration:dashboard.accessPageHeading'),
     ),
     ...(page === 'home' ? details(overview) : []),
   ];
@@ -327,10 +406,15 @@ export function configurationDashboard(
   if (page === 'home') {
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button('nav-logs', 'ログを設定', context, ButtonStyle.Primary),
-        button('nav-access', 'ロール・時刻', context),
-        button('refresh', '再読み込み', context),
-        button('setup', '初期設定', context),
+        button(
+          'nav-logs',
+          t('configuration:dashboard.navLogs'),
+          context,
+          ButtonStyle.Primary,
+        ),
+        button('nav-access', t('configuration:dashboard.navAccess'), context),
+        button('refresh', t('configuration:dashboard.refresh'), context),
+        button('setup', t('configuration:dashboard.initialSetup'), context),
       ),
     );
   } else if (page === 'logs') {
@@ -348,8 +432,8 @@ export function configurationDashboard(
       );
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button('nav-home', '設定概要へ', context),
-        button('refresh', '再読み込み', context),
+        button('nav-home', t('configuration:dashboard.navHome'), context),
+        button('refresh', t('configuration:dashboard.refresh'), context),
       ),
     );
   } else {
@@ -357,19 +441,25 @@ export function configurationDashboard(
       new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(
         new RoleSelectMenuBuilder()
           .setCustomId(actionId('role-select', context))
-          .setPlaceholder('MODロールを選択')
+          .setPlaceholder(
+            t('configuration:dashboard.modRoleSelectPlaceholder'),
+          )
           .setMinValues(1)
           .setMaxValues(1),
       ),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        button('role-clear', 'MODロールを解除', context),
+        button(
+          'role-clear',
+          t('configuration:dashboard.modRoleClear'),
+          context,
+        ),
         button(
           'timezone-open',
-          'タイムゾーンを変更',
+          t('configuration:dashboard.timezoneChange'),
           context,
           ButtonStyle.Primary,
         ),
-        button('nav-home', '設定概要へ', context),
+        button('nav-home', t('configuration:dashboard.navHome'), context),
       ),
     );
   }
@@ -387,10 +477,8 @@ export function configurationDashboardError(): MessageEditOptions {
       new ContainerBuilder()
         .setAccentColor(0xef4444)
         .addTextDisplayComponents(
-          text('## 設定を表示できません'),
-          text(
-            '設定情報を読み込めませんでした。設定画面を開き直してください。',
-          ),
+          text(t('configuration:dashboard.errorHeading')),
+          text(t('configuration:dashboard.errorBody')),
         ),
     ],
   };
@@ -401,13 +489,13 @@ function ephemeralError(message: string): {
   flags: MessageFlags.Ephemeral;
 } {
   return {
-    content: `設定の更新に失敗しました。${message}\nもう一度お試しください。`,
+    content: t('configuration:dashboard.ephemeralError', { message }),
     flags: MessageFlags.Ephemeral,
   };
 }
 
 const safeOperationFailure = (): string =>
-  '設定を更新できませんでした。入力と権限を確認して、もう一度お試しください。';
+  t('configuration:dashboard.safeOperationFailure');
 
 const safeResultFailure = (
   options: ConfigurationComponentHandlerOptions,
@@ -448,9 +536,9 @@ export function createConfigurationInteractionHandler(
       parsed.actorId !== interaction.user.id ||
       parsed.expiresAt <= now()
     )
-      return reject('この設定画面は期限切れ、または別の利用者のものです。');
+      return reject(t('configuration:dashboard.expiredOrForeign'));
     if (!(await options.authorization.authorize(interaction)))
-      return reject('現在の権限では設定を変更できません。');
+      return reject(t('configuration:dashboard.unauthorized'));
     if (
       isComponent(interaction) &&
       parsed.action === 'setup' &&
@@ -458,7 +546,11 @@ export function createConfigurationInteractionHandler(
     ) {
       const missing = await options.setupPermissionPreflight(interaction);
       if (missing.length > 0)
-        return reject(`Botに必要な権限がありません：${missing.join('、')}`);
+        return reject(
+          t('configuration:dashboard.missingBotPermissions', {
+            missing: missing.join(t('configuration:dashboard.listSeparator')),
+          }),
+        );
     }
     if (isComponent(interaction) && parsed.action === 'timezone-open') {
       await interaction.showModal(
@@ -466,10 +558,10 @@ export function createConfigurationInteractionHandler(
           .setCustomId(
             actionId('timezone-submit', parsedContext(parsed, now(), ttlMs)),
           )
-          .setTitle('タイムゾーンを変更')
+          .setTitle(t('configuration:dashboard.timezoneChange'))
           .addLabelComponents(
             new LabelBuilder()
-              .setLabel('IANAタイムゾーン（例：Asia/Tokyo）')
+              .setLabel(t('configuration:dashboard.timezoneModalLabel'))
               .setTextInputComponent(
                 new TextInputBuilder()
                   .setCustomId('zone')
@@ -490,7 +582,10 @@ export function createConfigurationInteractionHandler(
       if (parsed.action === 'setup') {
         const result = await options.service.setup(parsed.guildId);
         if (result.ok)
-          successMessage = `初期設定を完了しました。成功 ${String(result.value.succeeded)} / 失敗 ${String(result.value.failed)}`;
+          successMessage = t('configuration:dashboard.setupCompleted', {
+            succeeded: result.value.succeeded,
+            failed: result.value.failed,
+          });
         else failureMessage = safeResultFailure(options, result.error);
       } else if (
         parsed.action.startsWith('channel-') &&
@@ -506,7 +601,9 @@ export function createConfigurationInteractionHandler(
           selected ?? '',
         );
         if (result.ok)
-          successMessage = `${LOG_LABELS[kind]}ログのチャンネルを更新しました。`;
+          successMessage = t('configuration:dashboard.channelUpdated', {
+            label: LOG_LABELS[kind],
+          });
         else failureMessage = safeResultFailure(options, result.error);
         page = 'logs';
       } else if (parsed.action === 'role-select' && isComponent(interaction)) {
@@ -523,20 +620,22 @@ export function createConfigurationInteractionHandler(
           metadata.everyone ||
           metadata.botIntegration
         ) {
-          failureMessage = 'このロールはMODロールに設定できません。';
+          failureMessage = t('configuration:dashboard.roleNotEligible');
         } else {
           const result = await options.service.setModRole(
             parsed.guildId,
             metadata.id,
             metadata,
           );
-          if (result.ok) successMessage = 'MODロールを更新しました。';
+          if (result.ok)
+            successMessage = t('configuration:common.modRoleUpdated');
           else failureMessage = safeResultFailure(options, result.error);
         }
         page = 'access';
       } else if (parsed.action === 'role-clear') {
         const result = await options.service.setModRole(parsed.guildId, null);
-        if (result.ok) successMessage = 'MODロールを解除しました。';
+        if (result.ok)
+          successMessage = t('configuration:dashboard.modRoleCleared');
         else failureMessage = safeResultFailure(options, result.error);
         page = 'access';
       } else if (
@@ -548,7 +647,9 @@ export function createConfigurationInteractionHandler(
           interaction.fields.getTextInputValue('zone'),
         );
         if (result.ok)
-          successMessage = `タイムゾーンを${result.value.settings.timezone}に変更しました。`;
+          successMessage = t('configuration:dashboard.timezoneChanged', {
+            timezone: result.value.settings.timezone,
+          });
         else failureMessage = safeResultFailure(options, result.error);
         page = 'access';
       } else if (parsed.action === 'nav-logs') page = 'logs';
@@ -577,9 +678,7 @@ export function createConfigurationInteractionHandler(
     } catch (error: unknown) {
       try {
         await interaction.followUp(
-          ephemeralError(
-            '設定の更新中に問題が発生しました。設定画面を開き直してください。',
-          ),
+          ephemeralError(t('configuration:dashboard.genericError')),
         );
       } catch {
         try {

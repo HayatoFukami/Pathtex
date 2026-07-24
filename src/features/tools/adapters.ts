@@ -7,6 +7,7 @@ import type {
   ToolsPort,
 } from './contracts.js';
 import { isUnauthorized } from '../logging/adapters.js';
+import { t } from '../../i18n/index.js';
 const auditActions: Record<string, number> = {
   CREATE_INSTANT_INVITE: 1,
   KICK: 20,
@@ -104,7 +105,7 @@ export class DiscordToolsAdapter
         };
         return {
           code: i.code,
-          guildName: i.guild?.name ?? '不明',
+          guildName: i.guild?.name ?? t('tools:common.unknown'),
           guildId: i.guild?.id ?? '',
           ...(i.guild?.description ? { description: i.guild.description } : {}),
           ...(i.channel?.name ? { channelName: i.channel.name } : {}),
@@ -281,13 +282,15 @@ export class DiscordToolsAdapter
     });
     return [...logs.entries.values()].map((entry) => {
       const rawEntry = entry as unknown as { targetType?: string };
+      const unknown = t('tools:common.unknown');
+      const none = t('tools:common.none');
       return {
         id: entry.id,
         action: String(entry.action),
         createdAt: entry.createdAt,
-        userId: entry.executor?.id ?? '不明',
-        userName: entry.executor?.tag ?? '不明',
-        target: `${(entry.target as { name?: string; username?: string }).name ?? (entry.target as { username?: string }).username ?? '不明'} (${(entry.target as { id?: string }).id ?? '不明'})`,
+        userId: entry.executor?.id ?? unknown,
+        userName: entry.executor?.tag ?? unknown,
+        target: `${(entry.target as { name?: string; username?: string }).name ?? (entry.target as { username?: string }).username ?? unknown} (${(entry.target as { id?: string }).id ?? unknown})`,
         targetType: rawEntry.targetType ?? 'Discord target',
         ...(entry.reason ? { reason: entry.reason } : {}),
         ...(entry.changes.length
@@ -295,7 +298,7 @@ export class DiscordToolsAdapter
               changes: Object.fromEntries(
                 entry.changes.map((change) => [
                   change.key,
-                  `${JSON.stringify(change.old ?? 'なし')} → ${JSON.stringify(change.new ?? 'なし')}`,
+                  `${JSON.stringify(change.old ?? none)} → ${JSON.stringify(change.new ?? none)}`,
                 ]),
               ),
             }

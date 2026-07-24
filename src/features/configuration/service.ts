@@ -10,6 +10,7 @@ import {
   type PunishmentDto,
 } from '../../repositories/contracts.js';
 import { SettingsService } from '../../services/settings-service.js';
+import { t } from '../../i18n/index.js';
 
 export type LogKind = 'message' | 'moderation' | 'server' | 'voice';
 const channelField: Record<LogKind, keyof GuildSettingsUpdate> = {
@@ -135,7 +136,9 @@ export class ConfigurationService {
       if (missing.length > 0)
         return err(
           'BOT_PERMISSION_MISSING',
-          `Botに次の権限がありません: ${missing.join(', ')}`,
+          t('configuration:service.missingBotPermissions', {
+            missing: missing.join(', '),
+          }),
           { missing },
         );
     }
@@ -230,7 +233,7 @@ export class ConfigurationService {
     try {
       await this.deps.setup.ensureAutomodSettings?.(guildId);
     } catch {
-      warnings.push('AutoMod設定の初期化に失敗しました');
+      warnings.push(t('configuration:service.automodInitFailed'));
     }
     for (const channel of await this.deps.setup.listChannels(guildId)) {
       try {

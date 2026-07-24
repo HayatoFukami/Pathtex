@@ -5,6 +5,7 @@ import {
   configurationDashboard,
   configurationDashboardError,
 } from './dashboard.js';
+import { t } from '../../i18n/index.js';
 
 const guildData = (
   name: string,
@@ -21,7 +22,7 @@ const guildData = (
 });
 const channelOption = {
   name: 'channel',
-  description: 'ログチャンネル',
+  description: t('configuration:log.channelOption'),
   type: 7,
   required: true,
   channel_types: [ChannelType.GuildText],
@@ -29,11 +30,11 @@ const channelOption = {
 const setOffOptions = [
   {
     name: 'set',
-    description: 'ログチャンネルを設定',
+    description: t('configuration:log.setDescription'),
     type: 1,
     options: [channelOption],
   },
-  { name: 'off', description: 'ログを無効化', type: 1 },
+  { name: 'off', description: t('configuration:log.offDescription'), type: 1 },
 ];
 const names = [
   'setup',
@@ -52,7 +53,7 @@ export function configurationCommands(
   const definitions: Record<(typeof names)[number], CommandDefinition> = {
     setup: command(
       'setup',
-      guildData('setup', 'Mutedロールと権限上書きを準備'),
+      guildData('setup', t('configuration:setup.description')),
       service,
       [
         PermissionFlagsBits.ManageRoles,
@@ -63,8 +64,11 @@ export function configurationCommands(
         const result = await service.setup(requireGuildId(interaction.guildId));
         await interaction.editReply(
           result.ok
-            ? `Mutedロールを設定しました（成功 ${String(result.value.succeeded)} / 失敗 ${String(result.value.failed)}）`
-            : '設定を更新できませんでした。',
+            ? t('configuration:setup.success', {
+                succeeded: result.value.succeeded,
+                failed: result.value.failed,
+              })
+            : t('configuration:common.genericUpdateFailure'),
         );
       },
     ),
@@ -74,10 +78,10 @@ export function configurationCommands(
     voicelog: logCommand('voicelog', 'voice', service),
     timezone: command(
       'timezone',
-      guildData('timezone', '表示タイムゾーン', [
+      guildData('timezone', t('configuration:timezone.description'), [
         {
           name: 'zone',
-          description: 'IANAタイムゾーン',
+          description: t('configuration:timezone.zoneOption'),
           type: 3,
           required: true,
         },
@@ -91,23 +95,35 @@ export function configurationCommands(
         );
         await interaction.editReply(
           result.ok
-            ? `Timezone: ${result.value.settings.timezone}\n現在時刻: ${result.value.currentTime}`
-            : '設定を更新できませんでした。',
+            ? t('configuration:timezone.result', {
+                timezone: result.value.settings.timezone,
+                time: result.value.currentTime,
+              })
+            : t('configuration:common.genericUpdateFailure'),
         );
       },
     ),
     modrole: command(
       'modrole',
-      guildData('modrole', 'MODロール', [
+      guildData('modrole', t('configuration:modrole.description'), [
         {
           name: 'set',
-          description: 'ロールを設定',
+          description: t('configuration:modrole.setDescription'),
           type: 1,
           options: [
-            { name: 'role', description: 'ロール', type: 8, required: true },
+            {
+              name: 'role',
+              description: t('configuration:modrole.roleOption'),
+              type: 8,
+              required: true,
+            },
           ],
         },
-        { name: 'off', description: '解除', type: 1 },
+        {
+          name: 'off',
+          description: t('configuration:modrole.offDescription'),
+          type: 1,
+        },
       ]),
       service,
       [],
@@ -131,14 +147,14 @@ export function configurationCommands(
         );
         await interaction.editReply(
           result.ok
-            ? 'MODロールを更新しました。'
-            : '設定を更新できませんでした。',
+            ? t('configuration:common.modRoleUpdated')
+            : t('configuration:common.genericUpdateFailure'),
         );
       },
     ),
     settings: command(
       'settings',
-      guildData('settings', 'サーバー設定を表示'),
+      guildData('settings', t('configuration:settings.description')),
       service,
       [],
       async ({ interaction }) => {
@@ -187,7 +203,11 @@ function logCommand(
 ): CommandDefinition {
   return command(
     name,
-    guildData(name, `${name}設定`, setOffOptions),
+    guildData(
+      name,
+      t('configuration:log.commandDescription', { name }),
+      setOffOptions,
+    ),
     service,
     [
       PermissionFlagsBits.ViewChannel,
@@ -206,7 +226,9 @@ function logCommand(
               interaction.options.getChannel('channel', true).id,
             );
       await interaction.editReply(
-        result.ok ? 'ログ設定を更新しました。' : '設定を更新できませんでした。',
+        result.ok
+          ? t('configuration:log.updated')
+          : t('configuration:common.genericUpdateFailure'),
       );
     },
   );
@@ -243,16 +265,59 @@ export function serviceSettingsText(value: Record<string, unknown>): string {
     modRoleId?: string | null;
     mutedRoleId?: string | null;
   };
+  const notSet = t('configuration:common.notSet');
+  const none = t('configuration:common.none');
   return [
-    `ログ: message=${settings.messageLogChannelId ?? '未設定'} mod=${settings.modlogChannelId ?? '未設定'} server=${settings.serverLogChannelId ?? '未設定'} voice=${settings.voiceLogChannelId ?? '未設定'}`,
-    `ロール: MOD=${settings.modRoleId ?? '未設定'} Muted=${settings.mutedRoleId ?? '未設定'}`,
-    `Timezone: ${settings.timezone ?? 'UTC'}`,
-    `AutoMod: ${Array.isArray(value.automod) ? '未設定' : '設定済み'}`,
-    `Punishment: ${Array.isArray(value.punishments) ? String(value.punishments.length) : '0'}件`,
-    `Ignore: role ${Array.isArray(value.ignoredRoles) ? String(value.ignoredRoles.length) : '0'} / channel ${Array.isArray(value.ignoredChannels) ? String(value.ignoredChannels.length) : '0'}`,
-    `自動Ignoreロール: ${Array.isArray(value.automaticIgnoredRoles) && value.automaticIgnoredRoles.length ? value.automaticIgnoredRoles.join(', ') : 'なし'}`,
-    `Bot権限警告: ${Array.isArray(value.botWarnings) && value.botWarnings.length ? value.botWarnings.join('; ') : 'なし'}`,
-    `AutoMod resource warnings: ${Array.isArray(value.resourceWarnings) && value.resourceWarnings.length ? value.resourceWarnings.join('; ') : 'なし'}`,
+    t('configuration:settingsText.log', {
+      message: settings.messageLogChannelId ?? notSet,
+      mod: settings.modlogChannelId ?? notSet,
+      server: settings.serverLogChannelId ?? notSet,
+      voice: settings.voiceLogChannelId ?? notSet,
+    }),
+    t('configuration:settingsText.role', {
+      mod: settings.modRoleId ?? notSet,
+      muted: settings.mutedRoleId ?? notSet,
+    }),
+    t('configuration:settingsText.timezone', {
+      timezone: settings.timezone ?? 'UTC',
+    }),
+    t('configuration:settingsText.automod', {
+      status: Array.isArray(value.automod)
+        ? notSet
+        : t('configuration:settingsText.automodConfigured'),
+    }),
+    t('configuration:settingsText.punishment', {
+      count: Array.isArray(value.punishments)
+        ? String(value.punishments.length)
+        : '0',
+    }),
+    t('configuration:settingsText.ignore', {
+      roles: Array.isArray(value.ignoredRoles)
+        ? String(value.ignoredRoles.length)
+        : '0',
+      channels: Array.isArray(value.ignoredChannels)
+        ? String(value.ignoredChannels.length)
+        : '0',
+    }),
+    t('configuration:settingsText.automaticIgnoreRoles', {
+      value:
+        Array.isArray(value.automaticIgnoredRoles) &&
+        value.automaticIgnoredRoles.length
+          ? value.automaticIgnoredRoles.join(', ')
+          : none,
+    }),
+    t('configuration:settingsText.botWarnings', {
+      value:
+        Array.isArray(value.botWarnings) && value.botWarnings.length
+          ? value.botWarnings.join('; ')
+          : none,
+    }),
+    t('configuration:settingsText.resourceWarnings', {
+      value:
+        Array.isArray(value.resourceWarnings) && value.resourceWarnings.length
+          ? value.resourceWarnings.join('; ')
+          : none,
+    }),
   ].join('\n');
 }
 export function logKindForCommand(name: string): LogKind | null {
