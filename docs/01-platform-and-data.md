@@ -179,6 +179,30 @@ DBポーリング方式を採用する。
 
 予約の保守削除は終端状態だけを対象とする。`COMPLETED`は`updated_at`から30日、`CANCELLED`は`updated_at`から30日、`FAILED`は90日を経過した行を削除してよい。削除直前にトランザクション内で状態を再確認し、`PENDING`または`RUNNING`の行は理由・経過時間を問わず削除してはならない。`RUNNING`の回収は5分経過時の`PENDING`戻しだけであり、保守削除とは別処理とする。
 
+ポーリングは直列化する。あるtickのdispatchが実行中の場合、次のtickは重複して起動せずskipする。これにより、DBが遅い場合でもclaimサイクルが重複して二重claimやin-flightジョブの無制限な積み上がりを起こさない。
+
+データ保持の定期掃除（`4.17`）は`RetentionService`をこのスケジューラとは別の定期実行で起動する。既定の間隔は1時間とし、前回の実行が完了していない場合は次のtickをskipして直列化する。保持掃除の失敗はログ出力のみで吸収し、実行時を異常終了させず、起動を中断しない。停止時はタイマーをクリアし、実行中の掃除の完了を待ってからPrisma切断に進む。
+
+## 3.7 Gateway作業追跡・admission・drain
+
+Gatewayイベントハンドラは同期コールバックであり、その中で非同期作業（ログ、ケース作成、モデレーション復元、状態遷移）を開始する。これらを無追跡にすると、シャットダウン時にPrisma切断後も作業がin-flightのまま残り、クエリが途中で失敗する。そのため全Gateway起源の非同期作業を単一の有界トラッカー（`GatewayWorkTracker`）で追跡する。voice/channel経路（VoiceMove追従、`channelCreate`のMuted上書き、`channelUpdate`のSlowmode予約取消を含む）も例外なく追跡対象とする。
+
+### 並行度・キュー・容量
+
+- `maxConcurrency`（既定32）: 同時実行数の上限。
+- `maxQueued`（既定1024）: 実行スロットを待つ**非クリティカル**作業のキュー上限。
+- 並行度とキューの両方が満杯のとき、新しい**非クリティカル**作業は`GatewayOverloadedError`で即座に拒否（shed）する。これは高頻度で投棄可能な作業（メッセージログ等）のバックプレッシャー弁であり、最新作業を投げることでメモリを有界に保つ。
+
+### クリティカル状態遷移の保護
+
+ログではなくBotの状態をDiscordと一致させ続けるために不可欠な作業（Mute復元、Raid判定、外部ケース作成、ライフサイクルマーカー、voiceセッション追従、channel/guild状態同期）は**クリティカル**として登録する。クリティカル作業は同じ`maxConcurrency`に従うが、**決してshedされない**。並行度スロットが満杯のときは`maxQueued`に計上されずキューへ積まれ、過負荷下でも暗黙に捨てられず必ず実行される。これにより、受理済みの状態遷移は過負荷下でも失われない。
+
+### admission制御とdrain順序
+
+- admission: シャットダウン開始時にまずintakeが`stopAccepting`で新規Interaction受理を止める。
+- drain: 次にintakeのin-flight作業をdrainし、続いてGateway作業トラッカーをdrainする。キュー待ち（クリティカル含む）も受理時点で追跡対象のため、drainはそれらの完了も待つ。drainはタイムアウトで上界を持ち、依存先の詰まりがシャットダウンを無限にブロックしない。
+- 順序: **admissionを閉じてdrainを完了してから**、voice・client・DBのteardownへ進む。すなわち Gateway drain は voice停止・client破棄・Prisma切断の**前**に実行し、in-flight作業がDiscord I/OとDB書き込みをリソース生存中に完了できるようにする。
+
 ---
 
 ## 3.8 キャッシュ
@@ -230,7 +254,7 @@ DBポーリング方式を採用する。
 | `raid_mode_reason` | VARCHAR(1000) | NULL |
 | `raid_started_at` | TIMESTAMPTZ | NULL |
 | `verification_level_before_raid` | SMALLINT | NULL、0～4 |
-| `raid_verification_changed` | BOOLEAN | DEFAULT false |
+| `raid_verification_changed` | BOOLEAN | DEFAULT false。BotがVerification LevelをHIGHへ引き上げる意図（復元所有権）をcrash-safeに保持する。引き上げが必要なら発動トランザクションで`true`を記録し、確定失敗時は撤回、成功時は冪等に再確定する。詳細は`31-raidmode.md §5.3.12`。 |
 | `next_case_number` | INTEGER | DEFAULT 1、CHECK > 0 |
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 | `updated_at` | TIMESTAMPTZ | NOT NULL |
@@ -577,12 +601,14 @@ Map<guildId:userId, {
 | Guild設定 | ギルド退出後90日 |
 | ストライク | ギルド退出後90日 |
 | Moderation Case | ギルド退出後90日以上。運用者が延長可 |
-| Message Snapshot | 既定7日 |
+| Message Snapshot | 既定7日（保持期間は供給可。既定値は7日） |
 | Raid Join Event | 5分 |
 | 完了Scheduled Action | 30日 |
 | CANCELLED Scheduled Action | 30日（`updated_at`基準） |
 | 失敗Scheduled Action | 90日 |
 | アプリログ | 30日以上を推奨 |
+
+Message Snapshotの保持期間は`MESSAGE_RETENTION_DAYS`（1～30、既定7）で供給でき、パイプラインがsnapshotの`expires_at`へ反映する。期限切れ行の掃除は`RetentionService`が既定1時間間隔で実行し、snapshot・raid join event・終端scheduled actionをそれぞれ独立に削除する（1つの失敗が他を妨げない）。掃除は直列化され、失敗しても実行時を異常終了させない。詳細な起動・停止の順序は`3.6`に従う。
 
 ---
 

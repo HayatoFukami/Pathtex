@@ -6,6 +6,7 @@
 
 - ストライク更新、ケース番号、予約、永続モデルは`01-platform-and-data.md`に従う。
 - 手動のBAN、Mute等のDiscord操作は`20-moderation.md`の操作規則を再利用する。
+- `/strike`・`/pardon`の複数対象数は`00-common.md`の共通対象規則と`MAX_BULK_TARGETS`（1～20、既定20）に従う。
 - AutoMod固有の違反判定・削除は`30-automod.md`に従う。
 
 ---

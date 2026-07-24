@@ -38,7 +38,7 @@ Map<guildId, {
 
 ## 5.3.15 `/voicekick`
 
-共通対象のみ。理由オプションは持たない。
+共通対象のみ。理由オプションは持たない。最終対象数は`00-common.md`の共通対象規則と`MAX_BULK_TARGETS`（1～20、既定20）に従う。`additional_targets`の静的上限（最大19件・400文字）は設定によらず弱まらない。注入された上限はコマンドパーサとVoiceServiceの両方で強制され、VoiceServiceは上限超過を対象解決（Discordアクセス）前にall-or-nothingで拒否する。空の対象一覧も同様にDiscordアクセス前に拒否する。
 
 認可: Move MembersまたはMODロール  
 Bot権限: Move Members、Manage Channels、View Channel

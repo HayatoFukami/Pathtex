@@ -43,9 +43,11 @@ Bot権限: Manage Guild、Kick Members
 
 既にONなら状態変更・ケース作成を行わず、現在状態を返す。
 
+Verification Levelの復元所有権（`raid_verification_changed`）は、DiscordへHIGHへ引き上げる**前**に、発動と同じトランザクションで意図（intent）として永続化する（crash-safe intent/ownership）。引き上げが必要でない（既にHIGH未満でない）場合は意図を記録しない。これにより、Discord引き上げの成功後・確認（`markVerificationRaised`、冪等な再確定）の前にプロセスがクラッシュしても、意図は既にdurableであるため、再起動後のOFFで発動前レベルを復元でき、ギルドがHIGHに固定されない。Discord引き上げが確定失敗（認証エラー以外）した場合は意図を撤回する（`revokeVerificationRaised`）。認証エラー（401）はfatalとして伝播し、意図を撤回しない。撤回前のクラッシュや401後も、OFFの復元は「現在値がHIGHのまま」ガードで調整されるため、HIGHでないギルドを誤って復元することはない。
+
 ### `/raidmode off`
 
-`reason`任意。発動前Verification Levelを復元する。ただし、BotがHIGHへ変更しており、現在値もHIGHのままである場合に限る。管理者が発動中に値を変更していた場合は上書きしない。
+`reason`任意。発動前Verification Levelを復元する。ただし、BotがHIGHへ変更する意図を記録しており（`raid_verification_changed`）、現在値もHIGHのままである場合に限る。管理者が発動中に値を変更していた場合（現在値がHIGHでない場合）は上書きしない。復元所有権の意図は発動時にdurableに永続化済みのため、引き上げ成功後のクラッシュからの再起動でも、現在値がHIGHであれば発動前レベルへ復元する（`/raidmode on`のcrash-safe intent/ownership参照）。
 
 ---
 
@@ -81,7 +83,7 @@ offは自動検知のみ無効化し、現在ONのRaidModeを解除しない。
 
 1. 既にRaidMode ONなら新たに発動しない。
 2. Verification LevelがHIGH未満ならHIGHへ変更。
-3. 発動前レベルと変更有無を保存。
+3. 発動前レベルと変更有無を保存。変更有無（`raid_verification_changed`）は`/raidmode on`と同じcrash-safe intent/ownershipとして、Discord引き上げの前に発動トランザクションでdurableに記録する。
 4. `raid_mode_source=AUTO`
 5. `raid_mode_reason=AutoRaid: X joins in Y seconds`
 6. ケースを作成。

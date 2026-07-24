@@ -79,7 +79,7 @@
 |---|---|
 | 既定タイムゾーン | `UTC` |
 | AutoRaid自動解除 | 最後の非Bot参加試行から120秒後 |
-| 一括対象数 | 最大20ユーザー |
+| 一括対象数 | 最大20ユーザー（`MAX_BULK_TARGETS`で1～20へ低下可能、既定20。20が絶対上限） |
 | ストライク手動増減 | 1回1～100 |
 | ストライク総数 | 0～1,000,000 |
 | 重複メッセージ時間窓 | 30秒 |
@@ -329,7 +329,7 @@ SIGTERM時:
 | `LOG_LEVEL` | No | 既定`info` |
 | `SENTRY_DSN` | No | URL |
 | `MESSAGE_RETENTION_DAYS` | No | 1～30、既定7 |
-| `MAX_BULK_TARGETS` | No | 1～20、既定20 |
+| `MAX_BULK_TARGETS` | No | 1～20、既定20。複数対象コマンド（moderation/strikes/voice）の最終対象数上限を一括で下げる。20を超えることはできず、Discord/API由来の静的上限（additional_targets最大19件・400文字等）は弱めない |
 | `OWNER_USER_IDS` | No | Snowflakeのカンマ区切り |
 | `INSTANCE_ID` | No | 既定はhostname＋PID |
 
@@ -409,8 +409,8 @@ USERコマンドおよびMESSAGEコマンドは実装しない。理由は以下
 3. `<@123>`および`<@!123>`を`123`へ正規化する。
 4. 各値は17～20桁の10進Snowflakeでなければならない。
 5. `target`を先頭として重複IDを除去する。
-6. 最終対象数は最大20件。
-7. 不正IDまたは21件以上が含まれる場合、処理を一切開始せず拒否する。
+6. 最終対象数は`MAX_BULK_TARGETS`（1～20、既定20）以下。同値は設定からコマンドパーサと対象サービス（moderation/strikes/voice）の両方へ注入され、20を超えることはできない。
+7. 不正IDまたは最終対象数超過（既定では21件以上）が含まれる場合、処理を一切開始せず拒否する。
 8. Kick、Mute等でMemberが必要な場合はギルドからMemberを取得する。
 9. Ban、Strike等でUserだけで処理可能な場合はDiscord APIからUser取得を試みる。
 10. Userを取得できないIDは、その対象だけ失敗とする。
@@ -688,6 +688,16 @@ DM送信失敗は制裁失敗とみなさない。
 - 既にreply済み: ephemeral follow-up。
 - Token失効: アプリログのみ。
 - 同じInteractionを二重実行しないようInteraction IDを5分TTLで保持。
+- command・component・modal・autocompleteのいずれから発生した401も、直接の`status`/`code`=401と`cause`ラップされた401の両方を致命的認証エラーとしてfatalへ伝播し、新規処理を停止する（8.5の401方針と同じ）。401以外のエラーは相関ID付きのユーザー応答またはアプリログに留める。
+
+### 8.6.1 Interaction dedupeの容量意味（fail closed）
+
+Interaction IDの重複排除キャッシュは有界であり、容量到達時の意味を固定する。
+
+- 受理（accept）されたIDは、TTL（5分）の間ずっと重複として拒否され続ける。容量を作るために**期限の切れていないエントリを退避（evict）してはならない**。
+- 期限切れエントリのみを古い順に削除する。期限切れを削除してもなお`maxSize`に達している場合、**新しいIDは受理せず拒否する**（fail closed）。
+- fail closedとは、容量逼迫時に genuine な新規Interactionを落とす方が、TTL内の再送Interactionを二重実行するリスクより安全であるという選択である。
+- したがってキャッシュは「受理済みIDのTTL保護」を常に優先し、上限はメモリ天井としてのみ機能する。
 
 ## 8.7 正規表現安全性
 
