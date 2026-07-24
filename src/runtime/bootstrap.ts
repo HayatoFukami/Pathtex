@@ -44,6 +44,22 @@ export function createRuntimeLifecycle(
       () => Promise.resolve(),
       () => ports.stopVoice(),
     ),
+    ...(ports.startRetention || ports.stopRetention
+      ? {
+          retention: step(
+            'retention',
+            () => ports.startRetention?.() ?? Promise.resolve(),
+            () => ports.stopRetention?.() ?? Promise.resolve(),
+          ),
+        }
+      : {}),
+    ...(ports.drainGateway
+      ? {
+          gateway: {
+            drain: () => ports.drainGateway?.() ?? Promise.resolve(),
+          },
+        }
+      : {}),
     prisma: step(
       'prisma',
       () => Promise.resolve(),

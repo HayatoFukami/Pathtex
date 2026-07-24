@@ -14,6 +14,9 @@ export interface IntakeLifecycle {
   stopAccepting(): Promise<void>;
   drain(): Promise<void>;
 }
+export interface GatewayDrain {
+  drain(): Promise<void>;
+}
 export interface LifecycleDependencies {
   readonly database: LifecycleStep;
   readonly migrations: LifecycleStep;
@@ -23,6 +26,12 @@ export interface LifecycleDependencies {
   readonly intake: IntakeLifecycle;
   readonly voice: LifecycleStep;
   readonly prisma: LifecycleStep;
+  /** Optional periodic retention sweep; stopped before Prisma disconnect. */
+  readonly retention?: LifecycleStep;
+  /** Optional bounded gateway-work tracker; drained right after intake
+   * admission is closed and drained, and before voice/client/Prisma
+   * teardown (see `cleanup()` below). */
+  readonly gateway?: GatewayDrain;
   createDiscordClient(signal: AbortSignal): Promise<DiscordClientLifecycle>;
 }
 export interface Lifecycle {
@@ -135,7 +144,29 @@ export function createLifecycle(
           'Intake drain failed; continuing cleanup',
         );
       }
-      for (const step of [dependencies.scheduler, dependencies.voice]) {
+      // Drain bounded gateway work right after admission is closed and drained,
+      // and before voice/client/DB teardown, so in-flight logging/case/voice
+      // operations finish their Discord I/O and database writes while the client
+      // and Prisma are still alive. Critical state transitions queued in the
+      // tracker are preserved (never shed) and settle here too.
+      if (dependencies.gateway) {
+        try {
+          await dependencies.gateway.drain();
+        } catch {
+          logger.error(
+            {
+              event: 'shutdown.gateway_drain_failed',
+              errorName: 'shutdown_failure',
+            },
+            'Gateway work drain failed; continuing cleanup',
+          );
+        }
+      }
+      for (const step of [
+        dependencies.scheduler,
+        dependencies.voice,
+        ...(dependencies.retention ? [dependencies.retention] : []),
+      ]) {
         try {
           await step.stop();
         } catch {
@@ -241,6 +272,12 @@ export function createLifecycle(
           trackUnderlying(dependencies.intake.start(startupAbort.signal)),
           startupAbort.signal,
         );
+        if (dependencies.retention) {
+          await abortable(
+            trackUnderlying(dependencies.retention.start(startupAbort.signal)),
+            startupAbort.signal,
+          );
+        }
         logger.info({ event: 'bootstrap.started' }, 'Bootstrap started');
       } catch (error: unknown) {
         logger.error(

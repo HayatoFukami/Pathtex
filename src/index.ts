@@ -59,6 +59,12 @@ import {
   type ExternalEventResult,
 } from './services/external-event-service.js';
 import { ResourceLoader } from './services/resource-loader.js';
+import { RetentionService } from './services/retention-service.js';
+import { createRetentionScheduler } from './runtime/retention.js';
+import {
+  GatewayOverloadedError,
+  GatewayWorkTracker,
+} from './runtime/gateway-work.js';
 import {
   AutomodConfigurationService,
   PunishmentConfigurationService,
@@ -83,6 +89,7 @@ import {
   PrismaSnapshotRepository,
   PrismaDepartureRepository,
   PrismaRaidRepository,
+  PrismaRetentionRepository,
 } from './repositories/prisma-repositories.js';
 import {
   isBotAuthoredMessage,
@@ -331,6 +338,7 @@ export function createBootstrapDependencies(
     scheduler: schedulerService,
     activeMutes: activeMuteRepository,
     settings: settingsService,
+    maxBulkTargets: config.MAX_BULK_TARGETS,
     targetIdentityResolver,
     fatal: (error) => {
       logger.fatal({ error }, 'Fatal moderation operation failure');
@@ -374,6 +382,7 @@ export function createBootstrapDependencies(
     moderation,
     discord: strikeDiscord,
     settings: settingsService,
+    maxBulkTargets: config.MAX_BULK_TARGETS,
     targetIdentityResolver,
     activeMutes: activeMuteRepository,
     modlog: moderationLog,
@@ -667,6 +676,15 @@ export function createBootstrapDependencies(
   let stopLifecycle: (() => Promise<void>) | undefined;
   let voiceExpiryTimer: NodeJS.Timeout | undefined;
   let gatewayReady = false;
+  // Bounded tracker for all gateway-originated async work so shutdown can drain
+  // it before Prisma disconnects (backpressure + graceful drain).
+  const gatewayWork = new GatewayWorkTracker();
+  // Periodic, failure-safe retention sweep (hourly by default). Wired into the
+  // lifecycle so it starts after intake and stops before Prisma disconnect.
+  const retention = createRetentionScheduler(
+    new RetentionService(new PrismaRetentionRepository(prisma.prisma)),
+    { logger },
+  );
   const rawClient = createDiscordClient((error) => {
     logger.fatal(
       { event: 'gateway.fatal', discordCode: 4014, errorName: error.name },
@@ -737,6 +755,7 @@ export function createBootstrapDependencies(
     },
     undefined,
     targetIdentityResolver,
+    config.MAX_BULK_TARGETS,
   );
   const permissionPolicy = createPermissionPolicy({
     getModRoleId: async (guildId) =>
@@ -847,7 +866,7 @@ export function createBootstrapDependencies(
     createCommandManifest(
       database,
       [
-        ...createModerationCommandManifest(moderation),
+        ...createModerationCommandManifest(moderation, config.MAX_BULK_TARGETS),
         ...createModerationUtilityCommands(moderation),
       ],
       configuration,
@@ -857,6 +876,7 @@ export function createBootstrapDependencies(
       tools,
       voice,
       general.commands,
+      { maxBulkTargets: config.MAX_BULK_TARGETS },
     ),
     voice,
     permissionPolicy,
@@ -865,6 +885,9 @@ export function createBootstrapDependencies(
     snapshots: snapshot,
     automod,
     logger,
+    // Wire the deployment-configurable retention window (MESSAGE_RETENTION_DAYS)
+    // into snapshot expiry; the pipeline converts days to milliseconds.
+    messageRetentionMs: config.MESSAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     events: new LoggingEventAdapter(
       {
         findMessageDelete: async (
@@ -1285,27 +1308,50 @@ export function createBootstrapDependencies(
         },
         targetIdentityResolver,
         () => gatewayReady,
+        gatewayWork,
       );
       rawClient.on('voiceStateUpdate', (oldState, newState) => {
         if (!gatewayReady) return;
-        if (newState.id !== rawClient.user?.id) return;
-        void voice
-          .onVoiceState(
-            newState.guild.id,
-            newState.id,
-            rawClient.user.id,
-            oldState.channelId,
-            newState.channelId,
-          )
+        const botUserId = rawClient.user?.id;
+        if (!botUserId || newState.id !== botUserId) return;
+        // Capture gateway state synchronously so the tracked closure does not
+        // re-read possibly-null live references later.
+        const guildId = newState.guild.id;
+        const userId = newState.id;
+        const oldChannelId = oldState.channelId;
+        const newChannelId = newState.channelId;
+        // Tracked as a critical state transition through the bounded gateway-work
+        // tracker so shutdown drains it before voice/client/DB teardown, and so a
+        // direct or cause-wrapped 401 propagates to the fatal handler.
+        void gatewayWork
+          .runCritical(async () => {
+            await voice.onVoiceState(
+              guildId,
+              userId,
+              botUserId,
+              oldChannelId,
+              newChannelId,
+            );
+          })
           .catch((error: unknown) => {
+            if (error instanceof GatewayOverloadedError) {
+              logger.warn(
+                {
+                  event: 'gateway.backpressure',
+                  shed: 'gateway.voice_move_failed',
+                },
+                'Gateway work shed under load',
+              );
+              return;
+            }
             if (isUnauthorized(error)) {
               logger.fatal(
                 {
                   event: 'gateway.voice_move_auth_failed',
                   errorName: error instanceof Error ? error.name : 'unknown',
                   discordCode: 401,
-                  guildId: newState.guild.id,
-                  userId: newState.id,
+                  guildId,
+                  userId,
                 },
                 'VoiceMove authentication failed',
               );
@@ -1317,8 +1363,8 @@ export function createBootstrapDependencies(
               {
                 event: 'gateway.voice_move_failed',
                 errorName: error instanceof Error ? error.name : 'unknown',
-                guildId: newState.guild.id,
-                userId: newState.id,
+                guildId,
+                userId,
               },
               'VoiceMove gateway handling failed',
             );
@@ -1332,6 +1378,9 @@ export function createBootstrapDependencies(
       await voice.shutdown();
       await voiceAdapter.disconnectAll();
     },
+    startRetention: () => retention.start(),
+    stopRetention: () => retention.stop(),
+    drainGateway: () => gatewayWork.drain(),
     disconnectDatabase: () => prisma.disconnect(),
     setLifecycleStop: (stop: () => Promise<void>) => {
       stopLifecycle = () => {
@@ -1529,9 +1578,17 @@ export function installMessageLoggingListeners(
   logger: ReturnType<typeof createLogger>,
   fatal: (error: unknown) => void,
   ready: () => boolean = () => true,
+  work: GatewayWorkTracker = new GatewayWorkTracker(),
 ): void {
-  const report = (event: string, operation: Promise<void>): void => {
-    void operation.catch((error: unknown) => {
+  const report = (event: string, operation: () => Promise<void>): void => {
+    void work.run(operation).catch((error: unknown) => {
+      if (error instanceof GatewayOverloadedError) {
+        logger.warn(
+          { event: 'gateway.backpressure', shed: event },
+          'Gateway work shed under load',
+        );
+        return;
+      }
       if (isUnauthorized(error)) {
         fatal(error);
         return;
@@ -1563,8 +1620,7 @@ export function installMessageLoggingListeners(
   const queue = new MessageLaneQueue();
   client.on('messageCreate', (message) => {
     if (!ready()) return;
-    report(
-      'gateway.message_create_failed',
+    report('gateway.message_create_failed', () =>
       queue.run(message.id, async () => {
         if (await isBotLogMessage(message)) {
           await snapshots.deleteMessage(message.id);
@@ -1581,8 +1637,7 @@ export function installMessageLoggingListeners(
     // discord.js types newMessage as a full Message but emits a PartialMessage
     // at runtime when the updated message is uncached; widen to handle both.
     const updated = after as Message | PartialMessage;
-    report(
-      'gateway.message_update_failed',
+    report('gateway.message_update_failed', () =>
       queue.run(updated.id, async () => {
         if (await isBotLogMessage(updated)) {
           await snapshots.deleteMessage(updated.id);
@@ -1624,8 +1679,7 @@ export function installMessageLoggingListeners(
   client.on('messageDelete', (message) => {
     if (!ready()) return;
     const occurredAt = new Date();
-    report(
-      'gateway.message_delete_failed',
+    report('gateway.message_delete_failed', () =>
       queue.run(message.id, async () => {
         if (!message.guildId) return;
         if (await isBotLogMessage(message)) {
@@ -1647,8 +1701,7 @@ export function installMessageLoggingListeners(
     const occurredAt = new Date();
     const first = messages.first();
     if (!first?.guildId) return;
-    report(
-      'gateway.message_bulk_delete_failed',
+    report('gateway.message_bulk_delete_failed', () =>
       queue.runMany([...messages.keys()], async () => {
         const all = [...messages.values()];
         const settingsResult = await settings.get(first.guildId);
@@ -1707,9 +1760,18 @@ export function installGatewayListeners(
   fatal: (error: unknown) => void,
   targetIdentityResolver: TargetIdentityResolver,
   ready: () => boolean = () => true,
+  work: GatewayWorkTracker = new GatewayWorkTracker(),
 ): void {
-  const report = (event: string, operation: Promise<void>): void => {
-    void operation.catch((error: unknown) => {
+  const handleReportError =
+    (event: string) =>
+    (error: unknown): void => {
+      if (error instanceof GatewayOverloadedError) {
+        logger.warn(
+          { event: 'gateway.backpressure', shed: event },
+          'Gateway work shed under load',
+        );
+        return;
+      }
       if (isUnauthorized(error)) {
         fatal(error);
         return;
@@ -1718,7 +1780,18 @@ export function installGatewayListeners(
         { event, errorName: error instanceof Error ? error.name : 'unknown' },
         'Gateway event failed',
       );
-    });
+    };
+  // Sheddable work (high-volume logging): backpressure-shed under overload.
+  const report = (event: string, operation: () => Promise<void>): void => {
+    void work.run(operation).catch(handleReportError(event));
+  };
+  // Critical state transitions (mute restore, raid, external cases, lifecycle
+  // markers, channel/guild state): preserved under overload, never shed.
+  const reportCritical = (
+    event: string,
+    operation: () => Promise<void>,
+  ): void => {
+    void work.runCritical(operation).catch(handleReportError(event));
   };
   const deliverExternalCase = async (
     guildId: string,
@@ -1740,18 +1813,19 @@ export function installGatewayListeners(
     logger,
     fatal,
     ready,
+    work,
   );
   client.on(
     'voiceStateUpdate',
     (oldState: VoiceState, newState: VoiceState) => {
       if (!ready()) return;
       if (!newState.member) return;
+      const voiceMember = newState.member;
       const voiceOccurredAt = new Date();
-      report(
-        'gateway.voice_update_failed',
+      report('gateway.voice_update_failed', () =>
         logging.voice(
           newState.guild.id,
-          newState.member.displayName,
+          voiceMember.displayName,
           newState.id,
           oldState.channelId,
           newState.channelId,
@@ -1763,123 +1837,108 @@ export function installGatewayListeners(
   client.on('guildMemberAdd', (member) => {
     if (!ready()) return;
     const joinOccurredAt = new Date();
-    report(
-      'gateway.member_add_failed',
-      (async () => {
-        await snapshots.saveMember({
+    reportCritical('gateway.member_add_failed', async () => {
+      await snapshots.saveMember({
+        guildId: member.guild.id,
+        userId: member.id,
+        username: member.user.username,
+        globalName: member.user.globalName,
+        nickname: member.nickname,
+        joinedAt: member.joinedAt,
+      });
+      await logging.server(
+        member.guild.id,
+        'メンバー参加',
+        [{ name: 'ユーザー', value: `${member.user.tag} (${member.id})` }],
+        joinOccurredAt,
+        0x3498db,
+      );
+      await raid.memberAdd({
+        guildId: member.guild.id,
+        userId: member.id,
+        isBot: member.user.bot,
+        displayName: member.displayName,
+      });
+      await moderationDiscord.withRoleMutationLock(
+        member.guild.id,
+        member.id,
+        async () => {
+          const mute = await activeMutes.getActive(member.guild.id, member.id);
+          const guildSettings = await settings.get(member.guild.id);
+          if (mute && mute.expiresAt && mute.expiresAt <= new Date()) {
+            await activeMutes.releaseWithSchedule(
+              member.guild.id,
+              member.id,
+              'EXPIRED',
+            );
+          } else if (
+            mute &&
+            guildSettings.ok &&
+            guildSettings.value.mutedRoleId
+          ) {
+            const mutedRoleId = guildSettings.value.mutedRoleId;
+            // Check actual role presence; no-op if already present.
+            if (
+              await moderationDiscord.hasRole(
+                member.guild.id,
+                member.id,
+                mutedRoleId,
+              )
+            )
+              return;
+            roleCorrelation.put(member.guild.id, member.id, mutedRoleId, 'ADD');
+            try {
+              await moderationDiscord.addRoleUnlocked(
+                member.guild.id,
+                member.id,
+                mutedRoleId,
+                'mute restore',
+              );
+            } catch (error) {
+              roleCorrelation.remove(
+                member.guild.id,
+                member.id,
+                mutedRoleId,
+                'ADD',
+              );
+              throw error;
+            }
+          }
+        },
+      );
+      if (!member.user.bot)
+        await automod.autoDehoist(
+          member.guild.id,
+          member.id,
+          member.displayName,
+        );
+    });
+  });
+  client.on('guildMemberRemove', (member) => {
+    if (!ready()) return;
+    reportCritical('gateway.member_remove_failed', async () => {
+      const result = await externalEvents.process({
+        guildId: member.guild.id,
+        targetUserId: member.id,
+        kind: 'MEMBER_REMOVE',
+        occurredAt: new Date(),
+        memberDisplayName: member.displayName,
+        snapshot: {
           guildId: member.guild.id,
           userId: member.id,
           username: member.user.username,
           globalName: member.user.globalName,
           nickname: member.nickname,
           joinedAt: member.joinedAt,
-        });
-        await logging.server(
-          member.guild.id,
-          'メンバー参加',
-          [{ name: 'ユーザー', value: `${member.user.tag} (${member.id})` }],
-          joinOccurredAt,
-          0x3498db,
-        );
-        await raid.memberAdd({
-          guildId: member.guild.id,
-          userId: member.id,
-          isBot: member.user.bot,
-          displayName: member.displayName,
-        });
-        await moderationDiscord.withRoleMutationLock(
-          member.guild.id,
-          member.id,
-          async () => {
-            const mute = await activeMutes.getActive(
-              member.guild.id,
-              member.id,
-            );
-            const guildSettings = await settings.get(member.guild.id);
-            if (mute && mute.expiresAt && mute.expiresAt <= new Date()) {
-              await activeMutes.releaseWithSchedule(
-                member.guild.id,
-                member.id,
-                'EXPIRED',
-              );
-            } else if (
-              mute &&
-              guildSettings.ok &&
-              guildSettings.value.mutedRoleId
-            ) {
-              const mutedRoleId = guildSettings.value.mutedRoleId;
-              // Check actual role presence; no-op if already present.
-              if (
-                await moderationDiscord.hasRole(
-                  member.guild.id,
-                  member.id,
-                  mutedRoleId,
-                )
-              )
-                return;
-              roleCorrelation.put(
-                member.guild.id,
-                member.id,
-                mutedRoleId,
-                'ADD',
-              );
-              try {
-                await moderationDiscord.addRoleUnlocked(
-                  member.guild.id,
-                  member.id,
-                  mutedRoleId,
-                  'mute restore',
-                );
-              } catch (error) {
-                roleCorrelation.remove(
-                  member.guild.id,
-                  member.id,
-                  mutedRoleId,
-                  'ADD',
-                );
-                throw error;
-              }
-            }
-          },
-        );
-        if (!member.user.bot)
-          await automod.autoDehoist(
-            member.guild.id,
-            member.id,
-            member.displayName,
-          );
-      })(),
-    );
-  });
-  client.on('guildMemberRemove', (member) => {
-    if (!ready()) return;
-    report(
-      'gateway.member_remove_failed',
-      (async () => {
-        const result = await externalEvents.process({
-          guildId: member.guild.id,
-          targetUserId: member.id,
-          kind: 'MEMBER_REMOVE',
-          occurredAt: new Date(),
-          memberDisplayName: member.displayName,
-          snapshot: {
-            guildId: member.guild.id,
-            userId: member.id,
-            username: member.user.username,
-            globalName: member.user.globalName,
-            nickname: member.nickname,
-            joinedAt: member.joinedAt,
-          },
-        });
-        await deliverExternalCase(member.guild.id, result);
-      })(),
-    );
+        },
+      });
+      await deliverExternalCase(member.guild.id, result);
+    });
   });
   client.on('guildMemberUpdate', (before, after) => {
     if (!ready()) return;
     if (!after.user.bot)
-      report(
-        'gateway.member_dehoist_failed',
+      report('gateway.member_dehoist_failed', () =>
         automod
           .autoDehoist(after.guild.id, after.id, after.displayName)
           .then(() => undefined),
@@ -1893,9 +1952,9 @@ export function installGatewayListeners(
     for (const [id, role] of before.roles.cache) roleNames.set(id, role.name);
     for (const [id, role] of after.roles.cache) roleNames.set(id, role.name);
     // — Single coordinator: serial lanes with shared settings & audit results —
-    report(
+    reportCritical(
       'gateway.member_update_role_coordinator_failed',
-      (async () => {
+      async () => {
         const configured = await settings.get(after.guild.id);
         const mutedRoleId =
           (configured.ok ? configured.value.mutedRoleId : null) ?? null;
@@ -2009,11 +2068,10 @@ export function installGatewayListeners(
             'Muted external-case lane failed',
           );
         }
-      })(),
+      },
     );
     if (before.displayName === after.displayName) return;
-    report(
-      'gateway.member_update_failed',
+    report('gateway.member_update_failed', () =>
       logging.server(
         after.guild.id,
         'メンバー更新',
@@ -2035,8 +2093,7 @@ export function installGatewayListeners(
     )
       return;
     const userUpdateOccurredAt = new Date();
-    report(
-      'gateway.user_update_failed',
+    report('gateway.user_update_failed', () =>
       logging.userUpdate(
         after.id,
         after.username,
@@ -2047,37 +2104,34 @@ export function installGatewayListeners(
   });
   client.on('guildBanAdd', (ban) => {
     if (!ready()) return;
-    report(
-      'gateway.ban_add_failed',
-      (async () => {
-        const result = await externalEvents.process({
-          guildId: ban.guild.id,
-          targetUserId: ban.user.id,
-          kind: 'BAN_ADD',
-          occurredAt: new Date(),
-        });
-        await deliverExternalCase(ban.guild.id, result);
-      })(),
-    );
+    reportCritical('gateway.ban_add_failed', async () => {
+      const result = await externalEvents.process({
+        guildId: ban.guild.id,
+        targetUserId: ban.user.id,
+        kind: 'BAN_ADD',
+        occurredAt: new Date(),
+      });
+      await deliverExternalCase(ban.guild.id, result);
+    });
   });
   client.on('guildBanRemove', (ban) => {
     if (!ready()) return;
-    report(
-      'gateway.ban_remove_failed',
-      (async () => {
-        const result = await externalEvents.process({
-          guildId: ban.guild.id,
-          targetUserId: ban.user.id,
-          kind: 'BAN_REMOVE',
-          occurredAt: new Date(),
-        });
-        await deliverExternalCase(ban.guild.id, result);
-      })(),
-    );
+    reportCritical('gateway.ban_remove_failed', async () => {
+      const result = await externalEvents.process({
+        guildId: ban.guild.id,
+        targetUserId: ban.user.id,
+        kind: 'BAN_REMOVE',
+        occurredAt: new Date(),
+      });
+      await deliverExternalCase(ban.guild.id, result);
+    });
   });
   client.on('channelCreate', (channel) => {
     if (!ready()) return;
-    void (async () => {
+    // Tracked as a critical state transition: the Muted-role permission
+    // overwrite keeps muted members from speaking/posting in newly created
+    // channels, so it must not be shed under overload and a 401 must be fatal.
+    reportCritical('gateway.channel_muted_overwrite_failed', async () => {
       const guild = channel.guild;
       const role = guild.roles.cache.find((item) => item.name === 'Muted');
       if (role && 'permissionOverwrites' in channel)
@@ -2093,14 +2147,6 @@ export function installGatewayListeners(
                 SendVoiceMessages: false,
               }),
         });
-    })().catch((error: unknown) => {
-      logger.error(
-        {
-          event: 'gateway.channel_muted_overwrite_failed',
-          errorName: error instanceof Error ? error.name : 'unknown',
-        },
-        'Muted role overwrite failed',
-      );
     });
   });
   client.on('channelUpdate', (_before, after) => {
@@ -2114,28 +2160,32 @@ export function installGatewayListeners(
       `${guildChannel.guild.id}:${guildChannel.id}`,
     );
     if (!internalSlowmode)
-      void scheduler.cancel({
-        guildId: guildChannel.guild.id,
-        targetUserId: null,
-        channelId: guildChannel.id,
-        type: 'RESTORE_SLOWMODE',
-      });
+      // Tracked as a critical state transition: cancelling the restore-slowmode
+      // reservation must not be shed (orphaned reservations would later clobber
+      // a moderator's manual slowmode), and a 401 must be fatal.
+      reportCritical('gateway.channel_slowmode_cancel_failed', () =>
+        scheduler
+          .cancel({
+            guildId: guildChannel.guild.id,
+            targetUserId: null,
+            channelId: guildChannel.id,
+            type: 'RESTORE_SLOWMODE',
+          })
+          .then(() => undefined),
+      );
   });
   client.on('channelDelete', (channel) => {
     if (!ready()) return;
     if ('guildId' in channel && channel.guildId) {
       const guildId = channel.guildId;
       const channelId = channel.id;
-      report(
-        'gateway.channel_delete_failed',
-        (async () => {
-          try {
-            await ignores.clearChannel(guildId, channelId);
-          } finally {
-            settings.invalidate(guildId);
-          }
-        })(),
-      );
+      reportCritical('gateway.channel_delete_failed', async () => {
+        try {
+          await ignores.clearChannel(guildId, channelId);
+        } finally {
+          settings.invalidate(guildId);
+        }
+      });
     }
   });
   client.on('roleDelete', (role) => {
@@ -2145,8 +2195,7 @@ export function installGatewayListeners(
   client.on('guildDelete', (guild) => {
     if (!ready()) return;
     settings.invalidate(guild.id);
-    report(
-      'gateway.guild_delete_failed',
+    reportCritical('gateway.guild_delete_failed', () =>
       lifecycle
         .markLeft({ guildId: guild.id, departedAt: new Date() })
         .then(() => undefined),
@@ -2154,8 +2203,7 @@ export function installGatewayListeners(
   });
   client.on('guildCreate', (guild) => {
     if (!ready()) return;
-    report(
-      'gateway.guild_create_failed',
+    reportCritical('gateway.guild_create_failed', () =>
       lifecycle.markActive(guild.id).then(() => undefined),
     );
   });
@@ -2187,6 +2235,9 @@ export async function main(): Promise<void> {
       stopIntake: dependencies.stopIntake,
       drainIntake: dependencies.drainIntake,
       stopVoice: dependencies.stopVoice,
+      startRetention: dependencies.startRetention,
+      stopRetention: dependencies.stopRetention,
+      drainGateway: dependencies.drainGateway,
       disconnectDatabase: dependencies.disconnectDatabase,
     },
     config,

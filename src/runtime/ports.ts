@@ -44,6 +44,11 @@ export interface RuntimePorts {
   drainIntake(): Promise<void>;
   stopScheduler(): Promise<void>;
   stopVoice(): Promise<void>;
+  /** Optional periodic retention sweep lifecycle. */
+  startRetention?(): Promise<void>;
+  stopRetention?(): Promise<void>;
+  /** Optional bounded gateway-work drain, awaited before Prisma disconnect. */
+  drainGateway?(): Promise<void>;
   disconnectDatabase(): Promise<void>;
 }
 
