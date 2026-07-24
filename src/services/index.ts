@@ -6,6 +6,7 @@ export * from './duration-parser.js';
 export * from './scheduler-service.js';
 export * from './correlation-cache.js';
 export * from './snapshot-service.js';
+export * from './retention-service.js';
 export * from './external-event-service.js';
 export * from './logging-services.js';
 export * from './resource-loader.js';
