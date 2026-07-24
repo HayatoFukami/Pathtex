@@ -8,6 +8,7 @@ import {
 import type { CaseService } from './case-service.js';
 import type { SnapshotService } from './snapshot-service.js';
 import type { TargetIdentityResolver } from './target-identity.js';
+import { t } from '../i18n/index.js';
 
 const externalEventBase = z.object({
   guildId: SnowflakeSchema,
@@ -402,7 +403,7 @@ export class ExternalEventService {
         moderatorUserId: entry.executorUserId,
         source: 'EXTERNAL',
         status: 'COMPLETED',
-        reason: '外部操作',
+        reason: t('system:reason.externalOperation'),
         discordAuditLogEntryId: entry.id,
       });
       if (!created.ok) return await finish({ ...base, snapshotSaved });

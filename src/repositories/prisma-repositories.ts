@@ -74,6 +74,7 @@ import {
   isUserTargetAction,
   normalizeTargetDisplay,
 } from '../services/target-identity.js';
+import { t } from '../i18n/index.js';
 
 type DbTransaction = PrismaTypes.TransactionClient;
 
@@ -260,12 +261,19 @@ export class PrismaCaseRepository implements CaseRepository {
     const row = await this.db.moderationCase.findFirst({
       where: {
         guildId,
-        OR: [{ reason: null }, { reason: '' }, { reason: '理由未指定' }],
+        OR: [
+          { reason: null },
+          { reason: '' },
+          { reason: t('moderation:defaultReason') },
+        ],
       },
       orderBy: { caseNumber: 'desc' },
     });
     return row
-      ? validateDbOutput({ ...row, reason: row.reason?.trim() || '理由未指定' })
+      ? validateDbOutput({
+          ...row,
+          reason: row.reason?.trim() || t('moderation:defaultReason'),
+        })
       : null;
   }
   public async updateMetadata(
@@ -722,7 +730,7 @@ export class PrismaSchedulerRepository implements SchedulerRepository {
         guildId: job.guildId,
         action: job.type === 'UNBAN' ? 'UNBAN' : 'UNMUTE',
         targetUserId: job.targetUserId,
-        targetDisplay: originDisplay ?? '不明なユーザー',
+        targetDisplay: originDisplay ?? t('system:identity.unknownUser'),
         moderatorUserId: origin?.moderatorUserId ?? fallbackModeratorUserId,
         reason: origin?.reason ?? null,
         durationSeconds: null,
@@ -1549,7 +1557,7 @@ export class PrismaRaidRepository implements RaidRepository {
         moderatorUserId: input.actorUserId,
         source: 'RAIDMODE',
         status: 'COMPLETED',
-        reason: input.reason ?? '理由未指定',
+        reason: input.reason ?? t('moderation:defaultReason'),
       });
       await tx.scheduledAction.updateMany({
         where: {
@@ -1721,7 +1729,7 @@ export class PrismaRaidRepository implements RaidRepository {
         moderatorUserId: actorUserId,
         source: 'RAIDMODE',
         status: 'COMPLETED',
-        reason: 'AutoRaid自動解除',
+        reason: t('raid:service.autoDisableReason'),
       });
       return {
         disabled: true,

@@ -1,5 +1,6 @@
 import type { ChatInputCommandInteraction } from 'discord.js';
 import type { CommandDefinition } from './contract.js';
+import { t } from '../i18n/index.js';
 
 export interface DatabaseHealthPort {
   health(): Promise<boolean>;
@@ -13,7 +14,7 @@ export function createPingCommand(
     name: 'ping',
     data: {
       name: 'ping',
-      description: 'Botとデータベースの応答を確認します',
+      description: t('general:pingCommand.description'),
       type: 1,
       contexts: [0],
       integration_types: [0],
@@ -53,7 +54,7 @@ export function createPingCommand(
       const interactionRtt = Date.now() - receivedAt;
       const gateway = database.gatewayPing?.() ?? -1;
       await interaction.reply({
-        content: `ポン！\nインタラクション: ${String(interactionRtt)}ms\nゲートウェイ: ${gateway >= 0 ? `${String(gateway)}ms` : '不明'}\nデータベース: ${databaseOk ? `正常 (${String(dbRtt)}ms)` : '利用できません'}`,
+        content: `${t('general:pingCommand.pong')}\n${t('general:pingCommand.interactionLabel')}: ${String(interactionRtt)}ms\n${t('general:pingCommand.gatewayLabel')}: ${gateway >= 0 ? `${String(gateway)}ms` : t('system:common.unknown')}\n${t('general:pingCommand.databaseLabel')}: ${databaseOk ? t('general:pingCommand.dbHealthy', { ms: String(dbRtt) }) : t('general:pingCommand.dbUnavailable')}`,
       });
     },
   };

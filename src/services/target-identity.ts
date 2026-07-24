@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { SnowflakeSchema } from '../repositories/contracts.js';
+import { t } from '../i18n/index.js';
 
 export const TargetDisplaySchema = z.string().transform((value, ctx) => {
   const normalized = normalizeTargetDisplay(value);
@@ -40,7 +41,7 @@ export function formatTargetIdentity(identity: TargetIdentity): string {
 export function fallbackTargetIdentity(userId: string): TargetIdentity {
   return {
     userId: SnowflakeSchema.parse(userId),
-    displayName: '不明なユーザー',
+    displayName: t('system:identity.unknownUser'),
   };
 }
 

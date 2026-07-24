@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { err, ok } from './result.js';
 import type { Result } from './result.js';
+import { t } from '../i18n/index.js';
 
 export const snowflakeSchema = z.string().regex(/^\d{17,20}$/);
 export type Snowflake = z.infer<typeof snowflakeSchema>;
@@ -138,7 +139,7 @@ export function parseReason(value: unknown, required = false): Result<string> {
   if (value === undefined || value === null)
     return required
       ? err('INVALID_INPUT', 'Reason is required')
-      : ok('理由未指定');
+      : ok(t('moderation:defaultReason'));
   if (typeof value !== 'string') return err('INVALID_INPUT', 'Invalid reason');
   const reason = value.trim();
   if (reason.length === 0 || Array.from(reason).length > 1000)

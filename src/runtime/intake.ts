@@ -14,6 +14,7 @@ import { InteractionDedupe } from './dedupe.js';
 import type { PermissionPolicy } from './policy.js';
 import { ConfigurationOverviewError } from '../features/configuration/service.js';
 import { isUnauthorized } from '../features/logging/adapters.js';
+import { t } from '../i18n/index.js';
 
 export interface IntakeOptions {
   readonly ready: () => boolean;
@@ -80,16 +81,16 @@ const replyError = async (
 ): Promise<void> => {
   if (interaction.deferred)
     await interaction.editReply({
-      content: `処理中にエラーが発生しました。\n参照ID: ${correlationId}`,
+      content: t('system:intake.processingError', { correlationId }),
     });
   else if (interaction.replied)
     await interaction.followUp({
-      content: `処理中にエラーが発生しました。\n参照ID: ${correlationId}`,
+      content: t('system:intake.processingError', { correlationId }),
       ephemeral: true,
     });
   else
     await interaction.reply({
-      content: `処理中にエラーが発生しました。\n参照ID: ${correlationId}`,
+      content: t('system:intake.processingError', { correlationId }),
       ephemeral: true,
     });
 };
@@ -152,14 +153,14 @@ export function installInteractionIntake(
     const task = (async () => {
       if (Date.now() - interaction.message.createdTimestamp > 15 * 60 * 1000) {
         await interaction.reply({
-          content: 'このページは期限切れです。',
+          content: t('system:intake.componentExpired'),
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       if (!componentHandler || !(await componentHandler(interaction)))
         await interaction.reply({
-          content: 'この操作は利用できません。',
+          content: t('system:intake.componentUnavailable'),
           flags: MessageFlags.Ephemeral,
         });
     })().catch((error: unknown) => {
@@ -195,7 +196,7 @@ export function installInteractionIntake(
           : false;
       if (!handled)
         await interaction.reply({
-          content: 'この操作は利用できません。',
+          content: t('system:intake.componentUnavailable'),
           flags: MessageFlags.Ephemeral,
         });
     })().catch((error: unknown) => {
@@ -261,14 +262,14 @@ export function installInteractionIntake(
     const run = async (): Promise<void> => {
       if (!interaction.inGuild()) {
         await interaction.reply({
-          content: `このコマンドはギルド内でのみ使用できます。\n参照ID: ${correlationId}`,
+          content: t('system:intake.guildOnly', { correlationId }),
           ephemeral: true,
         });
         return;
       }
       if (command === undefined) {
         await interaction.reply({
-          content: `このコマンドを実行する権限がありません。\n参照ID: ${correlationId}`,
+          content: t('system:intake.commandUnauthorized', { correlationId }),
           ephemeral: true,
         });
         return;
@@ -276,7 +277,7 @@ export function installInteractionIntake(
       const policy = command.permissionPolicy ?? options.permissionPolicy;
       if (!(await policy.authorize(interaction, command))) {
         await interaction.reply({
-          content: `このコマンドを実行する権限がありません。\n参照ID: ${correlationId}`,
+          content: t('system:intake.commandUnauthorized', { correlationId }),
           ephemeral: true,
         });
         return;
@@ -287,7 +288,10 @@ export function installInteractionIntake(
       );
       if (missing.length > 0) {
         await interaction.reply({
-          content: `Botに必要な権限がありません: ${missing.join(', ')}\n参照ID: ${correlationId}`,
+          content: t('system:intake.missingBotPermissions', {
+            missing: missing.join(', '),
+            correlationId,
+          }),
           ephemeral: true,
         });
         return;

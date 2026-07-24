@@ -9,6 +9,7 @@ import {
 } from './role-audit-resolver.js';
 import type { RoleCorrelationCache } from './role-correlation-cache.js';
 import type { Logger } from 'pino';
+import { t } from '../i18n/index.js';
 
 export interface RoleChangeDto {
   roleId: string;
@@ -229,7 +230,10 @@ export class MemberRoleChangeService {
         targetUserId: input.targetUserId,
         roleName: change.roleName,
         roleId: change.roleId,
-        operation: change.direction === 'ADD' ? '追加' : '削除',
+        operation:
+          change.direction === 'ADD'
+            ? t('logging:roleChange.add')
+            : t('logging:roleChange.remove'),
         executor,
         date: input.occurredAt,
         zone,
@@ -278,6 +282,6 @@ export class MemberRoleChangeService {
         resolution.executorUserId
       );
     }
-    return '不明';
+    return t('system:common.unknown');
   }
 }
