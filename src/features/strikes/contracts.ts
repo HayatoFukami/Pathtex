@@ -42,6 +42,9 @@ export interface StrikeServiceDependencies {
   };
   readonly moderation: ModerationService;
   readonly discord: StrikeDiscordPort;
+  /** Configurable bulk-target ceiling (`MAX_BULK_TARGETS`, 1..20). Defaults to
+   * the static cap of 20 and is clamped so it can never exceed that ceiling. */
+  readonly maxBulkTargets?: number;
   readonly targetIdentityResolver?: {
     resolve(
       guildId: string,

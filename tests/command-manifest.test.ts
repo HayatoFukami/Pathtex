@@ -10,6 +10,7 @@ import {
 } from '../src/features/general/index.js';
 import { commandManifest } from '../src/runtime/commands.js';
 import type { CommandDefinition } from '../src/commands/contract.js';
+import type { StrikeService } from '../src/features/strikes/strike-service.js';
 
 const runtime = {
   botName: 'Pathtex',
@@ -211,5 +212,62 @@ describe('production command manifest invariants', () => {
         [stub('ping'), stub('reason')],
       ),
     ).toThrow(/duplicate command name\(s\) in manifest: reason/);
+  });
+});
+
+describe('createCommandManifest bulk-target composition (MAX_BULK_TARGETS)', () => {
+  const guildId = '12345678901234567';
+  const makeInteraction = (additional: string) => ({
+    guildId,
+    user: { id: '12345678901234568' },
+    options: {
+      getUser: () => ({ id: '12345678901234580' }),
+      getString: (name: string) =>
+        name === 'additional_targets' ? additional : null,
+      getInteger: () => null,
+    },
+    editReply: vi.fn(),
+  });
+
+  it('threads the injected limit into the strike command factory', async () => {
+    const strikeMany = vi.fn().mockResolvedValue([]);
+    const strikes = { strikeMany } as unknown as StrikeService;
+    const commands = createCommandManifest(
+      { health: () => Promise.resolve(true) },
+      [],
+      undefined,
+      strikes,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+      { maxBulkTargets: 2 },
+    );
+    const strike = commands.find((command) => command.name === 'strike');
+    expect(strike).toBeDefined();
+    // primary + two additional = 3 targets, over the injected limit of 2.
+    const interaction = makeInteraction('12345678901234581 12345678901234582');
+    await strike?.execute({ interaction } as never);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      '対象を1～2件指定してください。',
+    );
+    expect(strikeMany).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the static ceiling of 20 when no limit is injected', async () => {
+    const strikeMany = vi.fn().mockResolvedValue([]);
+    const strikes = { strikeMany } as unknown as StrikeService;
+    const commands = createCommandManifest(
+      { health: () => Promise.resolve(true) },
+      [],
+      undefined,
+      strikes,
+    );
+    const strike = commands.find((command) => command.name === 'strike');
+    // Two targets is within the default ceiling, so the service is invoked.
+    const interaction = makeInteraction('12345678901234581');
+    await strike?.execute({ interaction } as never);
+    expect(strikeMany).toHaveBeenCalled();
   });
 });

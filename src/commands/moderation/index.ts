@@ -10,6 +10,7 @@ import {
   resolveUserIds,
   resolveDuration,
 } from '../../features/moderation/validation.js';
+import { DEFAULT_BULK_TARGET_LIMIT } from '../../domain/parsers.js';
 import RE2 from 're2';
 import {
   TargetIdentitySchema,
@@ -58,9 +59,6 @@ const targetOptions = [
     max_length: 1000,
   },
 ];
-const kickTargetOptions = targetOptions.filter(
-  (option) => option.name !== 'additional_targets',
-);
 const reply = async (
   interaction: ChatInputCommandInteraction,
   content: string,
@@ -164,6 +162,7 @@ const actions: Record<Action, keyof ModerationService> = {
 function command(
   action: Action,
   service: ModerationService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): CommandDefinition {
   return {
     name: action,
@@ -220,17 +219,14 @@ function command(
                     required: false,
                   },
                 ]
-              : action === 'kick'
-                ? kickTargetOptions
-                : targetOptions,
+              : targetOptions,
     ),
     async execute({ interaction }) {
       const options = interaction.options as unknown as Options;
       const target = options.getUser('target');
       const member = options.getMember?.('target');
-      const additional =
-        action === 'kick' ? null : options.getString('additional_targets');
-      const parsed = resolveTargets(target?.id, additional);
+      const additional = options.getString('additional_targets');
+      const parsed = resolveTargets(target?.id, additional, maxBulkTargets);
       if (!parsed.ok) {
         await reply(interaction, parsed.error.message);
         return;
@@ -304,6 +300,7 @@ function command(
 
 export function createModerationCommands(
   service: ModerationService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): readonly CommandDefinition[] {
   const commands: Action[] = [
     'kick',
@@ -313,11 +310,12 @@ export function createModerationCommands(
     'mute',
     'unmute',
   ];
-  return commands.map((action) => command(action, service));
+  return commands.map((action) => command(action, service, maxBulkTargets));
 }
 
 export function createUnbanCommand(
   service: ModerationService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): CommandDefinition {
   return {
     name: 'unban',
@@ -344,7 +342,7 @@ export function createUnbanCommand(
     ]),
     async execute({ interaction }) {
       const options = interaction.options as unknown as Options;
-      const ids = resolveUserIds(options.getString('user_ids'));
+      const ids = resolveUserIds(options.getString('user_ids'), maxBulkTargets);
       if (!ids.ok) {
         await reply(interaction, ids.error.message);
         return;
@@ -367,8 +365,12 @@ export function createUnbanCommand(
 
 export function createModerationCommandManifest(
   service: ModerationService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): readonly CommandDefinition[] {
-  return [...createModerationCommands(service), createUnbanCommand(service)];
+  return [
+    ...createModerationCommands(service, maxBulkTargets),
+    createUnbanCommand(service, maxBulkTargets),
+  ];
 }
 
 export function createModerationUtilityCommands(

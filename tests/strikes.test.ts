@@ -595,3 +595,93 @@ describe('StrikeService — writeCase producer regression', () => {
     expect(deps.modlog.writeCase).toHaveBeenCalled();
   });
 });
+
+describe('strikes configurable bulk-target limit (MAX_BULK_TARGETS)', () => {
+  const ids = (count: number) =>
+    Array.from(
+      { length: count },
+      (_, index) => `1234567890123${String(index).padStart(4, '0')}`,
+    );
+
+  it('parseAdditionalTargets keeps the static ceiling and honors a lower limit', () => {
+    expect(parseAdditionalTargets(ids(19).join(' ')).ok).toBe(true);
+    expect(parseAdditionalTargets(ids(20).join(' ')).ok).toBe(false);
+    expect(parseAdditionalTargets(ids(2).join(' '), 2).ok).toBe(true);
+    expect(parseAdditionalTargets(ids(3).join(' '), 2).ok).toBe(false);
+  });
+
+  it('StrikeService.strikeMany/pardonMany enforce the injected limit', async () => {
+    const limited = new StrikeService({ maxBulkTargets: 2 } as never);
+    const rejected = await limited.strikeMany({
+      guildId: id,
+      userIds: ids(3),
+      actorId: '12345678901234568',
+      amount: 1,
+      reason: 'reason',
+    });
+    expect(
+      Array.isArray(rejected) ? true : (rejected as { ok: boolean }).ok,
+    ).toBe(false);
+    const rejectedPardon = await limited.pardonMany({
+      guildId: id,
+      userIds: ids(3),
+      actorId: '12345678901234568',
+      amount: 1,
+      reason: 'reason',
+    });
+    expect(
+      Array.isArray(rejectedPardon)
+        ? true
+        : (rejectedPardon as { ok: boolean }).ok,
+    ).toBe(false);
+
+    const defaultService = new StrikeService({} as never);
+    const defaultRejected = await defaultService.strikeMany({
+      guildId: id,
+      userIds: ids(21),
+      actorId: '12345678901234568',
+      amount: 1,
+      reason: 'reason',
+    });
+    expect(
+      Array.isArray(defaultRejected)
+        ? true
+        : (defaultRejected as { ok: boolean }).ok,
+    ).toBe(false);
+  });
+
+  it('threads the configured limit through the strike command', async () => {
+    const strikeMany = vi.fn().mockResolvedValue([]);
+    const service = { strikeMany } as unknown as StrikeService;
+    const primary = '12345678901234580';
+    const additional = '12345678901234581 12345678901234582';
+    const makeInteraction = () => ({
+      guildId: id,
+      user: { id: '12345678901234568' },
+      options: {
+        getUser: () => ({ id: primary }),
+        getString: (name: string) =>
+          name === 'additional_targets' ? additional : null,
+        getInteger: () => null,
+      },
+      editReply: vi.fn(),
+    });
+
+    const limited = strikesCommands(service, 2).find(
+      (command) => command.name === 'strike',
+    );
+    const limitedInteraction = makeInteraction();
+    await limited?.execute({ interaction: limitedInteraction } as never);
+    expect(limitedInteraction.editReply).toHaveBeenCalledWith(
+      '対象を1～2件指定してください。',
+    );
+    expect(strikeMany).not.toHaveBeenCalled();
+
+    const defaultCommand = strikesCommands(service).find(
+      (command) => command.name === 'strike',
+    );
+    const defaultInteraction = makeInteraction();
+    await defaultCommand?.execute({ interaction: defaultInteraction } as never);
+    expect(strikeMany).toHaveBeenCalled();
+  });
+});

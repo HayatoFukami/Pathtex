@@ -1,5 +1,5 @@
 import { err, ok, type Result } from '../../domain/result.js';
-import { auditReason } from '../../domain/parsers.js';
+import { auditReason, clampBulkTargetLimit } from '../../domain/parsers.js';
 import {
   CaseInputSchema,
   CaseDtoSchema,
@@ -31,8 +31,10 @@ const validId = (id: string) => SnowflakeSchema.safeParse(id).success;
 /** Public business contract for all moderation actions. Discord I/O stays behind the port. */
 export class ModerationService {
   private readonly clock: () => Date;
+  private readonly maxBulkTargets: number;
   public constructor(private readonly deps: ModerationServiceDependencies) {
     this.clock = deps.clock ?? (() => new Date());
+    this.maxBulkTargets = clampBulkTargetLimit(deps.maxBulkTargets);
   }
 
   public kick(input: ModerationOperationOptions) {
@@ -75,7 +77,7 @@ export class ModerationService {
       !validId(input.guildId) ||
       !validId(input.actorId) ||
       input.targets.length === 0 ||
-      input.targets.length > 20
+      input.targets.length > this.maxBulkTargets
     )
       return err('INVALID_INPUT', 'Invalid moderation input');
     const context = input.execution;

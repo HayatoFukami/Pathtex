@@ -13,6 +13,10 @@ import {
   TargetIdentitySchema,
   type TargetIdentity,
 } from '../../services/target-identity.js';
+import {
+  clampBulkTargetLimit,
+  DEFAULT_BULK_TARGET_LIMIT,
+} from '../../domain/parsers.js';
 import { isUnauthorized } from '../logging/adapters.js';
 
 const limit = async <T>(
@@ -98,12 +102,20 @@ export class VoiceService {
     ReturnType<typeof setTimeout>
   >();
   private readonly locks = new Map<string, Promise<void>>();
+  /** Configurable bulk-target ceiling (`MAX_BULK_TARGETS`, 1..20). Defaults to
+   * the static cap of 20 and is clamped so it can never exceed that ceiling. The
+   * service enforces it before any Discord access, mirroring ModerationService so
+   * a missing or malformed configuration can never weaken the static ceiling. */
+  private readonly maxBulkTargets: number;
   public constructor(
     private readonly port: VoicePort,
     private readonly cases?: VoiceCasePort,
     private readonly now = () => new Date(),
     private readonly identityResolver?: VoiceIdentityResolver,
-  ) {}
+    maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
+  ) {
+    this.maxBulkTargets = clampBulkTargetLimit(maxBulkTargets);
+  }
   private resolveIdentity(
     guildId: string,
     userId: string,
@@ -144,6 +156,17 @@ export class VoiceService {
     }>
   > {
     const uniqueIds = [...new Set(ids)];
+    // Reject an empty batch before any Discord access so a targetless call can
+    // never reach the API, mirroring the all-or-nothing over-limit guard below.
+    if (uniqueIds.length === 0)
+      return err('INVALID_INPUT', '対象を1件以上指定してください');
+    // Enforce the injected configured ceiling before any Discord access so an
+    // over-limit batch is rejected all-or-nothing without touching the API.
+    if (uniqueIds.length > this.maxBulkTargets)
+      return err(
+        'INVALID_INPUT',
+        `対象は最大${String(this.maxBulkTargets)}件です`,
+      );
     const resolved = await Promise.all(
       uniqueIds.map(async (id) => ({
         id,

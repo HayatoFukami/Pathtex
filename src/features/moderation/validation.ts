@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { err, ok, type Result } from '../../domain/result.js';
 import {
+  clampBulkTargetLimit,
+  DEFAULT_BULK_TARGET_LIMIT,
   parseDuration,
   parseReason,
   parseTargets,
@@ -11,19 +13,24 @@ export const ModerationInputSchema = z.object({
   actorId: z.string().regex(/^\d{17,20}$/u),
 });
 
-export const resolveTargets = (target: unknown, additional: unknown) =>
-  parseTargets(target, additional, 20);
-export const resolveUserIds = (value: unknown): Result<string[]> => {
+export const resolveTargets = (
+  target: unknown,
+  additional: unknown,
+  max: number = DEFAULT_BULK_TARGET_LIMIT,
+) => parseTargets(target, additional, max);
+export const resolveUserIds = (
+  value: unknown,
+  max: number = DEFAULT_BULK_TARGET_LIMIT,
+): Result<string[]> => {
   if (typeof value !== 'string' || value.length > 400)
     return err('INVALID_INPUT', 'Invalid user IDs');
   const values = value.split(/[\s,]+/u).filter(Boolean);
-  if (
-    values.length === 0 ||
-    values.length > 20 ||
-    values.some((id) => !/^\d{17,20}$/u.test(id))
-  )
+  if (values.length === 0 || values.some((id) => !/^\d{17,20}$/u.test(id)))
     return err('INVALID_INPUT', 'Invalid user IDs');
-  return ok([...new Set(values)]);
+  const unique = [...new Set(values)];
+  return unique.length <= clampBulkTargetLimit(max)
+    ? ok(unique)
+    : err('INVALID_INPUT', 'Invalid user IDs');
 };
 export const resolveReason = (value: unknown, required = false) =>
   parseReason(value, required);

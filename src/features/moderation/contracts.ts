@@ -137,6 +137,9 @@ export interface ModerationServiceDependencies {
   readonly scheduler: import('../../services/scheduler-service.js').SchedulerService;
   readonly activeMutes: import('../../repositories/contracts.js').ActiveMuteRepository;
   readonly settings: SettingsService;
+  /** Configurable bulk-target ceiling (`MAX_BULK_TARGETS`, 1..20). Defaults to
+   * the static cap of 20 and is clamped so it can never exceed that ceiling. */
+  readonly maxBulkTargets?: number;
   readonly targetIdentityResolver?: {
     resolve(
       guildId: string,

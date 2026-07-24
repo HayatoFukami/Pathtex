@@ -9,7 +9,11 @@ import type {
   StrikeCheck,
   StrikeServiceDependencies,
 } from './contracts.js';
-import { parseDuration } from '../../domain/parsers.js';
+import {
+  clampBulkTargetLimit,
+  DEFAULT_BULK_TARGET_LIMIT,
+  parseDuration,
+} from '../../domain/parsers.js';
 import {
   BAN_MAX_DURATION_SECONDS,
   punishmentDurationError,
@@ -28,6 +32,7 @@ const valid = (id: string) => SnowflakeSchema.safeParse(id).success;
 
 export function parseAdditionalTargets(
   value: string | null | undefined,
+  max: number = DEFAULT_BULK_TARGET_LIMIT,
 ): Result<string[]> {
   if (!value) return ok([]);
   if (Array.from(value).length > 400)
@@ -36,14 +41,23 @@ export function parseAdditionalTargets(
     .split(/[\s,]+/u)
     .filter(Boolean)
     .map((item) => item.replace(/^<@!?|>$/gu, ''));
+  // Static absolute ceiling: the additional-targets option never carries more
+  // than 19 tokens (the primary target occupies the remaining slot of the 20
+  // maximum). The configurable limit then further bounds the deduped count.
   if (ids.length > 19 || ids.some((id) => !valid(id)))
     return err('INVALID_INPUT', 'Invalid target IDs');
-  return ok([...new Set(ids)]);
+  const unique = [...new Set(ids)];
+  return unique.length <= clampBulkTargetLimit(max)
+    ? ok(unique)
+    : err('INVALID_INPUT', 'Invalid target IDs');
 }
 
 /** Owns strike accounting. The repository performs the locked, atomic mutation. */
 export class StrikeService {
-  public constructor(private readonly deps: StrikeServiceDependencies) {}
+  private readonly maxBulkTargets: number;
+  public constructor(private readonly deps: StrikeServiceDependencies) {
+    this.maxBulkTargets = clampBulkTargetLimit(deps.maxBulkTargets);
+  }
 
   public async strike(input: StrikeChangeInput): Promise<Result<StrikeResult>> {
     return this.change(input, 'MANUAL_STRIKE');
@@ -62,7 +76,10 @@ export class StrikeService {
   public async strikeMany(
     input: Omit<StrikeChangeInput, 'userId'> & { userIds: readonly string[] },
   ) {
-    if (input.userIds.length === 0 || input.userIds.length > 20)
+    if (
+      input.userIds.length === 0 ||
+      input.userIds.length > this.maxBulkTargets
+    )
       return err('INVALID_INPUT', 'Invalid target count');
     return Promise.all(
       input.userIds.map((userId) => this.strike({ ...input, userId })),
@@ -72,7 +89,10 @@ export class StrikeService {
   public async pardonMany(
     input: Omit<StrikeChangeInput, 'userId'> & { userIds: readonly string[] },
   ) {
-    if (input.userIds.length === 0 || input.userIds.length > 20)
+    if (
+      input.userIds.length === 0 ||
+      input.userIds.length > this.maxBulkTargets
+    )
       return err('INVALID_INPUT', 'Invalid target count');
     return Promise.all(
       input.userIds.map((userId) => this.pardon({ ...input, userId })),

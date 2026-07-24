@@ -9,9 +9,13 @@ import {
   validateDeleteDays,
   validateSlowmode,
   resolveUserIds,
+  resolveTargets,
 } from '../src/features/moderation/validation.js';
 import { ModerationService } from '../src/features/moderation/moderation-service.js';
-import { createModerationCommands } from '../src/commands/moderation/index.js';
+import {
+  createModerationCommands,
+  createUnbanCommand,
+} from '../src/commands/moderation/index.js';
 import type { CaseDto } from '../src/repositories/contracts.js';
 import type { TargetIdentity } from '../src/services/target-identity.js';
 
@@ -167,7 +171,7 @@ describe('moderation validation', () => {
     expect(touched).toBe(false);
   });
 
-  it('does not register additional_targets for kick, but keeps it for ban', () => {
+  it('registers additional_targets for kick and ban alike (spec §5.3.1)', () => {
     const commands = createModerationCommands({} as ModerationService);
     const kick = commands.find((command) => command.name === 'kick');
     const ban = commands.find((command) => command.name === 'ban');
@@ -176,11 +180,11 @@ describe('moderation validation', () => {
       (command?.data.options as readonly { name: string }[]).map(
         (option) => option.name,
       );
-    expect(optionNames(kick)).toEqual(['target', 'reason']);
+    expect(optionNames(kick)).toContain('additional_targets');
     expect(optionNames(ban)).toContain('additional_targets');
   });
 
-  it('executes kick with only its primary target and does not read additional_targets', async () => {
+  it('executes kick with primary and additional targets (spec §5.3.1)', async () => {
     const calls: Array<{ targets: readonly { id: string }[] }> = [];
     const service = {
       kick: (input: { targets: readonly { id: string }[] }) => {
@@ -188,7 +192,10 @@ describe('moderation validation', () => {
         return Promise.resolve({
           ok: true,
           value: {
-            outcomes: [{ targetId: input.targets[0]?.id ?? '', ok: true }],
+            outcomes: input.targets.map((target) => ({
+              targetId: target.id,
+              ok: true,
+            })),
           },
         });
       },
@@ -204,8 +211,11 @@ describe('moderation validation', () => {
         getUser: (name: string) =>
           name === 'target' ? { id: '12345678901234569' } : null,
         getString: (name: string) => {
-          if (name === 'additional_targets') additionalRead = true;
-          return name === 'reason' ? null : null;
+          if (name === 'additional_targets') {
+            additionalRead = true;
+            return '12345678901234570 12345678901234571';
+          }
+          return null;
         },
         getInteger: () => null,
       },
@@ -214,8 +224,16 @@ describe('moderation validation', () => {
 
     await kick?.execute({ interaction } as never);
 
-    expect(additionalRead).toBe(false);
-    expect(calls).toEqual([{ targets: [{ id: '12345678901234569' }] }]);
+    expect(additionalRead).toBe(true);
+    expect(calls).toEqual([
+      {
+        targets: [
+          { id: '12345678901234569' },
+          { id: '12345678901234570' },
+          { id: '12345678901234571' },
+        ],
+      },
+    ]);
   });
 
   it('shows kick target names and IDs for successful and failed outcomes', async () => {
@@ -1225,5 +1243,366 @@ describe('ModerationService — ora-1 blocker regressions', () => {
     // The resolver receives { member: { displayName: capturedDisplay } } context.
     const memberContext = { displayName: capturedDisplay };
     expect(memberContext.displayName).toBe(capturedDisplay);
+  });
+});
+
+describe('moderation configurable bulk-target limit (MAX_BULK_TARGETS)', () => {
+  const ids = (count: number) =>
+    Array.from(
+      { length: count },
+      (_, index) => `1234567890123${String(index).padStart(4, '0')}`,
+    );
+
+  it('parseTargets defaults to twenty and honors a lower configured limit', () => {
+    const [primary, ...rest] = ids(20);
+    const ok20 = parseTargets(primary, rest.join(' '));
+    expect(ok20.ok).toBe(true);
+    if (ok20.ok) expect(ok20.value).toHaveLength(20);
+    const [primary21, ...rest21] = ids(21);
+    expect(parseTargets(primary21, rest21.join(' ')).ok).toBe(false);
+    const limited = resolveTargets(primary, rest.slice(0, 4).join(' '), 5);
+    expect(limited.ok).toBe(true);
+    if (limited.ok) expect(limited.value).toHaveLength(5);
+    expect(resolveTargets(primary, rest.join(' '), 5).ok).toBe(false);
+  });
+
+  it('resolveUserIds defaults to twenty and honors a lower configured limit', () => {
+    expect(resolveUserIds(ids(20).join(',')).ok).toBe(true);
+    expect(resolveUserIds(ids(21).join(',')).ok).toBe(false);
+    expect(resolveUserIds(ids(5).join(','), 5).ok).toBe(true);
+    expect(resolveUserIds(ids(6).join(','), 5).ok).toBe(false);
+  });
+
+  it('ModerationService enforces the injected limit before any Discord access', async () => {
+    const defaultFixture = moderationDeps();
+    const ok20 = await new ModerationService(defaultFixture.deps as never).kick(
+      {
+        guildId,
+        actorId,
+        targets: ids(20).map((id) => ({ id })),
+        reason: 'reason',
+      },
+    );
+    expect(ok20.ok).toBe(true);
+    if (ok20.ok) expect(ok20.value.outcomes).toHaveLength(20);
+
+    const rejected21 = moderationDeps();
+    const result21 = await new ModerationService(rejected21.deps as never).kick(
+      {
+        guildId,
+        actorId,
+        targets: ids(21).map((id) => ({ id })),
+        reason: 'reason',
+      },
+    );
+    expect(result21.ok).toBe(false);
+    expect(rejected21.discord.getMember).not.toHaveBeenCalled();
+
+    const limited = moderationDeps({ maxBulkTargets: 2 });
+    const result3 = await new ModerationService(limited.deps as never).kick({
+      guildId,
+      actorId,
+      targets: ids(3).map((id) => ({ id })),
+      reason: 'reason',
+    });
+    expect(result3.ok).toBe(false);
+    expect(limited.discord.getMember).not.toHaveBeenCalled();
+  });
+
+  it('threads the configured limit through the ban command parser', async () => {
+    const ban = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: { outcomes: [] } });
+    const service = { ban } as unknown as ModerationService;
+    const primary = '12345678901234580';
+    const additional = '12345678901234581 12345678901234582';
+    const makeInteraction = () => ({
+      guildId,
+      user: { id: actorId },
+      options: {
+        getUser: () => ({ id: primary }),
+        getMember: () => null,
+        getString: (name: string) =>
+          name === 'additional_targets' ? additional : null,
+        getInteger: () => null,
+      },
+      editReply: vi.fn(),
+    });
+
+    const limited = createModerationCommands(service, 2).find(
+      (command) => command.name === 'ban',
+    );
+    const limitedInteraction = makeInteraction();
+    await limited?.execute({ interaction: limitedInteraction } as never);
+    expect(limitedInteraction.editReply).toHaveBeenCalledWith({
+      content: 'Too many targets',
+    });
+    expect(ban).not.toHaveBeenCalled();
+
+    const defaultCommand = createModerationCommands(service).find(
+      (command) => command.name === 'ban',
+    );
+    const defaultInteraction = makeInteraction();
+    await defaultCommand?.execute({ interaction: defaultInteraction } as never);
+    expect(ban).toHaveBeenCalled();
+  });
+
+  it('threads the configured limit through the kick command parser', async () => {
+    const kick = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: { outcomes: [] } });
+    const service = { kick } as unknown as ModerationService;
+    const primary = '12345678901234580';
+    const additional = '12345678901234581 12345678901234582';
+    const makeInteraction = () => ({
+      guildId,
+      user: { id: actorId },
+      options: {
+        getUser: () => ({ id: primary }),
+        getMember: () => null,
+        getString: (name: string) =>
+          name === 'additional_targets' ? additional : null,
+        getInteger: () => null,
+      },
+      editReply: vi.fn(),
+    });
+
+    const limited = createModerationCommands(service, 2).find(
+      (command) => command.name === 'kick',
+    );
+    const limitedInteraction = makeInteraction();
+    await limited?.execute({ interaction: limitedInteraction } as never);
+    expect(limitedInteraction.editReply).toHaveBeenCalledWith({
+      content: 'Too many targets',
+    });
+    expect(kick).not.toHaveBeenCalled();
+
+    const defaultCommand = createModerationCommands(service).find(
+      (command) => command.name === 'kick',
+    );
+    const defaultInteraction = makeInteraction();
+    await defaultCommand?.execute({ interaction: defaultInteraction } as never);
+    expect(kick).toHaveBeenCalled();
+  });
+
+  it('applies the unban configured limit after deduplication', () => {
+    // Three raw tokens that collapse to two unique IDs: with a configured limit
+    // of 2 the batch must be accepted because the limit applies after dedup.
+    const duped = [
+      '12345678901234580',
+      '12345678901234581',
+      '12345678901234580',
+    ].join(',');
+    const limited = resolveUserIds(duped, 2);
+    expect(limited.ok).toBe(true);
+    if (limited.ok)
+      expect(limited.value).toEqual(['12345678901234580', '12345678901234581']);
+    // Three distinct IDs still exceed the configured limit of 2.
+    expect(
+      resolveUserIds('12345678901234580,12345678901234581,12345678901234582', 2)
+        .ok,
+    ).toBe(false);
+  });
+
+  it('threads the unban configured limit through the command after dedup', async () => {
+    const unban = vi
+      .fn()
+      .mockResolvedValue({ ok: true, value: { outcomes: [] } });
+    const service = { unban } as unknown as ModerationService;
+    const duped = [
+      '12345678901234580',
+      '12345678901234581',
+      '12345678901234580',
+    ].join(' ');
+    const makeInteraction = (userIds: string) => ({
+      guildId,
+      user: { id: actorId },
+      options: {
+        getString: (name: string) => (name === 'user_ids' ? userIds : null),
+        getInteger: () => null,
+      },
+      editReply: vi.fn(),
+    });
+
+    const command = createUnbanCommand(service, 2);
+    const accepted = makeInteraction(duped);
+    await command.execute({ interaction: accepted } as never);
+    expect(unban).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [{ id: '12345678901234580' }, { id: '12345678901234581' }],
+      }),
+    );
+
+    const rejected = makeInteraction(
+      '12345678901234580 12345678901234581 12345678901234582',
+    );
+    await command.execute({ interaction: rejected } as never);
+    expect(rejected.editReply).toHaveBeenCalledWith({
+      content: 'Invalid user IDs',
+    });
+  });
+});
+
+describe('ModerationService — clean & reason 401 propagation (shared classifier)', () => {
+  const channelId = '12345678901234566';
+  const cleanInput = { guildId, channelId, limit: 10 };
+  const message = (overrides: Record<string, unknown> = {}) => ({
+    id: '11111111111111111',
+    authorId: actorId,
+    authorIsBot: false,
+    webhook: false,
+    content: 'hello',
+    embeds: 0,
+    attachments: [],
+    createdAt: new Date(),
+    ...overrides,
+  });
+  const cleanDeps = () => {
+    const discord = {
+      fetchMessages: vi.fn(),
+      deleteMessages: vi.fn(),
+      deleteMessage: vi.fn(),
+    };
+    return { deps: { discord }, discord };
+  };
+
+  it('propagates a direct 401 from bulk deletion instead of counting it as failed', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([message()]);
+    const fatal = Object.assign(new Error('unauthorized'), { status: 401 });
+    fixture.discord.deleteMessages.mockRejectedValue(fatal);
+    await expect(
+      new ModerationService(fixture.deps as never).clean(cleanInput),
+    ).rejects.toBe(fatal);
+  });
+
+  it('propagates a plain-object cause-wrapped status 401 from bulk deletion', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([message()]);
+    const wrapped = Object.assign(new Error('wrapper'), {
+      cause: { status: 401 },
+    });
+    fixture.discord.deleteMessages.mockRejectedValue(wrapped);
+    await expect(
+      new ModerationService(fixture.deps as never).clean(cleanInput),
+    ).rejects.toBe(wrapped);
+  });
+
+  it('propagates a plain-object cause-wrapped code 401 from bulk deletion', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([message()]);
+    const wrapped = Object.assign(new Error('wrapper'), {
+      cause: { code: 401 },
+    });
+    fixture.discord.deleteMessages.mockRejectedValue(wrapped);
+    await expect(
+      new ModerationService(fixture.deps as never).clean(cleanInput),
+    ).rejects.toBe(wrapped);
+  });
+
+  it('still counts a non-auth bulk deletion failure as failed (best-effort)', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([message()]);
+    fixture.discord.deleteMessages.mockRejectedValue(
+      Object.assign(new Error('server'), { status: 500 }),
+    );
+    const result = await new ModerationService(fixture.deps as never).clean(
+      cleanInput,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.value).toMatchObject({ deleted: 0, failed: 1 });
+  });
+
+  it('still counts a 404 bulk deletion as deleted (best-effort)', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([message()]);
+    fixture.discord.deleteMessages.mockRejectedValue(
+      Object.assign(new Error('gone'), { status: 404 }),
+    );
+    const result = await new ModerationService(fixture.deps as never).clean(
+      cleanInput,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.value).toMatchObject({ deleted: 1, failed: 0 });
+  });
+
+  it('propagates a direct 401 from single (old) message deletion', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([
+      message({
+        id: '22222222222222222',
+        createdAt: new Date(Date.now() - 15 * 86_400_000),
+      }),
+    ]);
+    const fatal = Object.assign(new Error('unauthorized'), { status: 401 });
+    fixture.discord.deleteMessage.mockRejectedValue(fatal);
+    await expect(
+      new ModerationService(fixture.deps as never).clean(cleanInput),
+    ).rejects.toBe(fatal);
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from single (old) message deletion', async () => {
+    const fixture = cleanDeps();
+    fixture.discord.fetchMessages.mockResolvedValue([
+      message({
+        id: '22222222222222222',
+        createdAt: new Date(Date.now() - 15 * 86_400_000),
+      }),
+    ]);
+    const wrapped = Object.assign(new Error('wrapper'), {
+      cause: { status: 401 },
+    });
+    fixture.discord.deleteMessage.mockRejectedValue(wrapped);
+    await expect(
+      new ModerationService(fixture.deps as never).clean(cleanInput),
+    ).rejects.toBe(wrapped);
+  });
+
+  const reasonDeps = (editReason: () => Promise<void>) => ({
+    cases: {
+      byNumber: vi.fn(async () => ({ ok: true, value: caseDto() })),
+      updateReason: vi.fn(async () => ({
+        ok: true,
+        value: caseDto({ reason: 'new reason' }),
+      })),
+    },
+    modlog: { editReason: vi.fn(editReason) },
+  });
+
+  it('propagates a direct 401 from modlog editReason in reason()', async () => {
+    const fatal = Object.assign(new Error('unauthorized'), { status: 401 });
+    const deps = reasonDeps(async () => {
+      throw fatal;
+    });
+    await expect(
+      new ModerationService(deps as never).reason(guildId, 7, 'new reason'),
+    ).rejects.toBe(fatal);
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from modlog editReason in reason()', async () => {
+    const wrapped = Object.assign(new Error('wrapper'), {
+      cause: { status: 401 },
+    });
+    const deps = reasonDeps(async () => {
+      throw wrapped;
+    });
+    await expect(
+      new ModerationService(deps as never).reason(guildId, 7, 'new reason'),
+    ).rejects.toBe(wrapped);
+  });
+
+  it('keeps reason() best-effort when modlog editReason fails non-auth', async () => {
+    const deps = reasonDeps(async () => {
+      throw Object.assign(new Error('server'), { status: 500 });
+    });
+    const result = await new ModerationService(deps as never).reason(
+      guildId,
+      7,
+      'new reason',
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.reason).toBe('new reason');
   });
 });

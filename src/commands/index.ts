@@ -13,6 +13,13 @@ import { toolsCommands } from '../features/tools/commands.js';
 import type { VoiceService } from '../features/voice/service.js';
 import { voiceCommands } from '../features/voice/commands.js';
 
+export interface CommandManifestOptions {
+  /** Configurable bulk-target ceiling (`MAX_BULK_TARGETS`, 1..20) injected into
+   * the multi-target command factories (strikes, voice). Moderation commands are
+   * built upstream and passed in already-configured. */
+  readonly maxBulkTargets?: number;
+}
+
 export function createCommandManifest(
   database: DatabaseHealthPort,
   moderation: readonly CommandDefinition[] = [],
@@ -23,17 +30,19 @@ export function createCommandManifest(
   tools?: ToolsService,
   voice?: VoiceService,
   general: readonly CommandDefinition[] = [],
+  options: CommandManifestOptions = {},
 ): readonly CommandDefinition[] {
   void database;
+  const { maxBulkTargets } = options;
   const all = [
     ...general,
     ...moderation,
     ...(configuration ? configurationCommands(configuration) : []),
-    ...(strikes ? strikesCommands(strikes) : []),
+    ...(strikes ? strikesCommands(strikes, maxBulkTargets) : []),
     ...(raid ? raidCommands(raid) : []),
     ...(automod ? automodCommands(automod) : []),
     ...(tools ? toolsCommands(tools) : []),
-    ...(voice ? voiceCommands(voice) : []),
+    ...(voice ? voiceCommands(voice, maxBulkTargets) : []),
   ];
   const seen = new Map<string, number>();
   for (const command of all)

@@ -11,11 +11,25 @@ export const parseSnowflake = (value: unknown): Result<Snowflake> => {
     : err('INVALID_INPUT', 'Invalid Discord Snowflake');
 };
 
+/** Default and absolute ceiling for multi-user ("bulk") command targets. The
+ * deployment-configurable limit (`MAX_BULK_TARGETS`) may lower this but never
+ * raise it, so the static Discord/API-facing cap of 20 is always preserved. */
+export const DEFAULT_BULK_TARGET_LIMIT = 20;
+export const MAX_BULK_TARGET_LIMIT = 20;
+/** Normalizes an injected bulk-target limit to a safe integer in `[1, 20]`,
+ * falling back to the default for `undefined`/non-integer input so a missing or
+ * malformed configuration can never weaken the static ceiling. */
+export function clampBulkTargetLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isInteger(value))
+    return DEFAULT_BULK_TARGET_LIMIT;
+  return Math.min(Math.max(value, 1), MAX_BULK_TARGET_LIMIT);
+}
+
 const token = z.string().trim().min(1);
 export function parseTargets(
   target: unknown,
   additional: unknown,
-  max = 20,
+  max: number = DEFAULT_BULK_TARGET_LIMIT,
 ): Result<Snowflake[]> {
   const primary = target === undefined || target === null ? [] : [target];
   const extra =
@@ -42,7 +56,7 @@ export function parseTargets(
       return err('INVALID_INPUT', 'Invalid target Snowflake');
     if (!result.includes(normalized)) result.push(normalized);
   }
-  return result.length <= max
+  return result.length <= clampBulkTargetLimit(max)
     ? ok(result)
     : err('INVALID_INPUT', 'Too many targets');
 }

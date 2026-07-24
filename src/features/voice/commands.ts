@@ -3,6 +3,7 @@ import type { CommandDefinition } from '../../commands/contract.js';
 import type { VoiceService } from './service.js';
 import type { VoiceSession } from './contracts.js';
 import { parseVoiceTargets } from './validation.js';
+import { DEFAULT_BULK_TARGET_LIMIT } from '../../domain/parsers.js';
 import {
   fallbackTargetIdentity,
   formatTargetIdentity,
@@ -35,6 +36,7 @@ const data = (
 });
 export function voiceCommands(
   service: VoiceService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): readonly CommandDefinition[] {
   const command: CommandDefinition = {
     name: 'voicekick',
@@ -65,6 +67,7 @@ export function voiceCommands(
       const parsed = parseVoiceTargets(
         interaction.options.getUser('target')?.id,
         interaction.options.getString('additional_targets'),
+        maxBulkTargets,
       );
       if (!parsed.ok) {
         await interaction.editReply(parsed.error.message);

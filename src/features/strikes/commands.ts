@@ -1,6 +1,7 @@
 import { PermissionFlagsBits } from 'discord.js';
 import type { CommandDefinition } from '../../commands/contract.js';
 import { StrikeService, parseAdditionalTargets } from './strike-service.js';
+import { DEFAULT_BULK_TARGET_LIMIT } from '../../domain/parsers.js';
 
 const data = (name: string, description: string, options: unknown[] = []) => ({
   name,
@@ -67,6 +68,7 @@ const guild = (i: { guildId: string | null }) => {
 
 export function strikesCommands(
   service: StrikeService,
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): readonly CommandDefinition[] {
   const result = [
     command(
@@ -78,7 +80,7 @@ export function strikesCommands(
         amount,
       ]),
       async ({ interaction }) => {
-        const ids = targetIds(interaction);
+        const ids = targetIds(interaction, maxBulkTargets);
         if (!ids.ok) {
           await interaction.editReply(ids.error);
           return;
@@ -122,7 +124,7 @@ export function strikesCommands(
         amount,
       ]),
       async ({ interaction }) => {
-        const ids = targetIds(interaction);
+        const ids = targetIds(interaction, maxBulkTargets);
         if (!ids.ok) {
           await interaction.editReply(ids.error);
           return;
@@ -273,14 +275,19 @@ export function strikesCommands(
 
 function targetIds(
   interaction: Parameters<CommandDefinition['execute']>[0]['interaction'],
+  maxBulkTargets: number = DEFAULT_BULK_TARGET_LIMIT,
 ): { ok: true; value: string[] } | { ok: false; error: string } {
   const primary = interaction.options.getUser('target')?.id;
   const parsed = parseAdditionalTargets(
     interaction.options.getString('additional_targets'),
+    maxBulkTargets,
   );
   if (!parsed.ok) return { ok: false, error: parsed.error.message };
   const value = [...new Set([...(primary ? [primary] : []), ...parsed.value])];
-  return value.length > 0 && value.length <= 20
+  return value.length > 0 && value.length <= maxBulkTargets
     ? { ok: true, value }
-    : { ok: false, error: '対象を1～20件指定してください。' };
+    : {
+        ok: false,
+        error: `対象を1～${String(maxBulkTargets)}件指定してください。`,
+      };
 }
