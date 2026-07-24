@@ -1,5 +1,6 @@
 import type { LogDeliveryService } from '../features/logging/service.js';
 import { roleChangeEmbed } from '../features/logging/role-events.js';
+import { isUnauthorized } from '../features/logging/adapters.js';
 import {
   roleTransitionKey,
   type RoleBatchResolver,
@@ -153,6 +154,13 @@ export class MemberRoleChangeService {
           unresolved,
         );
       } catch (error: unknown) {
+        // A Discord authentication failure (401, direct or cause-wrapped) from
+        // the audit fetch is fatal and must propagate; any other resolver
+        // failure stays best-effort (reported operationally, delivered as 不明).
+        if (isUnauthorized(error)) {
+          this.ports.fatal?.(error);
+          throw error;
+        }
         this.ports.onOperationalError?.(error);
         auditResults = new Map<string, RoleTransitionResolution>();
       }
@@ -190,15 +198,10 @@ export class MemberRoleChangeService {
               display ? `${display} (${userId})` : userId,
             );
           } catch (error: unknown) {
-            const status =
-              typeof error === 'object' && error !== null && 'status' in error
-                ? (error as { status?: unknown }).status
-                : undefined;
-            const code =
-              typeof error === 'object' && error !== null && 'code' in error
-                ? (error as { code?: unknown }).code
-                : undefined;
-            if (status === 401 || code === 401) {
+            // A Discord authentication failure (401, direct or cause-wrapped)
+            // is fatal and must propagate; any other display resolution failure
+            // stays best-effort and falls back to the bare userId.
+            if (isUnauthorized(error)) {
               this.ports.fatal?.(error);
               throw error;
             }
@@ -234,15 +237,10 @@ export class MemberRoleChangeService {
       try {
         await this.ports.delivery.deliver(input.guildId, 'server', embed);
       } catch (error: unknown) {
-        const status =
-          typeof error === 'object' && error !== null && 'status' in error
-            ? (error as { status?: unknown }).status
-            : undefined;
-        const code =
-          typeof error === 'object' && error !== null && 'code' in error
-            ? (error as { code?: unknown }).code
-            : undefined;
-        if (status === 401 || code === 401) {
+        // A Discord authentication failure (401, direct or cause-wrapped) is
+        // fatal and must propagate; any other delivery failure stays best-effort
+        // and is isolated so subsequent transition logs still emit.
+        if (isUnauthorized(error)) {
           this.ports.fatal?.(error);
           throw error;
         }

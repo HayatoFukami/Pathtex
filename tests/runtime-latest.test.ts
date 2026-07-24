@@ -375,6 +375,73 @@ describe('runtime recovery and scheduler', () => {
     expect(reply).not.toHaveBeenCalled();
   });
 
+  it('dedupes a redelivered configuration component by interaction ID', async () => {
+    const client = new EventEmitter();
+    const configuration = vi.fn(() => Promise.resolve(true));
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      {
+        ready: () => true,
+        permissionPolicy: policy,
+        onConfigurationComponent: configuration,
+      },
+    );
+    const component = {
+      id: 'cfg1.refresh.any',
+      customId: 'cfg1.refresh.any',
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => true,
+      isModalSubmit: () => false,
+      isButton: () => true,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply: vi.fn(() => Promise.resolve()),
+      message: { createdTimestamp: Date.now() },
+    };
+    // Discord redelivers the same interaction ID on a slow acknowledgement.
+    client.emit('interactionCreate', component);
+    client.emit('interactionCreate', component);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(configuration).toHaveBeenCalledOnce();
+  });
+
+  it('dedupes a redelivered audit pagination button by interaction ID', async () => {
+    const client = new EventEmitter();
+    const tools = vi.fn(() => Promise.resolve(true));
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      { ready: () => true, permissionPolicy: policy, onComponent: tools },
+    );
+    const button = {
+      id: 'audit:next:token:user',
+      customId: 'audit:next:token:user',
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => true,
+      isModalSubmit: () => false,
+      isButton: () => true,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply: vi.fn(() => Promise.resolve()),
+      message: { createdTimestamp: Date.now() },
+    };
+    client.emit('interactionCreate', button);
+    client.emit('interactionCreate', button);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(tools).toHaveBeenCalledOnce();
+  });
+
   it('treats Discord HTTP 401 as fatal intake shutdown', async () => {
     const client = new EventEmitter();
     const onFatal = vi.fn();
@@ -425,6 +492,210 @@ describe('runtime recovery and scheduler', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
     expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('routes a cause-wrapped 401 from the command path to fatal', async () => {
+    const client = new EventEmitter();
+    const onFatal = vi.fn();
+    const reply = vi.fn(() => Promise.resolve());
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    const command = {
+      name: 'test401cause',
+      guildOnly: true,
+      data: {
+        type: 1,
+        name: 'test401cause',
+        description: 'test',
+        contexts: [0],
+        integration_types: [0],
+      },
+      requiredBotPermissions: [],
+      actorNativePermissions: [],
+      authorizationPolicy: 'PUBLIC',
+      deferMode: 'NONE',
+      execute: () =>
+        Promise.reject(
+          Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+        ),
+    } as unknown as import('../src/commands/contract.js').CommandDefinition;
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [command],
+      { ready: () => true, permissionPolicy: policy, onFatal },
+    );
+    client.emit('interactionCreate', {
+      id: 'interaction401cause',
+      commandName: 'test401cause',
+      guildId: 'guild',
+      channelId: 'channel',
+      user: { id: 'user' },
+      isChatInputCommand: () => true,
+      inGuild: () => true,
+      replied: false,
+      deferred: false,
+      reply,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('routes a direct or cause-wrapped 401 from autocomplete to fatal', async () => {
+    for (const error of [
+      Object.assign(new Error('unauthorized'), { status: 401 }),
+      Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+    ]) {
+      const client = new EventEmitter();
+      const onFatal = vi.fn();
+      const policy = {
+        authorize: () => Promise.resolve(true),
+        missingBotPermissions: () => [],
+      };
+      const command = {
+        name: 'auto401',
+        guildOnly: true,
+        data: {
+          type: 1,
+          name: 'auto401',
+          description: 'test',
+          contexts: [0],
+          integration_types: [0],
+        },
+        requiredBotPermissions: [],
+        actorNativePermissions: [],
+        authorizationPolicy: 'PUBLIC',
+        deferMode: 'NONE',
+        execute: () => Promise.resolve(),
+        autocomplete: () => Promise.reject(error),
+      } as unknown as import('../src/commands/contract.js').CommandDefinition;
+      installInteractionIntake(
+        client as unknown as import('discord.js').Client,
+        [command],
+        { ready: () => true, permissionPolicy: policy, onFatal },
+      );
+      client.emit('interactionCreate', {
+        id: 'autocomplete401',
+        commandName: 'auto401',
+        isAutocomplete: () => true,
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
+    }
+  });
+
+  it('routes a 401 from an audit pagination component to fatal', async () => {
+    const client = new EventEmitter();
+    const onFatal = vi.fn();
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      {
+        ready: () => true,
+        permissionPolicy: policy,
+        onFatal,
+        onComponent: () =>
+          Promise.reject(
+            Object.assign(new Error('wrapper'), { cause: { status: 401 } }),
+          ),
+      },
+    );
+    client.emit('interactionCreate', {
+      id: 'audit:next:token:user',
+      customId: 'audit:next:token:user',
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => true,
+      isModalSubmit: () => false,
+      isButton: () => true,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply: vi.fn(() => Promise.resolve()),
+      message: { createdTimestamp: Date.now() },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('routes a 401 from a configuration component to fatal', async () => {
+    const client = new EventEmitter();
+    const onFatal = vi.fn();
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      {
+        ready: () => true,
+        permissionPolicy: policy,
+        onFatal,
+        onConfigurationComponent: () =>
+          Promise.reject(
+            Object.assign(new Error('unauthorized'), { status: 401 }),
+          ),
+      },
+    );
+    client.emit('interactionCreate', {
+      id: 'cfg1.refresh.any',
+      customId: 'cfg1.refresh.any',
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => true,
+      isModalSubmit: () => false,
+      isButton: () => true,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply: vi.fn(() => Promise.resolve()),
+      message: { createdTimestamp: Date.now() },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('routes a cause-wrapped 401 from a configuration modal to fatal', async () => {
+    const client = new EventEmitter();
+    const onFatal = vi.fn();
+    const policy = {
+      authorize: () => Promise.resolve(true),
+      missingBotPermissions: () => [],
+    };
+    installInteractionIntake(
+      client as unknown as import('discord.js').Client,
+      [],
+      {
+        ready: () => true,
+        permissionPolicy: policy,
+        onFatal,
+        onConfigurationModal: () =>
+          Promise.reject(
+            Object.assign(new Error('wrapper'), { cause: { code: 401 } }),
+          ),
+      },
+    );
+    client.emit('interactionCreate', {
+      id: 'cfg1.timezone-submit.any',
+      customId: 'cfg1.timezone-submit.any',
+      guildId: 'guild',
+      user: { id: 'user' },
+      isMessageComponent: () => false,
+      isModalSubmit: () => true,
+      isButton: () => false,
+      isChatInputCommand: () => false,
+      inGuild: () => true,
+      reply: vi.fn(() => Promise.resolve()),
+      fields: { getTextInputValue: () => 'UTC' },
+      message: { createdTimestamp: Date.now() },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(onFatal).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it('uses matching native permission without looking up MOD role, rejects mismatches, and never substitutes MOD for MANAGE_GUILD', async () => {

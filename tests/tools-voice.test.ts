@@ -3,7 +3,10 @@ import { PermissionFlagsBits } from 'discord.js';
 import { ToolsService } from '../src/features/tools/service.js';
 import { VoiceService } from '../src/features/voice/service.js';
 import { parseVoiceTargets } from '../src/features/voice/validation.js';
-import { paginateAuditEntries } from '../src/features/tools/adapters.js';
+import {
+  DiscordToolsAdapter,
+  paginateAuditEntries,
+} from '../src/features/tools/adapters.js';
 import {
   auditCursorRegistrySize,
   cleanupAuditCursorRegistry,
@@ -13,6 +16,7 @@ import {
   validateAuditCustomId,
 } from '../src/features/tools/commands.js';
 import { voiceCommands } from '../src/features/voice/commands.js';
+import { createCommandManifest } from '../src/commands/index.js';
 import type { ButtonInteraction } from 'discord.js';
 import type {
   ToolsPort,
@@ -1266,5 +1270,356 @@ describe('/voicemove reply rendering', () => {
     expect(ix.editReply).toHaveBeenCalledWith(
       '既存のVoiceMoveセッションを先に停止してください',
     );
+  });
+});
+
+describe('voice configurable bulk-target limit (MAX_BULK_TARGETS)', () => {
+  const ids = (count: number) =>
+    Array.from(
+      { length: count },
+      (_, index) => `1234567890123${String(index).padStart(4, '0')}`,
+    );
+
+  it('defaults to twenty targets', () => {
+    const [primary, ...rest] = ids(20);
+    const ok20 = parseVoiceTargets(primary, rest.join(' '));
+    expect(ok20.ok).toBe(true);
+    if (ok20.ok) expect(ok20.value).toHaveLength(20);
+    const [primary21, ...rest21] = ids(21);
+    expect(parseVoiceTargets(primary21, rest21.join(' ')).ok).toBe(false);
+  });
+
+  it('rejects excess targets under a lower configured limit', () => {
+    const [primary, ...rest] = ids(6);
+    expect(parseVoiceTargets(primary, rest.join(' '), 5).ok).toBe(false);
+    const limited = parseVoiceTargets(primary, rest.slice(0, 4).join(' '), 5);
+    expect(limited.ok).toBe(true);
+    if (limited.ok) expect(limited.value).toHaveLength(5);
+  });
+
+  it('preserves the static 19-additional-token and 400-character ceilings', () => {
+    // 19 additional tokens (no primary) stay within the default limit of 20.
+    const nineteen = ids(19);
+    const okNineteen = parseVoiceTargets(undefined, nineteen.join(' '));
+    expect(okNineteen.ok).toBe(true);
+    if (okNineteen.ok) expect(okNineteen.value).toHaveLength(19);
+    // 20 additional tokens breach the static 19-token ceiling even though the
+    // unique count (20) would still satisfy the default bulk-target limit.
+    const twenty = ids(20);
+    const tooManyTokens = parseVoiceTargets(undefined, twenty.join(' '));
+    expect(tooManyTokens.ok).toBe(false);
+    if (!tooManyTokens.ok)
+      expect(tooManyTokens.error.message).toBe('追加対象が不正です');
+    // A >400-character additional string is rejected by the static char ceiling
+    // before any snowflake validation runs.
+    const tooLong = parseVoiceTargets(undefined, 'x'.repeat(401));
+    expect(tooLong.ok).toBe(false);
+    if (!tooLong.ok) expect(tooLong.error.message).toBe('追加対象が不正です');
+  });
+
+  it('VoiceService enforces the injected limit before any Discord access', async () => {
+    const member = vi.fn().mockResolvedValue(null);
+    const port: VoicePort = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member,
+      dm: vi.fn(),
+      writeCase: vi.fn(),
+    };
+    const twenty = ids(20);
+    // Default ceiling of 20 accepts twenty unique targets.
+    const okDefault = await new VoiceService(port).voiceKickTargets(
+      'g',
+      'actor',
+      twenty,
+    );
+    expect(okDefault.ok).toBe(true);
+
+    // A configured ceiling of 2 rejects three unique targets before Discord.
+    member.mockClear();
+    const limited = await new VoiceService(
+      port,
+      undefined,
+      () => new Date(),
+      undefined,
+      2,
+    ).voiceKickTargets('g', 'actor', ids(3));
+    expect(limited.ok).toBe(false);
+    if (!limited.ok) expect(limited.error.message).toBe('対象は最大2件です');
+    expect(member).not.toHaveBeenCalled();
+
+    // A malformed (non-integer) configuration falls back to the default of 20
+    // and can never raise the static ceiling.
+    member.mockClear();
+    const malformed = await new VoiceService(
+      port,
+      undefined,
+      () => new Date(),
+      undefined,
+      Number.NaN,
+    ).voiceKickTargets('g', 'actor', twenty);
+    expect(malformed.ok).toBe(true);
+  });
+
+  it('threads the configured limit through the voicekick command', async () => {
+    const voiceKickTargets = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { success: [], failed: [], outcomes: [] },
+    });
+    const service = { voiceKickTargets } as unknown as VoiceService;
+    const primary = '12345678901234580';
+    const additional = '12345678901234581 12345678901234582';
+    const makeInteraction = () => ({
+      guildId: '12345678901234567',
+      user: { id: '12345678901234568' },
+      options: {
+        getUser: () => ({ id: primary }),
+        getString: () => additional,
+      },
+      editReply: vi.fn(),
+    });
+
+    const limited = voiceCommands(service, 2).find(
+      (c) => c.name === 'voicekick',
+    );
+    const limitedInteraction = makeInteraction();
+    await limited?.execute({ interaction: limitedInteraction } as never);
+    expect(limitedInteraction.editReply).toHaveBeenCalledWith(
+      '対象は最大2件です',
+    );
+    expect(voiceKickTargets).not.toHaveBeenCalled();
+
+    const defaultCommand = voiceCommands(service).find(
+      (c) => c.name === 'voicekick',
+    );
+    const defaultInteraction = makeInteraction();
+    await defaultCommand?.execute({ interaction: defaultInteraction } as never);
+    expect(voiceKickTargets).toHaveBeenCalled();
+  });
+
+  it('VoiceService rejects an empty target list before any Discord access', async () => {
+    const member = vi.fn().mockResolvedValue(null);
+    const port: VoicePort = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member,
+      dm: vi.fn(),
+      writeCase: vi.fn(),
+    };
+    const result = await new VoiceService(port).voiceKickTargets(
+      'g',
+      'actor',
+      [],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.message).toBe('対象を1件以上指定してください');
+    expect(member).not.toHaveBeenCalled();
+  });
+
+  it('composition injects a non-default MAX_BULK_TARGETS into the VoiceService (index.ts wiring)', async () => {
+    const member = vi.fn().mockResolvedValue(null);
+    const port: VoicePort = {
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      move: vi.fn(),
+      createTemporaryChannel: vi.fn(),
+      deleteChannel: vi.fn(),
+      members: vi.fn(),
+      member,
+      dm: vi.fn(),
+      writeCase: vi.fn(),
+    };
+    // Mirror the src/index.ts production composition: the VoiceService receives
+    // the configured ceiling (config.MAX_BULK_TARGETS) as its 5th constructor
+    // argument. A non-default value (2) stands in for the deployed config.
+    const voice = new VoiceService(
+      port,
+      undefined,
+      () => new Date(),
+      undefined,
+      2,
+    );
+    // Compose the manifest WITHOUT threading the limit into the command factory
+    // (it defaults to 20) so the command parser allows the three-target batch;
+    // only the service-level block fed by the injected config can reject it.
+    // This fails if the production composition stops injecting MAX_BULK_TARGETS
+    // into the VoiceService constructor.
+    const commands = createCommandManifest(
+      { health: () => Promise.resolve(true) },
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      voice,
+      [],
+    );
+    const voicekick = commands.find((command) => command.name === 'voicekick');
+    expect(voicekick).toBeDefined();
+    const interaction = {
+      guildId: '12345678901234567',
+      user: { id: '12345678901234568' },
+      options: {
+        getUser: () => ({ id: '12345678901234580' }),
+        getString: () => '12345678901234581 12345678901234582',
+      },
+      editReply: vi.fn(),
+    };
+    await voicekick?.execute({ interaction } as never);
+    expect(interaction.editReply).toHaveBeenCalledWith('対象は最大2件です');
+    expect(member).not.toHaveBeenCalled();
+  });
+});
+
+describe('DiscordToolsAdapter — null-fallback 401 propagation (shared classifier)', () => {
+  const snowflake = '12345678901234567';
+  const direct401 = () =>
+    Object.assign(new Error('unauthorized'), { status: 401 });
+  const wrapped401 = () =>
+    Object.assign(new Error('wrapper'), { cause: { status: 401 } });
+  const notFound = () => Object.assign(new Error('not found'), { status: 404 });
+
+  it('propagates a direct 401 from user lookup instead of returning null', async () => {
+    const client = { users: { fetch: vi.fn().mockRejectedValue(direct401()) } };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.user(snowflake)).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from user lookup', async () => {
+    const client = {
+      users: { fetch: vi.fn().mockRejectedValue(wrapped401()) },
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.user(snowflake)).rejects.toMatchObject({
+      cause: { status: 401 },
+    });
+  });
+
+  it('still resolves null for a non-auth user lookup failure (best-effort)', async () => {
+    const client = { users: { fetch: vi.fn().mockRejectedValue(notFound()) } };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.user(snowflake)).resolves.toBeNull();
+  });
+
+  it('propagates a direct 401 from invite lookup instead of returning null', async () => {
+    const client = { fetchInvite: vi.fn().mockRejectedValue(direct401()) };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.invite('code')).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from invite lookup', async () => {
+    const client = { fetchInvite: vi.fn().mockRejectedValue(wrapped401()) };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.invite('code')).rejects.toMatchObject({
+      cause: { status: 401 },
+    });
+  });
+
+  it('still resolves null for a non-auth invite lookup failure (best-effort)', async () => {
+    const client = { fetchInvite: vi.fn().mockRejectedValue(notFound()) };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.invite('code')).resolves.toBeNull();
+  });
+
+  it('propagates a direct 401 from guild preview lookup instead of returning null', async () => {
+    const client = {
+      fetchGuildPreview: vi.fn().mockRejectedValue(direct401()),
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.preview(snowflake)).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from guild preview lookup', async () => {
+    const client = {
+      fetchGuildPreview: vi.fn().mockRejectedValue(wrapped401()),
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.preview(snowflake)).rejects.toMatchObject({
+      cause: { status: 401 },
+    });
+  });
+
+  it('still resolves null for a non-auth guild preview failure (best-effort)', async () => {
+    const client = {
+      fetchGuildPreview: vi.fn().mockRejectedValue(notFound()),
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.preview(snowflake)).resolves.toBeNull();
+  });
+
+  it('propagates a direct 401 from getRole role fetch instead of ROLE_NOT_FOUND', async () => {
+    const client = {
+      guilds: {
+        cache: [{ roles: { fetch: vi.fn().mockRejectedValue(direct401()) } }],
+      },
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.getRole(snowflake)).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from getRole role fetch', async () => {
+    const client = {
+      guilds: {
+        cache: [{ roles: { fetch: vi.fn().mockRejectedValue(wrapped401()) } }],
+      },
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.getRole(snowflake)).rejects.toMatchObject({
+      cause: { status: 401 },
+    });
+  });
+
+  it('propagates a direct 401 from sameGuild role fetch instead of returning false', async () => {
+    const client = {
+      channels: {
+        fetch: vi.fn().mockResolvedValue({
+          guild: {
+            roles: {
+              cache: { has: () => false },
+              fetch: vi.fn().mockRejectedValue(direct401()),
+            },
+          },
+        }),
+      },
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.sameGuild('chan', snowflake)).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from sameGuild role fetch', async () => {
+    const client = {
+      channels: {
+        fetch: vi.fn().mockResolvedValue({
+          guild: {
+            roles: {
+              cache: { has: () => false },
+              fetch: vi.fn().mockRejectedValue(wrapped401()),
+            },
+          },
+        }),
+      },
+    };
+    const adapter = new DiscordToolsAdapter(client as never);
+    await expect(adapter.sameGuild('chan', snowflake)).rejects.toMatchObject({
+      cause: { status: 401 },
+    });
   });
 });

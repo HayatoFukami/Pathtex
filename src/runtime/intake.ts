@@ -13,6 +13,7 @@ import type { CommandDefinition } from '../commands/contract.js';
 import { InteractionDedupe } from './dedupe.js';
 import type { PermissionPolicy } from './policy.js';
 import { ConfigurationOverviewError } from '../features/configuration/service.js';
+import { isUnauthorized } from '../features/logging/adapters.js';
 
 export interface IntakeOptions {
   readonly ready: () => boolean;
@@ -36,9 +37,6 @@ const tokenFailure = (error: unknown): boolean => {
   const code = (error as { code?: number }).code;
   return code === 10062 || code === 10015;
 };
-const httpAuthFailure = (error: unknown): boolean =>
-  (error as { status?: number; code?: number }).status === 401 ||
-  (error as { code?: number }).code === 401;
 const safeErrorMessage = (error: unknown): string | undefined => {
   if (!(error instanceof Error)) return undefined;
   return error.message
@@ -109,6 +107,16 @@ export function installInteractionIntake(
   const dedupe = options.dedupe ?? new InteractionDedupe();
   let accepting = true;
   const active = new Set<Promise<void>>();
+  // Routes a direct or cause-wrapped Discord HTTP 401 to the fatal handler so an
+  // authentication failure surfaced from any interaction path (command,
+  // component, modal, autocomplete) shuts the runtime down instead of being
+  // merely logged. Non-auth errors are left to the caller's logging.
+  const routeFatal = (error: unknown): void => {
+    if (isUnauthorized(error))
+      options.onFatal?.(
+        error instanceof Error ? error : new Error('Discord HTTP 401'),
+      );
+  };
   const handleAutocomplete = (raw: Interaction): void => {
     if (!accepting || !options.ready() || !raw.isAutocomplete()) return;
     const command = byName.get(raw.commandName);
@@ -122,6 +130,7 @@ export function installInteractionIntake(
         },
         'Autocomplete failed',
       );
+      routeFatal(error);
     });
     active.add(task);
     void task.finally(() => active.delete(task)).catch(() => undefined);
@@ -137,6 +146,9 @@ export function installInteractionIntake(
       parts[3] !== interaction.user.id
     )
       return;
+    // Dedupe a redelivered component interaction so pagination is not applied
+    // twice for the same interaction ID.
+    if (!dedupe.accept(interaction.id)) return;
     const task = (async () => {
       if (Date.now() - interaction.message.createdTimestamp > 15 * 60 * 1000) {
         await interaction.reply({
@@ -159,6 +171,7 @@ export function installInteractionIntake(
         },
         'Component failed',
       );
+      routeFatal(error);
     });
     active.add(task);
     void task.finally(() => active.delete(task)).catch(() => undefined);
@@ -169,6 +182,9 @@ export function installInteractionIntake(
     if (!accepting || !options.ready() || !interaction.inGuild()) return;
     const configurationHandler = options.onConfigurationComponent;
     const modalHandler = options.onConfigurationModal;
+    // Dedupe a redelivered configuration component/modal so a dashboard action
+    // is never applied twice for the same interaction ID.
+    if (!dedupe.accept(interaction.id)) return;
     const task = (async () => {
       const handled = interaction.isModalSubmit()
         ? modalHandler
@@ -191,6 +207,7 @@ export function installInteractionIntake(
         },
         'Component failed',
       );
+      routeFatal(error);
     });
     active.add(task);
     void task.finally(() => active.delete(task)).catch(() => undefined);
@@ -295,7 +312,7 @@ export function installInteractionIntake(
         'Interaction failed',
       );
       if (tokenFailure(error)) return;
-      if (httpAuthFailure(error)) {
+      if (isUnauthorized(error)) {
         options.onFatal?.(
           error instanceof Error ? error : new Error('Discord HTTP 401'),
         );
@@ -314,7 +331,7 @@ export function installInteractionIntake(
           },
           'Interaction response failed',
         );
-        if (httpAuthFailure(responseError))
+        if (isUnauthorized(responseError))
           options.onFatal?.(
             responseError instanceof Error
               ? responseError

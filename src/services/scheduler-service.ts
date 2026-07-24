@@ -155,7 +155,9 @@ export class SchedulerService {
     if (code === 'NOT_APPLIED' || code === 'ALREADY_APPLIED')
       return 'IDEMPOTENT_SUCCESS';
     if (status === 404) return 'IDEMPOTENT_SUCCESS';
-    if (status === 401) return 'FATAL';
+    // A direct or cause-wrapped `status === 401` OR `code === 401` is a fatal
+    // Discord authentication failure, not a retryable job outcome.
+    if (status === 401 || code === 401) return 'FATAL';
     if (status === 403 || status === 400 || status === 429) return 'FAILED';
     if (status === undefined || status >= 500) return 'RETRYABLE';
     return 'FAILED';
@@ -178,7 +180,10 @@ export class SchedulerService {
         if (!completed.ok) continue;
       } catch (error: unknown) {
         const classification = this.classify(error);
-        if (this.status(error) === 401) {
+        if (classification === 'FATAL') {
+          // A direct/cause-wrapped status OR code 401 is fatal: escalate to the
+          // runtime shutdown handler and abandon the job WITHOUT fail/requeue
+          // bookkeeping, so an auth failure is never mistaken for retryable work.
           this.onFatal?.(error);
           throw error;
         }

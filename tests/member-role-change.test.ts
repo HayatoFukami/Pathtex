@@ -1007,3 +1007,144 @@ describe('ora-1 blocker (1): pre-await captured values', () => {
     expect(input.targetDisplay).toBe('TestUser');
   });
 });
+
+describe('MemberRoleChangeService — shared cause-aware 401 propagation', () => {
+  const direct401 = () =>
+    Object.assign(new Error('unauthorized'), { status: 401 });
+  const wrapped401 = () =>
+    Object.assign(new Error('wrapper'), { cause: { status: 401 } });
+  const wrappedCode401 = () =>
+    Object.assign(new Error('wrapper'), { cause: { code: 401 } });
+
+  const matchedExternalResolver = (executorUserId: string) =>
+    makeResolver(
+      new Map([
+        [
+          `${roleA}:ADD`,
+          {
+            status: 'matched' as const,
+            executorUserId,
+            auditEntryId: 'x',
+          },
+        ],
+      ]),
+    );
+
+  it('propagates a direct 401 from the audit resolver instead of reporting operationally', async () => {
+    const operationalErrors: unknown[] = [];
+    const fatalCalls: unknown[] = [];
+    const resolver = {
+      resolve: vi.fn().mockRejectedValue(direct401()),
+    } as unknown as RoleBatchResolver;
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const service = new MemberRoleChangeService({
+      delivery: { deliver },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver,
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      onOperationalError: (e) => operationalErrors.push(e),
+      fatal: (e) => fatalCalls.push(e),
+    });
+    await expect(
+      service.process({ ...baseInput, afterRoleIds: [roleA] }),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(fatalCalls).toHaveLength(1);
+    expect(operationalErrors).toEqual([]);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from the audit resolver', async () => {
+    const fatalCalls: unknown[] = [];
+    const operationalErrors: unknown[] = [];
+    const resolver = {
+      resolve: vi.fn().mockRejectedValue(wrapped401()),
+    } as unknown as RoleBatchResolver;
+    const service = new MemberRoleChangeService({
+      delivery: { deliver: vi.fn().mockResolvedValue(undefined) },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver,
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      onOperationalError: (e) => operationalErrors.push(e),
+      fatal: (e) => fatalCalls.push(e),
+    });
+    await expect(
+      service.process({ ...baseInput, afterRoleIds: [roleA] }),
+    ).rejects.toMatchObject({ cause: { status: 401 } });
+    expect(fatalCalls).toHaveLength(1);
+    expect(operationalErrors).toEqual([]);
+  });
+
+  it('still reports a non-auth resolver failure operationally and delivers as 不明', async () => {
+    const operationalErrors: unknown[] = [];
+    const resolverError = new Error('audit unavailable');
+    const resolver = {
+      resolve: vi.fn().mockRejectedValue(resolverError),
+    } as unknown as RoleBatchResolver;
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const service = new MemberRoleChangeService({
+      delivery: { deliver },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver,
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      onOperationalError: (e) => operationalErrors.push(e),
+    });
+    await service.process({ ...baseInput, afterRoleIds: [roleA] });
+    expect(operationalErrors).toEqual([resolverError]);
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from executor display resolution', async () => {
+    const externalExecutor = '12345678901234570';
+    const fatalCalls: unknown[] = [];
+    const service = new MemberRoleChangeService({
+      delivery: { deliver: vi.fn().mockResolvedValue(undefined) },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver: matchedExternalResolver(externalExecutor),
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      resolveExecutorDisplay: vi.fn().mockRejectedValue(wrapped401()),
+      fatal: (e) => fatalCalls.push(e),
+    });
+    await expect(
+      service.process({ ...baseInput, afterRoleIds: [roleA] }),
+    ).rejects.toMatchObject({ cause: { status: 401 } });
+    expect(fatalCalls).toHaveLength(1);
+  });
+
+  it('propagates a plain-object cause-wrapped code 401 from executor display resolution', async () => {
+    const externalExecutor = '12345678901234570';
+    const fatalCalls: unknown[] = [];
+    const service = new MemberRoleChangeService({
+      delivery: { deliver: vi.fn().mockResolvedValue(undefined) },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver: matchedExternalResolver(externalExecutor),
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      resolveExecutorDisplay: vi.fn().mockRejectedValue(wrappedCode401()),
+      fatal: (e) => fatalCalls.push(e),
+    });
+    await expect(
+      service.process({ ...baseInput, afterRoleIds: [roleA] }),
+    ).rejects.toMatchObject({ cause: { code: 401 } });
+    expect(fatalCalls).toHaveLength(1);
+  });
+
+  it('propagates a plain-object cause-wrapped 401 from delivery', async () => {
+    const fatalCalls: unknown[] = [];
+    const service = new MemberRoleChangeService({
+      delivery: { deliver: vi.fn().mockRejectedValue(wrapped401()) },
+      timezone: vi.fn().mockResolvedValue('UTC'),
+      resolver: makeResolver(new Map()),
+      roleCorrelation: new RoleCorrelationCache(),
+      botUserId: () => botUserId,
+      fatal: (e) => fatalCalls.push(e),
+    });
+    await expect(
+      service.process({ ...baseInput, afterRoleIds: [roleA] }),
+    ).rejects.toMatchObject({ cause: { status: 401 } });
+    expect(fatalCalls).toHaveLength(1);
+  });
+});

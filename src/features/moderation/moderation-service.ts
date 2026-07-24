@@ -23,6 +23,7 @@ import {
   type TargetIdentity,
 } from '../../services/target-identity.js';
 import { createCanonicalUserCase } from '../../services/case-service.js';
+import { isUnauthorized } from '../logging/adapters.js';
 
 const DAY = 86_400;
 const validId = (id: string) => SnowflakeSchema.safeParse(id).success;
@@ -892,7 +893,11 @@ export class ModerationService {
     if (updated.ok && this.deps.modlog?.editReason)
       try {
         await this.deps.modlog.editReason(guildId, updated.value.id, reason);
-      } catch {
+      } catch (error) {
+        // A Discord authentication failure (401, direct or cause-wrapped) is
+        // fatal and must propagate; any other modlog edit failure stays
+        // best-effort because the DB update remains authoritative.
+        if (isUnauthorized(error)) throw error;
         /* DB update remains authoritative. */
       }
     return updated;
@@ -985,6 +990,10 @@ export class ModerationService {
           );
           deleted += batch.length;
         } catch (error) {
+          // A Discord authentication failure (401, direct or cause-wrapped) is
+          // fatal and must propagate rather than be tallied as a best-effort
+          // deletion failure.
+          if (isUnauthorized(error)) throw error;
           const status =
             typeof error === 'object' && error !== null && 'status' in error
               ? (error as { status?: number }).status
@@ -1009,6 +1018,10 @@ export class ModerationService {
           await this.deps.discord.deleteMessage(input.channelId, message.id);
           deleted++;
         } catch (error) {
+          // A Discord authentication failure (401, direct or cause-wrapped) is
+          // fatal and must propagate rather than be tallied as a best-effort
+          // deletion failure.
+          if (isUnauthorized(error)) throw error;
           const status =
             typeof error === 'object' && error !== null && 'status' in error
               ? (error as { status?: number }).status

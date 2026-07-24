@@ -6,6 +6,7 @@ import type {
   MemberTool,
   ToolsPort,
 } from './contracts.js';
+import { isUnauthorized } from '../logging/adapters.js';
 const auditActions: Record<string, number> = {
   CREATE_INSTANT_INVITE: 1,
   KICK: 20,
@@ -85,7 +86,13 @@ export class DiscordToolsAdapter
           ...(avatarUrl ? { avatarUrl } : {}),
         };
       })
-      .catch(() => null);
+      .catch((error: unknown) => {
+        // A Discord authentication failure (401, direct or cause-wrapped) is
+        // fatal and must propagate; any other lookup failure stays best-effort
+        // and resolves to null.
+        if (isUnauthorized(error)) throw error;
+        return null;
+      });
   }
   public async invite(code: string) {
     return this.client
@@ -125,7 +132,13 @@ export class DiscordToolsAdapter
             : {}),
         };
       })
-      .catch(() => null);
+      .catch((error: unknown) => {
+        // A Discord authentication failure (401, direct or cause-wrapped) is
+        // fatal and must propagate; any other lookup failure stays best-effort
+        // and resolves to null.
+        if (isUnauthorized(error)) throw error;
+        return null;
+      });
   }
   public async preview(guildId: string) {
     return this.client
@@ -141,13 +154,27 @@ export class DiscordToolsAdapter
           ...(icon ? { icon } : {}),
         };
       })
-      .catch(() => null);
+      .catch((error: unknown) => {
+        // A Discord authentication failure (401, direct or cause-wrapped) is
+        // fatal and must propagate; any other lookup failure stays best-effort
+        // and resolves to null.
+        if (isUnauthorized(error)) throw error;
+        return null;
+      });
   }
   public async getRole(
     id: string,
   ): Promise<{ id: string; mentionable: boolean; position: number }> {
     const role = await this.client.guilds.cache.reduce<Promise<Role | null>>(
-      async (found, g) => (await found) ?? g.roles.fetch(id).catch(() => null),
+      async (found, g) =>
+        (await found) ??
+        g.roles.fetch(id).catch((error: unknown) => {
+          // A 401 (direct or cause-wrapped) is a fatal authentication failure
+          // and must propagate; any other per-guild fetch failure stays
+          // best-effort and resolves to null so the search continues.
+          if (isUnauthorized(error)) throw error;
+          return null;
+        }),
       Promise.resolve(null),
     );
     if (!role) throw new Error('ROLE_NOT_FOUND');
@@ -212,7 +239,13 @@ export class DiscordToolsAdapter
     if (!channel || !('guild' in channel)) return false;
     return (
       channel.guild.roles.cache.has(roleId) ||
-      (await channel.guild.roles.fetch(roleId).catch(() => null)) !== null
+      (await channel.guild.roles.fetch(roleId).catch((error: unknown) => {
+        // A 401 (direct or cause-wrapped) is a fatal authentication failure and
+        // must propagate; any other fetch failure stays best-effort and resolves
+        // to null so the probe reports "not same guild".
+        if (isUnauthorized(error)) throw error;
+        return null;
+      })) !== null
     );
   }
   public canMentionEveryone(): Promise<boolean> {
