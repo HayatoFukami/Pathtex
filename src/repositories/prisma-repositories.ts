@@ -1024,7 +1024,11 @@ export class PrismaSnapshotRepository implements SnapshotRepository {
             content: input.content,
             attachments: prismaJson(input.attachments),
             embedsSummary: prismaJson(input.embedsSummary),
-            createdAt: input.createdAt ?? new Date(),
+            // Preserve the original creation time on edit: only override it when
+            // the caller explicitly supplies one. An `messageUpdate` upsert that
+            // omits `createdAt` must never reset the snapshot's creation time to
+            // the edit time.
+            ...(input.createdAt ? { createdAt: input.createdAt } : {}),
             editedAt: input.editedAt ?? null,
             expiresAt: input.expiresAt,
           },
@@ -1071,6 +1075,15 @@ export class PrismaSnapshotRepository implements SnapshotRepository {
   public async deleteMessage(messageId: string) {
     SnowflakeSchema.parse(messageId);
     await this.db.messageSnapshot.deleteMany({ where: { messageId } });
+  }
+  public async deleteMessages(messageIds: string[]) {
+    messageIds.forEach((id) => SnowflakeSchema.parse(id));
+    if (messageIds.length === 0) return 0;
+    return (
+      await this.db.messageSnapshot.deleteMany({
+        where: { messageId: { in: messageIds } },
+      })
+    ).count;
   }
   public async deleteMember(guildId: string, userId: string) {
     SnowflakeSchema.parse(guildId);

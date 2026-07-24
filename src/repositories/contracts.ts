@@ -763,6 +763,8 @@ export interface SnapshotRepository {
   upsertMember(input: MemberSnapshotInput): Promise<MemberSnapshotDto>;
   deleteExpired(now?: Date): Promise<number>;
   deleteMessage(messageId: string): Promise<void>;
+  /** Bulk deletion for `messageDeleteBulk`; returns the number of rows removed. */
+  deleteMessages(messageIds: string[]): Promise<number>;
   deleteMember(guildId: string, userId: string): Promise<void>;
   getMessage(messageId: string): Promise<SnapshotDto | null>;
   getMessages(messageIds: string[]): Promise<SnapshotDto[]>;

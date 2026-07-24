@@ -64,6 +64,14 @@ export class SnapshotService {
     await this.repository.deleteMessage(id);
     return ok(undefined);
   }
+  public async deleteMessages(ids: string[]): Promise<Result<number>> {
+    if (
+      !Array.isArray(ids) ||
+      ids.some((id) => !SnowflakeSchema.safeParse(id).success)
+    )
+      return err('INVALID_INPUT', 'Invalid message IDs');
+    return ok(await this.repository.deleteMessages(ids));
+  }
   public async deleteMember(
     guildId: string,
     userId: string,

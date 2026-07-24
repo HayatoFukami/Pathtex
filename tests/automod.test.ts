@@ -173,7 +173,9 @@ describe('AutoMod', () => {
       snapshots: {
         saveMessage,
         getMessage: vi.fn(),
+        getMessages: vi.fn(),
         deleteMessage: vi.fn(),
+        deleteMessages: vi.fn(),
         saveMember: vi.fn(),
         getMembersForUser: vi.fn(),
       },

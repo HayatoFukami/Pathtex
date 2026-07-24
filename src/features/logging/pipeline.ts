@@ -5,8 +5,14 @@ import { serverEmbed, type MessageView } from './events.js';
 import type {
   JsonValue,
   MemberSnapshotDto,
+  SnapshotDto,
 } from '../../repositories/contracts.js';
 import type { Logger } from 'pino';
+
+/** Default message-snapshot retention (spec `01-platform-and-data.md §4.17`:
+ * Message Snapshot 既定7日). The pipeline writes `expiresAt = now + retention`
+ * and the retention purge later removes rows past their `expiresAt`. */
+export const DEFAULT_MESSAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Gateway orchestration keeps ordering here; domain services remain Discord agnostic. */
 export interface AutomodPort {
@@ -17,7 +23,9 @@ export interface LoggingPipelinePorts {
     SnapshotService,
     | 'saveMessage'
     | 'getMessage'
+    | 'getMessages'
     | 'deleteMessage'
+    | 'deleteMessages'
     | 'saveMember'
     | 'getMembersForUser'
   >;
@@ -25,10 +33,38 @@ export interface LoggingPipelinePorts {
   events: LoggingEventAdapter;
   delivery: LogDeliveryService;
   timezone(guildId: string): Promise<string>;
+  /** Configurable message-snapshot retention in milliseconds. Defaults to
+   * `DEFAULT_MESSAGE_RETENTION_MS` (7 days) when not supplied. */
+  messageRetentionMs?: number;
   logger?: Logger;
 }
 export class LoggingEventPipeline {
-  public constructor(private readonly ports: LoggingPipelinePorts) {}
+  private readonly messageRetentionMs: number;
+  public constructor(private readonly ports: LoggingPipelinePorts) {
+    this.messageRetentionMs =
+      ports.messageRetentionMs ?? DEFAULT_MESSAGE_RETENTION_MS;
+  }
+  private snapshotExpiry(from = Date.now()): Date {
+    return new Date(from + this.messageRetentionMs);
+  }
+  /** Maps a persisted snapshot back to the gateway-agnostic `MessageView`. */
+  private static toMessageView(snapshot: SnapshotDto): MessageView {
+    return {
+      guildId: snapshot.guildId,
+      channelId: snapshot.channelId,
+      messageId: snapshot.messageId,
+      author: snapshot.authorDisplay,
+      authorId: snapshot.authorUserId,
+      content: snapshot.content,
+      attachments: Array.isArray(snapshot.attachments)
+        ? (snapshot.attachments as (string | Record<string, unknown>)[])
+        : [],
+      embeds: Array.isArray(snapshot.embedsSummary)
+        ? (snapshot.embedsSummary as (string | Record<string, unknown>)[])
+        : [],
+      createdAt: snapshot.createdAt,
+    };
+  }
   private failure(event: string, error: unknown, message: MessageView): void {
     this.ports.logger?.error(
       {
@@ -55,7 +91,7 @@ export class LoggingEventPipeline {
       embedsSummary: [
         ...(message.embeds ?? []).slice(0, 10),
       ] as unknown as JsonValue,
-      expiresAt: new Date(Date.now() + 604800000),
+      expiresAt: this.snapshotExpiry(),
     });
     if (this.ports.automod) {
       try {
@@ -76,23 +112,7 @@ export class LoggingEventPipeline {
     );
     const persistedBefore =
       old.ok && old.value
-        ? {
-            guildId: old.value.guildId,
-            channelId: old.value.channelId,
-            messageId: old.value.messageId,
-            author: old.value.authorDisplay,
-            authorId: old.value.authorUserId,
-            content: old.value.content,
-            attachments: Array.isArray(old.value.attachments)
-              ? (old.value.attachments as (string | Record<string, unknown>)[])
-              : [],
-            embeds: Array.isArray(old.value.embedsSummary)
-              ? (old.value.embedsSummary as (
-                  string | Record<string, unknown>
-                )[])
-              : [],
-            createdAt: old.value.createdAt,
-          }
+        ? LoggingEventPipeline.toMessageView(old.value)
         : before;
     if (this.ports.automod) {
       try {
@@ -125,8 +145,13 @@ export class LoggingEventPipeline {
       embedsSummary: [
         ...(after.embeds ?? []).slice(0, 10),
       ] as unknown as JsonValue,
+      // Preserve the original creation time: carry forward the persisted
+      // snapshot's `createdAt` when one exists, otherwise fall back to the
+      // gateway message's own creation time. The edit must never reset the
+      // snapshot's creation time to the edit time.
+      createdAt: old.ok && old.value ? old.value.createdAt : after.createdAt,
       editedAt: new Date(),
-      expiresAt: new Date(Date.now() + 604800000),
+      expiresAt: this.snapshotExpiry(),
     });
   }
   public async messageDelete(
@@ -139,25 +164,7 @@ export class LoggingEventPipeline {
     if (!persisted && messageId) {
       const snapshot = await this.ports.snapshots.getMessage(messageId);
       if (snapshot.ok && snapshot.value)
-        persisted = {
-          guildId: snapshot.value.guildId,
-          channelId: snapshot.value.channelId,
-          messageId: snapshot.value.messageId,
-          author: snapshot.value.authorDisplay,
-          authorId: snapshot.value.authorUserId,
-          content: snapshot.value.content,
-          attachments: Array.isArray(snapshot.value.attachments)
-            ? (snapshot.value.attachments as (
-                string | Record<string, unknown>
-              )[])
-            : [],
-          embeds: Array.isArray(snapshot.value.embedsSummary)
-            ? (snapshot.value.embedsSummary as (
-                string | Record<string, unknown>
-              )[])
-            : [],
-          createdAt: snapshot.value.createdAt,
-        };
+        persisted = LoggingEventPipeline.toMessageView(snapshot.value);
     }
     const embed = await this.ports.events.messageDelete(persisted, occurredAt);
     await this.ports.delivery.deliver(guildId, 'message', embed);
@@ -174,32 +181,18 @@ export class LoggingEventPipeline {
     const known = new Map(
       cached.map((message) => [message.messageId, message]),
     );
-    await Promise.all(
-      ids.map(async (id) => {
-        if (known.has(id)) return;
-        const result = await this.ports.snapshots.getMessage(id);
-        if (result.ok && result.value)
-          known.set(id, {
-            guildId: result.value.guildId,
-            channelId: result.value.channelId,
-            messageId: result.value.messageId,
-            author: result.value.authorDisplay,
-            authorId: result.value.authorUserId,
-            content: result.value.content,
-            attachments: Array.isArray(result.value.attachments)
-              ? (result.value.attachments as (
-                  string | Record<string, unknown>
-                )[])
-              : [],
-            embeds: Array.isArray(result.value.embedsSummary)
-              ? (result.value.embedsSummary as (
-                  string | Record<string, unknown>
-                )[])
-              : [],
-            createdAt: result.value.createdAt,
-          });
-      }),
-    );
+    // Bulk-load every snapshot the gateway cache does not already hold in a
+    // single query instead of one `getMessage` per id.
+    const missing = ids.filter((id) => !known.has(id));
+    if (missing.length > 0) {
+      const result = await this.ports.snapshots.getMessages(missing);
+      if (result.ok)
+        for (const snapshot of result.value)
+          known.set(
+            snapshot.messageId,
+            LoggingEventPipeline.toMessageView(snapshot),
+          );
+    }
     const merged = ids
       .map((id) => known.get(id))
       .filter((message): message is MessageView => message !== undefined);
@@ -211,7 +204,8 @@ export class LoggingEventPipeline {
       occurredAt,
     );
     await this.ports.delivery.deliver(guildId, 'message', embed);
-    await Promise.all(ids.map((id) => this.ports.snapshots.deleteMessage(id)));
+    // Bulk-delete every snapshot in a single query instead of one delete per id.
+    if (ids.length > 0) await this.ports.snapshots.deleteMessages([...ids]);
   }
   public async server(
     guildId: string,

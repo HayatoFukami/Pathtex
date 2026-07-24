@@ -1880,7 +1880,9 @@ describe('Phase 4A userUpdate fanout', () => {
     const snapshots = {
       saveMessage: vi.fn().mockResolvedValue({ ok: true, value: {} }),
       getMessage: vi.fn().mockResolvedValue({ ok: true, value: null }),
+      getMessages: vi.fn().mockResolvedValue({ ok: true, value: [] }),
       deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+      deleteMessages: vi.fn().mockResolvedValue({ ok: true, value: 0 }),
       saveMember,
       getMembersForUser,
     };
